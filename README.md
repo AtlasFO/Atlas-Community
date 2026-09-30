@@ -13,7 +13,7 @@
   <img alt="Python 3.11 or newer" src="https://img.shields.io/badge/python-3.11%2B-3776AB">
   <img alt="Runs on Ubuntu 24.04 and Debian 12" src="https://img.shields.io/badge/runs%20on-Ubuntu%2024.04%20%7C%20Debian%2012-E95420">
   <img alt="Works with any OpenAI-compatible model" src="https://img.shields.io/badge/models-any%20OpenAI--compatible-0EA5E9">
-  <img alt="License: PolyForm Noncommercial 1.0.0" src="https://img.shields.io/badge/license-PolyForm%20Noncommercial-6B7280">
+  <img alt="License: PolyForm Noncommercial 1.0.0 or PolyForm Free Trial 1.0.0" src="https://img.shields.io/badge/license-PolyForm%20Noncommercial%20%7C%20Free%20Trial-6B7280">
 </p>
 
 <p align="center">
@@ -191,8 +191,8 @@ Per case: **Overview** (one status band: run state, questions, findings, indicat
 
 ## License
 
-[PolyForm Noncommercial 1.0.0](LICENSE): free for personal, home and evaluation use. Commercial or organizational (professional or enterprise) use requires a separate license from the copyright holder; open a [GitHub issue](../../issues) to discuss terms.
+Atlas is source-available and free for personal and evaluation use: personal use under the [PolyForm Noncommercial License 1.0.0](LICENSE), and evaluation, at work too, for less than 32 consecutive calendar days under the [PolyForm Free Trial License 1.0.0](LICENSE). Any other commercial or organizational (professional or enterprise) use requires a separate license from the copyright holder: [ask for terms](https://dfir-systems.de/#contact).
 
 Third-party code and data distributed with Atlas keep their own licenses and are credited in [NOTICE](NOTICE); the tools Atlas installs on your machine but does not redistribute are inventoried in [THIRD-PARTY.md](THIRD-PARTY.md).
 
-If Atlas is useful to you, consider [sponsoring the project](https://github.com/sponsors/AtlasFO).
+If Atlas is useful to you, consider [supporting the project](https://dfir-systems.de/donate/).

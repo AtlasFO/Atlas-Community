@@ -12,8 +12,6 @@ hook reminds you when a commit changes code without touching this file.
 
 ## Unreleased
 
-- **The Brain Earth page follows the dashboard language.** The 3D knowledge view behind Brain → "Brain Earth (3D)" is now in English by default and in German when the dashboard is set to German; before, it was German only.
-
 ## 1.0.0 — 2026-09-30
 
 First public release. What Atlas does, how to install it and how to run a
