@@ -310,8 +310,15 @@ class TestCancel:
             assert _supervisor_mismatch(job_dir, {"supervisor_pid": sup.pid, "supervisor_start": start}) == ""
             assert "another time" in _supervisor_mismatch(job_dir, {"supervisor_pid": sup.pid, "supervisor_start": "1"})
             assert "another command" in _supervisor_mismatch(job_dir, {"supervisor_pid": other.pid})
-            assert "own process group" in _supervisor_mismatch(job_dir, {"supervisor_pid": os.getpgrp()}) \
-                or "leads" in _supervisor_mismatch(job_dir, {"supervisor_pid": os.getpgrp()})
+            own = os.getpgrp()
+            if own > 1:   # in a container the tests can run in init's group, pid 1
+                assert "own process group" in _supervisor_mismatch(job_dir, {"supervisor_pid": own})
+            member = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+            try:   # in our group without leading one: never a job's supervisor
+                assert "leads" in _supervisor_mismatch(job_dir, {"supervisor_pid": member.pid})
+            finally:
+                member.kill()
+                member.wait()
             assert "no supervisor" in _supervisor_mismatch(job_dir, {"supervisor_pid": 0})
         finally:
             for p in (sup, other):

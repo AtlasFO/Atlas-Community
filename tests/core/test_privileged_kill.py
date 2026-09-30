@@ -26,14 +26,22 @@ def test_our_own_group_and_the_low_numbers_are_never_signalled(no_privileged_kil
 
 def test_a_number_now_held_by_another_process_is_not_signalled(no_privileged_kill):
     """The leader was reaped and its number handed to a new process: that
-    process's start time differs from the one recorded at spawn."""
-    me = os.getpid()
-    assert pk.start_time(me) is not None
-    assert pk.kill_group_as_root(me, leader_start="1") is False
-    assert no_privileged_kill == []
-    # The same start time is our own leader, still alive: the kill goes out.
-    pk.kill_group_as_root(me, leader_start=pk.start_time(me))
-    assert no_privileged_kill == [["sudo", "-n", "kill", "-KILL", "--", f"-{me}"]]
+    process's start time differs from the one recorded at spawn. The target
+    is a child leading its own session, never the test's own group, which
+    the kill refuses by design (in a container that group can be init's)."""
+    import subprocess
+    child = subprocess.Popen(["sleep", "30"], start_new_session=True)
+    try:
+        leader = child.pid
+        assert pk.start_time(leader) is not None
+        assert pk.kill_group_as_root(leader, leader_start="1") is False
+        assert no_privileged_kill == []
+        # The same start time is the leader Atlas spawned, still alive: the kill goes out.
+        pk.kill_group_as_root(leader, leader_start=pk.start_time(leader))
+        assert no_privileged_kill == [["sudo", "-n", "kill", "-KILL", "--", f"-{leader}"]]
+    finally:
+        child.kill()
+        child.wait()
 
 
 def test_the_start_time_of_a_missing_process_is_none():
