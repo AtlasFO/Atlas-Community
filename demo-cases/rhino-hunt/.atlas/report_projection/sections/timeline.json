@@ -1,0 +1,30 @@
+{
+  "id": "timeline",
+  "prose": "## 5. Attack Timeline\n\n| Time / Qualifier | Finding | Statement |\n|-----------------|---------|-----------|\n| — | F-017 | The USB key and the network traces are connected by the gnome account: the carved diary on the US... |\n",
+  "format": "dfir_notes",
+  "generated_at": "2026-09-29T17:43:59Z",
+  "generator_version": "report-projection/2.1",
+  "context_claim_ids": [
+    "C0003",
+    "C0004",
+    "C0008",
+    "C0009",
+    "C0010",
+    "C0011",
+    "C0012",
+    "C0013",
+    "C0014",
+    "C0015",
+    "C0016",
+    "C0017",
+    "C0018",
+    "C0019",
+    "C0020",
+    "C0021"
+  ],
+  "context_conclusion_ids": [
+    "N0022"
+  ],
+  "context_conflict_ids": [],
+  "content_sha256": "6295da27c3894978955a57ac4ea5c596761c37aeb0024b8707fa4559782a5b45"
+}

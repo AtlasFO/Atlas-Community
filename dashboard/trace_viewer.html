@@ -1,0 +1,1867 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Atlas · Process</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<link rel="stylesheet" href="assets/atlas.css" />
+<script src="assets/i18n.js"></script>
+<style>
+  /* View-specific layout only — tokens and the shared band / chips / sheet
+     come from atlas.css. The classes the entry renderers emit (.pill.tool,
+     .chip-link, .kv, .badge …) are styled here in the shared palette. */
+  .page.wide { max-width: 1400px; }
+  .hero { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; margin-bottom: 6px; }
+  .hero .page-title { margin: 0; }
+  .hero .meta { color: var(--fg-2); font-size: var(--fs-label); }
+  .hero .hero-tools { margin-left: auto; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  .hero .stat { font-size: var(--fs-label); color: var(--fg-2); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  /* A checkbox chip is lit or not, like every other chip; the box itself
+     stays out of sight. */
+  label.chip { cursor: pointer; position: relative; }
+  label.chip input[type=checkbox] { position: absolute; opacity: 0; width: 0; height: 0; margin: 0; }
+  label.chip:has(input:checked) { color: var(--fg-0); border-color: rgba(91,157,255,.45); background: rgba(91,157,255,.12); }
+  label.chip:has(input:checked) .n { color: var(--accent); }
+  label.chip:has(input:focus-visible) { box-shadow: var(--shadow-glow); }
+  label.chip .cdot { width: 7px; height: 7px; border-radius: 50%; }
+  .live .live-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--fg-2); }
+  .live.on { color: var(--ok); border-color: rgba(55,201,142,.4); }
+  .live.on .live-dot { background: var(--ok); animation: atlas-pulse 1.4s infinite; }
+
+  /* ── The run in time ─────────────────────────────────────────────────
+     Every entry at its moment, by lane; phases as bands above. The chart
+     drives the list: a phase, a lane or a mark scopes it, a drag windows it. */
+  .band-chart {
+    padding: 12px 18px 14px; border-top: 1px solid var(--border); background: var(--bg-1);
+    border-radius: 0 0 var(--radius-inner) var(--radius-inner);
+  }
+  /* The header is the fold: closed, the list gets the room. */
+  .chart-h { display: flex; align-items: baseline; gap: 10px; cursor: pointer; user-select: none; list-style: none;
+    font-size: var(--fs-label); text-transform: uppercase; letter-spacing: .08em; color: var(--fg-2); font-weight: 650; }
+  .chart-h::-webkit-details-marker { display: none; }
+  .chart-h:hover { color: var(--fg-1); }
+  .band-chart[open] .chart-h { margin-bottom: 10px; }
+  .chart-h .chev { display: inline-flex; align-self: center; transition: transform .15s var(--ease); }
+  .chart-h .chev svg { display: block; }
+  .band-chart[open] .chart-h .chev { transform: rotate(90deg); }
+  .chart-h .range { text-transform: none; letter-spacing: 0; font-weight: 400; font-variant-numeric: tabular-nums; }
+  .chart-h .lnk { font: inherit; text-transform: none; letter-spacing: 0; font-weight: 400; color: var(--accent);
+    background: none; border: 0; padding: 0; cursor: pointer; }
+  .chart-h .lnk:hover { text-decoration: underline; }
+  .chart-h .hint { margin-left: auto; text-transform: none; letter-spacing: 0; font-weight: 400; }
+  .gantt { position: relative; user-select: none; }
+  .gantt .phl { display: grid; grid-template-columns: 96px minmax(0, 1fr); height: 24px; }
+  .gantt .phl .row { display: flex; height: 100%; border-radius: var(--radius-sm); overflow: hidden; }
+  .gantt .phl .row > div {
+    font-size: var(--fs-label); font-weight: 650; letter-spacing: .05em; text-transform: uppercase;
+    display: flex; align-items: center; padding-left: 8px; overflow: hidden; white-space: nowrap; min-width: 0;
+    color: var(--fg-0); cursor: pointer; transition: opacity .15s var(--ease), filter .15s var(--ease);
+  }
+  .gantt .phl .row > div:hover { filter: brightness(1.15); }
+  .gantt .phl.has-on .row > div:not(.on) { opacity: .4; }
+  .gantt .phl .row > div.on { box-shadow: inset 0 0 0 2px var(--fg-0); }
+  .gantt .ln { display: grid; grid-template-columns: 96px minmax(0, 1fr); align-items: center; height: 32px; border-top: 1px solid var(--border); }
+  .gantt .ln .nm { font-size: var(--fs-label); letter-spacing: .06em; text-transform: uppercase; color: var(--fg-2); font-weight: 650; cursor: pointer; }
+  .gantt .ln .nm:hover { color: var(--fg-0); }
+  .gantt .ln .nm.on { color: var(--accent); }
+  .gantt .lanes { position: relative; }
+  .gantt .tr { position: relative; height: 100%; overflow: hidden; cursor: crosshair; touch-action: pan-y; }
+  .gantt .blk {
+    position: absolute; top: 8px; height: 16px; min-width: 3px; border-radius: var(--radius-row); cursor: pointer;
+    font-size: var(--fs-label); line-height: 16px; padding: 0 5px; color: #0c0f14; font-weight: 650;
+    overflow: hidden; white-space: nowrap;
+  }
+  /* A failure is a 2px stroke inside an 8px hit area, so a pointer can land on it. */
+  .gantt .tick { position: absolute; top: 8px; width: 8px; height: 16px; margin-left: -4px; cursor: pointer; }
+  .gantt .tick::after { content: ""; position: absolute; left: 3px; top: 3px; width: 2px; height: 10px; border-radius: var(--radius-chip); background: var(--bad); }
+  .gantt .dia { position: absolute; top: 10px; width: 11px; height: 11px; margin-left: -5px; transform: rotate(45deg); border-radius: var(--radius-chip); cursor: pointer; }
+  .gantt .blk.on, .gantt .dia.on, .gantt .tick.on::after { box-shadow: 0 0 0 2px var(--fg-0); }
+  .gantt [tabindex]:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .gantt .axis { display: grid; grid-template-columns: 96px minmax(0, 1fr); height: 20px; border-top: 1px solid var(--border);
+    font-size: var(--fs-label); color: var(--fg-2); font-variant-numeric: tabular-nums; }
+  .gantt .axis .ax { position: relative; }
+  .gantt .axis .ax span { position: absolute; top: 3px; transform: translateX(-50%); }
+  .gantt .brush-layer { position: absolute; left: 96px; right: 0; top: 0; bottom: 0; overflow: hidden; pointer-events: none; }
+  .gantt .brush { position: absolute; top: 0; bottom: 0; background: rgba(91,157,255,.14); border-left: 1px solid var(--accent); border-right: 1px solid var(--accent); pointer-events: none; }
+  .chart-legend { display: flex; gap: 12px; flex-wrap: wrap; font-size: var(--fs-label); color: var(--fg-2); margin-top: 8px; }
+  .chart-legend i { display: inline-block; width: 9px; height: 9px; border-radius: var(--radius-chip); margin-right: 5px; vertical-align: -1px; }
+
+  /* ── The list: every step of the run, grouped by phase ───────────── */
+  .resp-panel { margin-bottom: 14px; border-color: rgba(240,179,78,.5); }
+  details.source { margin: -6px 0 14px; font-size: var(--fs-label); color: var(--fg-2); }
+  details.source summary { cursor: pointer; user-select: none; }
+  details.source input { display: block; width: 100%; max-width: 560px; margin-top: 6px; font-family: var(--mono); font-size: var(--fs-small); }
+  .entries { height: max(440px, calc(100vh - 470px)); overflow: auto; padding-right: 4px; }
+  .phase-group {
+    position: sticky; top: 0; z-index: 2; margin: 0 0 8px; padding: 8px 0 6px;
+    display: flex; align-items: center; gap: 10px; background: var(--bg-0);
+    font-size: var(--fs-label); letter-spacing: .07em; text-transform: uppercase; color: var(--fg-2); font-weight: 650;
+  }
+  .phase-group .ph { display: inline-block; width: 10px; height: 10px; border-radius: var(--radius-chip); }
+  .phase-group .range { font-weight: 400; letter-spacing: 0; text-transform: none; }
+  .entry {
+    display: grid; grid-template-columns: 3px 60px 62px 100px minmax(0, 1fr); gap: 10px; align-items: start;
+    padding: 8px 10px 8px 0; margin-bottom: 6px;
+    background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius-sm);
+    cursor: pointer; font-size: var(--fs-small); overflow: hidden;
+    transition: border-color .15s var(--ease), box-shadow .15s var(--ease);
+  }
+  .entry:hover { border-color: var(--border-strong); box-shadow: var(--shadow-md); }
+  .entry .stripe { width: 3px; align-self: stretch; border-radius: var(--radius-chip); min-height: 30px; }
+  .entry .cid, .entry .ts { font-family: var(--mono); font-size: var(--fs-label); color: var(--fg-2); padding-top: 2px; white-space: nowrap; }
+  .entry .type-col { padding-top: 1px; }
+  .entry .text { min-width: 0; }
+  .entry .text .line { color: var(--fg-0); overflow-wrap: anywhere; }
+  .entry .text .line code { font-size: .92em; }
+  .entry .text .meta { color: var(--fg-2); font-size: var(--fs-label); margin-top: 3px; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  .entry.selected { border-color: rgba(91,157,255,.6); box-shadow: 0 0 0 2px rgba(91,157,255,.35); }
+  .entry.protocol-violation .stripe { background: var(--warn); }
+  .entry.batch .line { color: var(--fg-1); }
+  .entry.new { animation: rowin .8s ease-out; }
+  @keyframes rowin { from { background: rgba(91,157,255,.2); } }
+  .entry.linked-highlight { outline: 1px solid var(--accent); outline-offset: -1px; animation: linkpulse 1.6s ease-out; }
+  @keyframes linkpulse { 0% { box-shadow: 0 0 0 3px rgba(91,157,255,.5); } 100% { box-shadow: none; } }
+  @media (max-width: 760px) {
+    /* Clocks, last-fetch and the drag hint are desk furniture; on a phone
+       they wrap into three lines of noise above the figures. */
+    .hero .stat, .chart-h .hint { display: none; }
+    .entries { height: auto; max-height: 70vh; }
+    .entry { grid-template-columns: 3px minmax(0, 1fr); }
+    .entry .cid, .entry .ts, .entry .type-col { display: none; }
+  }
+
+  /* Type pills the entry renderers emit, in the shared palette. */
+  .pill.tool { background: rgba(138,147,166,.15); color: var(--neutral); }
+  .pill.reason { background: rgba(91,157,255,.15); color: var(--accent); }
+  .pill.dair { background: rgba(180,140,255,.16); color: var(--partial); }
+  .pill.finding-confirmed { background: rgba(242,109,109,.15); color: var(--conf-confirmed); }
+  .pill.finding-likely { background: rgba(240,160,78,.15); color: var(--conf-likely); }
+  .pill.finding-suspected { background: rgba(240,210,78,.15); color: var(--conf-suspected); }
+  .pill.finding-unconfirmed { background: rgba(138,147,166,.15); color: var(--conf-unconfirmed); }
+  .pill.self-correction { background: rgba(240,179,78,.15); color: var(--warn); }
+  .pill.curiosity { background: rgba(55,201,142,.14); color: var(--ok); }
+  .pill.narration { background: rgba(138,147,166,.10); color: var(--fg-2); }
+  .pill.error { background: rgba(242,109,109,.15); color: var(--bad); }
+  .chip-link {
+    display: inline-flex; align-items: center; gap: 4px; padding: 0 7px; border-radius: 999px;
+    border: 1px solid rgba(91,157,255,.45); color: var(--accent); background: rgba(91,157,255,.08);
+    font-family: var(--mono); font-size: var(--fs-label); line-height: 16px; cursor: pointer; white-space: nowrap;
+  }
+  .chip-link:hover { background: var(--accent); color: #0c0f14; }
+  .chip-link.reverse { border-color: rgba(55,201,142,.5); color: var(--ok); background: rgba(55,201,142,.08); }
+  .chip-link.reverse:hover { background: var(--ok); color: #0c0f14; }
+
+  /* Detail, inside the sheet. */
+  #detail h2 { font-size: var(--fs-body); margin: 0 0 10px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  #detail h3, #detail h4 { font-size: var(--fs-label); text-transform: uppercase; letter-spacing: .07em; color: var(--fg-2); margin: 14px 0 6px; font-weight: 650; }
+  #detail pre { background: var(--bg-0); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 10px; overflow: auto; font-size: var(--fs-label); white-space: pre-wrap; word-break: break-word; }
+  #detail .kv .k { color: var(--fg-2); }
+  #detail .link { color: var(--accent); cursor: pointer; }
+  #detail .link:hover { text-decoration: underline; }
+  .badge { display: inline-block; padding: 0 7px; border-radius: 999px; font-size: var(--fs-label); font-weight: 650; line-height: 16px; }
+  .badge.pending { background: rgba(240,179,78,.15); color: var(--warn); }
+  .badge.confirmed { background: rgba(55,201,142,.15); color: var(--ok); }
+  .badge.refuted { background: rgba(242,109,109,.15); color: var(--bad); }
+  .empty { padding: 24px; text-align: center; color: var(--fg-2); font-size: var(--fs-small); }
+  .resp-card button { font: inherit; font-size: var(--fs-small); padding: 4px 10px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg-3); color: var(--fg-0); cursor: pointer; }
+  .resp-card .resp-approve { border-color: rgba(55,201,142,.5); color: var(--ok); }
+  .resp-card .resp-deny { border-color: rgba(242,109,109,.5); color: var(--bad); }
+</style>
+</head>
+<body>
+<div class="page wide" id="app">
+  <div class="hero">
+    <h1 class="page-title">Process</h1>
+    <span class="meta" id="case-id"></span>
+    <span class="hero-tools">
+      <select id="trace-select" class="chip" title="Select run/trace for the active case" disabled>
+        <option value="">— trace —</option>
+      </select>
+      <span class="chip live" id="live"><span class="live-dot"></span><span id="live-text">offline</span></span>
+      <label class="chip"><input type="checkbox" id="follow-tail" checked /> follow new</label>
+      <label class="chip"><input type="checkbox" id="autorefresh" checked /> auto-refresh</label>
+      <span class="stat" id="last-fetch" title="last successful trace fetch"></span>
+      <span class="stat" id="clock-local" title="local time"></span>
+      <span class="stat" id="clock-utc" title="UTC (trace timestamps use UTC)"></span>
+    </span>
+  </div>
+
+  <div class="band">
+    <div class="band-figures">
+      <div class="band-cell">
+        <div class="f-v" id="metric-wall" title="Wall-clock time from the first entry to the last">—</div>
+        <div class="f-l">Run</div>
+        <div class="f-sub"><span id="entry-count">0</span> entries · <span id="phase-count">0</span> phases</div>
+      </div>
+      <div class="band-cell">
+        <div class="f-v" id="fig-tools">0</div><div class="f-l">Tool calls</div>
+        <div class="minibar" id="fig-tools-bar" aria-hidden="true"></div>
+        <div class="f-sub" id="fig-tools-sub"></div>
+      </div>
+      <div class="band-cell">
+        <div class="f-v" id="fig-findings">0</div><div class="f-l">Findings</div>
+        <div class="f-sub" id="fig-findings-sub"></div>
+      </div>
+      <div class="band-cell">
+        <div class="f-v" id="fig-gates">0</div><div class="f-l">Reasoning gates</div>
+        <div class="f-sub" id="fig-gates-sub"></div>
+      </div>
+      <div class="band-cell">
+        <div class="f-v" id="metric-tokens" title="Total LLM tokens for this case (agent + reason/DAIR)">—</div>
+        <div class="f-l">Tokens</div>
+        <div class="f-sub">whole case, incl. reasoning</div>
+      </div>
+    </div>
+    <details class="band-chart" id="chart-fold" open>
+      <summary class="chart-h"><span class="chev"><svg viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></span>The run in time
+        <span class="range" id="chart-range"></span>
+        <span class="hint">click a phase, lane or mark to scope the list · drag for a window · wheel to zoom, shift+wheel to slide</span></summary>
+      <div id="chart"></div>
+    </details>
+  </div>
+
+  <div class="card resp-panel" id="response-panel" style="display:none;">
+    <div class="card-h">Live response <span class="pill warn" id="resp-count">0</span>
+      <span class="h-trail">containment actions waiting for approval</span></div>
+    <div id="resp-secret-row" style="margin-bottom:8px;">
+      <input type="password" id="resp-secret" name="atlas-approval-secret" autocomplete="new-password" placeholder="approval secret…"
+             style="width:100%;max-width:420px;" title="0600 secret at ~/.config/atlas/dashboard_approval_secret — enables approve/deny" />
+    </div>
+    <div id="resp-actions"></div>
+  </div>
+
+  <div class="tools lead">
+    <input type="search" class="search" id="search" placeholder="Search everything in the run…" />
+    <input type="number" class="chip" id="jump" placeholder="Jump to #" min="1" style="width:110px;" />
+    <select id="phase-select" class="chip"><option value="">all phases</option></select>
+    <button type="button" class="chip on" id="window-chip" hidden></button>
+    <span class="tail" id="shown-count"></span>
+  </div>
+  <div class="tools filters">
+    <span class="tg"><span class="tg-l">Types</span>
+      <label class="chip type-chip"><input type="checkbox" class="type-filter" value="dair_call" checked><span class="cdot" style="background:var(--partial)"></span>Director <span class="n count" data-count="dair_call">0</span></label>
+      <label class="chip type-chip"><input type="checkbox" class="type-filter" value="reason_call" checked><span class="cdot" style="background:var(--accent)"></span>Reasoning <span class="n count" data-count="reason_call">0</span></label>
+      <label class="chip type-chip"><input type="checkbox" class="type-filter" value="tool_call" checked><span class="cdot" style="background:var(--neutral)"></span>Tools <span class="n count" data-count="tool_call">0</span></label>
+      <label class="chip type-chip"><input type="checkbox" class="type-filter" value="finding" checked><span class="cdot" style="background:var(--conf-confirmed)"></span>Findings <span class="n count" data-count="finding">0</span></label>
+      <label class="chip type-chip"><input type="checkbox" class="type-filter" value="self_correction" checked><span class="cdot" style="background:var(--warn)"></span>Corrections <span class="n count" data-count="self_correction">0</span></label>
+      <label class="chip type-chip"><input type="checkbox" class="type-filter" value="curiosity_probe" checked><span class="cdot" style="background:var(--ok)"></span>Probes <span class="n count" data-count="curiosity_probe">0</span></label>
+      <label class="chip type-chip"><input type="checkbox" class="type-filter" value="deferred_intent" checked><span class="cdot" style="background:var(--warn)"></span>Deferred <span class="n count" data-count="deferred_intent">0</span></label>
+      <label class="chip type-chip"><input type="checkbox" class="type-filter" value="investigation_narration" checked><span class="cdot" style="background:var(--fg-2)"></span>Notes <span class="n count" data-count="investigation_narration">0</span></label>
+      <label class="chip type-chip"><input type="checkbox" class="type-filter" value="call_initiated"><span class="cdot" style="background:var(--fg-2)"></span>Init <span class="n count" data-count="call_initiated">0</span></label>
+      <label class="chip type-chip"><input type="checkbox" class="type-filter" value="call_abandoned" checked><span class="cdot" style="background:var(--bad)"></span>Aborted <span class="n count" data-count="call_abandoned">0</span></label>
+      <label class="chip type-chip"><input type="checkbox" class="type-filter" value="system_error" checked><span class="cdot" style="background:var(--bad)"></span>System errors <span class="n count" data-count="system_error">0</span></label>
+    </span>
+    <span class="tg"><span class="tg-l">Only</span>
+      <label class="chip"><input type="checkbox" id="filter-errors"> failures and violations</label>
+      <label class="chip"><input type="checkbox" id="filter-has-finding"> calls linked to findings</label>
+    </span>
+    <span class="tg"><span class="tg-l">List</span>
+      <label class="chip" title="Collapse consecutive tool calls into one row per batch"><input type="checkbox" id="fold-batches"> fold tool batches</label>
+    </span>
+  </div>
+  <details class="source"><summary>Source</summary>
+    <input type="text" id="trace-url" name="atlas-trace-path" autocomplete="off" />
+  </details>
+
+  <div class="entries" id="entries-scroll">
+    <div id="entries-list"></div>
+    <div class="empty" id="empty-state">Load a trace to begin.</div>
+  </div>
+</div>
+
+<div class="scrim" id="scrim"></div>
+<aside class="sheet" id="sheet" aria-label="Entry detail">
+  <div class="sheet-head">
+    <span class="sheet-title" id="sheet-title">Entry</span>
+    <button class="sheet-close" id="sheet-close" aria-label="Close"><svg viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+  </div>
+  <div class="sheet-body" id="detail"><div class="empty">Click an entry to see its details.</div></div>
+</aside>
+
+<script src="assets/shell.js"></script>
+<script src="assets/timeview.js"></script>
+<script>
+'use strict';
+
+// ── State ────────────────────────────────────────────────────────────────────
+const State = {
+  traceUrl: null,
+  caseId: '',
+  // Set once /api/tokens returns a real total; from then on the trace-only
+  // sum stops writing the metric. See the fallback in load().
+  tokensFromApi: false,
+  entries: [],
+  entriesById: new Map(),
+  phaseBlocks: [],
+  selectedId: null,
+  followTail: true,
+  autorefresh: true,
+  filters: {
+    types: new Set(),
+    search: '',
+    jump: null,
+    phase: '',
+    errorsOnly: false,
+    hasFindingOnly: false,
+    window: null,        // [fromMs, toMs] brushed on the chart, or null
+  },
+  fold: false,           // collapse consecutive tool calls into batch rows
+  openBatches: new Set(),
+  phaseHues: new Map(),
+  brush: null,
+  view: null,            // [fromMs, toMs] the chart shows, or null for the whole run
+  chartRun: null,        // [firstMs, lastMs] of the run as last drawn
+  prevEntryCount: 0,
+  lastSig: null,         // the trace as last drawn
+  stopRefresh: null,   // cancel function from AtlasShell.poll
+};
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+const LS_CHART = 'atlas.process.chart';   // 'open' | 'closed'
+const $ = (sel) => document.querySelector(sel);
+const $$ = (sel) => Array.from(document.querySelectorAll(sel));
+
+function escapeHtml(s) {
+  if (s === undefined || s === null) return '';
+  return String(s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+function shorten(s, n) {
+  if (!s) return '';
+  s = String(s);
+  return s.length > n ? s.slice(0, n) + '…' : s;
+}
+function _fmtEntryTs(ts) {
+  // Compact UTC HH:MM:SS for the entry row. Trace timestamps are already UTC
+  // (either `+00:00` or `Z` suffix from the PostToolUse hook). Falls back to
+  // raw value on parse error. Full timestamp is in the row's title attribute.
+  if (!ts) return '';
+  try {
+    const d = new Date(ts);
+    if (Number.isNaN(d.getTime())) return ts.slice(0, 19);
+    const hh = String(d.getUTCHours()).padStart(2, '0');
+    const mm = String(d.getUTCMinutes()).padStart(2, '0');
+    const ss = String(d.getUTCSeconds()).padStart(2, '0');
+    return `${hh}:${mm}:${ss}`;
+  } catch (_e) {
+    return ts.slice(0, 19);
+  }
+}
+// All entries (MCP server + PostToolUse hook) share a single monotonic call_id
+// sequence via a shared counter file under fcntl lock. Just render as #N.
+function _fmtCid(cid) {
+  return `#${cid}`;
+}
+function getQueryParam(name) {
+  const p = new URLSearchParams(location.search);
+  return p.get(name);
+}
+function paneEmpty(html) { return `<div class="empty">${html}</div>`; }
+
+// ── Phase index ──────────────────────────────────────────────────────────────
+//
+// Groups entries by per-entry `dair_phase` (the active phase at write time,
+// stamped by ExecutionLog._append_entry). Falls back to the older
+// dair_call.current_phase boundary logic when entries don't carry dair_phase
+// (older traces written before the per-entry stamping landed).
+function buildPhaseIndex(entries) {
+  // Prefer per-entry dair_phase if any entry has it set.
+  const hasPerEntryPhase = entries.some(e => e && e.dair_phase);
+  const blocks = [];
+  let currentPhase = '';
+  let currentBlock = null;
+  const phaseCount = {};
+
+  const startBlock = (phase, cid) => {
+    if (currentBlock) currentBlock.endCid = cid - 1;
+    phaseCount[phase] = (phaseCount[phase] || 0) + 1;
+    currentBlock = {
+      phase, startCid: cid,
+      endCid: entries[entries.length - 1].call_id,
+      anchor: `phase-${phase.toLowerCase()}-${phaseCount[phase]}`,
+    };
+    blocks.push(currentBlock);
+    currentPhase = phase;
+  };
+
+  if (hasPerEntryPhase) {
+    for (const e of entries) {
+      const phase = e.dair_phase || '';
+      if (!phase) continue;                  // pre-DAIR entries don't get a header
+      if (phase !== currentPhase) startBlock(phase, e.call_id);
+    }
+  } else {
+    // Legacy traces: derive from dair_call current_phase boundaries.
+    for (const e of entries) {
+      if (e.type !== 'dair_call') continue;
+      const phase = e.current_phase || 'unknown';
+      if (phase !== currentPhase) startBlock(phase, e.call_id);
+    }
+  }
+  if (currentBlock && entries.length) {
+    currentBlock.endCid = entries[entries.length - 1].call_id;
+  }
+  return blocks;
+}
+
+// ── Link chips ───────────────────────────────────────────────────────────────
+// Clickable chip referencing another entry by call_id. event.stopPropagation
+// in the row-level click handler keeps it from also opening the parent row.
+function _linkChip(cid, label, opts) {
+  opts = opts || {};
+  const cls = opts.reverse ? 'chip-link reverse' : 'chip-link';
+  const text = label ? `${label}` : `→ #${cid}`;
+  const title = opts.title ? ` title="${escapeHtml(opts.title)}"` : '';
+  return `<span class="${cls}" data-jump="${cid}"${title}>${escapeHtml(text)}</span>`;
+}
+
+function _toolLabel(linked) {
+  // Build a short label for a chip pointing at a linked entry.
+  if (!linked) return '';
+  if (linked.type === 'tool_call') {
+    const cmd = (linked.cmd || '').trim();
+    // Pull the first token (binary name) and, if present, the next non-flag token.
+    const parts = cmd.split(/\s+/);
+    const bin = parts[0] ? parts[0].split('/').pop() : '';
+    return bin;
+  }
+  if (linked.type === 'reason_call') return linked.tool || 'reason';
+  if (linked.type === 'dair_call') return `dair ${linked.current_phase || ''}`.trim();
+  return linked.type || '';
+}
+
+// Build a call_id → [finding call_ids] reverse index so tool_call rows can
+// show "N finding(s) linked".
+function buildReverseFindingIndex(entries) {
+  const idx = new Map();
+  for (const e of entries) {
+    if (e.type !== 'finding') continue;
+    const t = e.linked_call_id;
+    if (!t) continue;
+    if (!idx.has(t)) idx.set(t, []);
+    idx.get(t).push(e);
+  }
+  return idx;
+}
+
+// ── Render entry rows ────────────────────────────────────────────────────────
+function entrySummary(e) {
+  switch (e.type) {
+    case 'tool_call': {
+      const status = e.timed_out ? 'TIMEOUT' : (e.success ? 'OK' : 'FAIL');
+      const elapsed = e.elapsed_seconds ? ` ${e.elapsed_seconds.toFixed(1)}s` : '';
+      const violation = e.protocol_violation ? ` violation: ${e.protocol_violation}` : '';
+      // Reverse link: how many findings linked back to this tool_call.
+      const linkedFindings = (State.reverseIndex && State.reverseIndex.get(e.call_id)) || [];
+      const reverseChip = linkedFindings.length
+        ? ' ' + _linkChip(linkedFindings[0].call_id,
+                          `${linkedFindings.length} finding${linkedFindings.length>1?'s':''}`,
+                          {reverse: true,
+                           title: linkedFindings.map(f => `#${f.call_id} ${f.description}`).join('\n')})
+        : '';
+      return {
+        pill: '<span class="pill tool">Tool</span>',
+        line: `<code>${escapeHtml(shorten(e.cmd, 80))}</code>`,
+        meta: `${status}${elapsed}${violation}${reverseChip}`,
+      };
+    }
+    case 'reason_call': {
+      const verdict = (() => {
+        const c = e.conclusion || '';
+        const m = c.match(/VERDICT:\s*(SUPPORTED|CHALLENGED|UNCERTAIN)/i);
+        return m ? ` [${m[1].toUpperCase()}]` : '';
+      })();
+      const status = e.success ? '' : ' FAIL';
+      const linkedFindings = (State.reverseIndex && State.reverseIndex.get(e.call_id)) || [];
+      const reverseChip = linkedFindings.length
+        ? ' ' + _linkChip(linkedFindings[0].call_id,
+                          `${linkedFindings.length} finding${linkedFindings.length>1?'s':''}`,
+                          {reverse: true})
+        : '';
+      return {
+        pill: '<span class="pill reason">Reasoning</span>',
+        line: `<code>${escapeHtml(e.tool)}</code>${escapeHtml(verdict)}`,
+        meta: `${status} tokens=${(e.input_tokens||0)+(e.output_tokens||0)}` +
+              (e.hypothesis_id ? ` ${e.hypothesis_id}` : '') + reverseChip,
+      };
+    }
+    case 'dair_call': {
+      const transition = e.transition_recommended
+        ? ` → ${escapeHtml(e.next_phase)}` : '';
+      return {
+        pill: '<span class="pill dair">Director</span>',
+        line: `${escapeHtml(e.current_phase)}${transition}`,
+        meta: `${escapeHtml(e.stack_action)}` +
+              (e.verification_satisfied ? ' satisfied' : ''),
+      };
+    }
+    case 'finding': {
+      const conf = (e.confidence || '').toUpperCase();
+      const cls = `finding-${conf.toLowerCase()}`;
+      const linked = e.linked_call_id ? State.entriesById.get(e.linked_call_id) : null;
+      const chip = e.linked_call_id
+        ? _linkChip(e.linked_call_id,
+                    `→ #${e.linked_call_id}${linked ? ' ' + _toolLabel(linked) : ''}`,
+                    {title: linked ? (linked.cmd || linked.tool || '') : ''})
+        : '<span class="chip-link" style="border-color:var(--bad-line);color:var(--bad);background:var(--bad-soft);cursor:default;">no link</span>';
+      return {
+        pill: `<span class="pill ${cls}">${conf}</span>`,
+        line: escapeHtml(e.description),
+        meta: chip,
+      };
+    }
+    case 'self_correction': {
+      const chip = e.linked_call_id
+        ? ' ' + _linkChip(e.linked_call_id, `→ #${e.linked_call_id}`)
+        : '';
+      return {
+        pill: '<span class="pill self-correction">Corrected</span>',
+        line: escapeHtml(shorten(e.prior_belief, 100)),
+        meta: escapeHtml(e.trigger) + chip,
+      };
+    }
+    case 'curiosity_probe': {
+      const refs = e.input_call_ids || [];
+      const chips = refs.length
+        ? refs.slice(0, 5).map(c => _linkChip(c, `→ #${c}`)).join('')
+          + (refs.length > 5 ? ` +${refs.length - 5}` : '')
+        : '';
+      const seeded = e.seeded_by ? ` <code>${escapeHtml(e.seeded_by)}</code>` : '';
+      return {
+        pill: '<span class="pill curiosity">Probe</span>',
+        line: escapeHtml(shorten(e.probe_rationale, 120)),
+        meta: seeded + chips,
+      };
+    }
+    case 'investigation_narration': {
+      const refs = e.input_call_ids || [];
+      const chips = refs.length
+        ? refs.slice(0, 5).map(c => _linkChip(c, `→ #${c}`)).join('')
+          + (refs.length > 5 ? ` +${refs.length - 5}` : '')
+        : '';
+      return {
+        pill: '<span class="pill narration">Note</span>',
+        line: escapeHtml(shorten(e.content, 120)),
+        meta: chips,
+      };
+    }
+    case 'call_initiated':
+      return {
+        pill: '<span class="pill narration">Init</span>',
+        line: escapeHtml(e.tool),
+        meta: escapeHtml(e.backend),
+      };
+    case 'call_abandoned':
+      return {
+        pill: '<span class="pill error">Aborted</span>',
+        line: escapeHtml(e.tool),
+        meta: escapeHtml(shorten(e.reason, 80)),
+      };
+    case 'deferred_intent': {
+      const st = e.status || 'pending';
+      const chips = [e.prescribed_by_dair_cid, e.parent_dair_cid].filter(Boolean)
+        .map(c => _linkChip(c, `→ #${c}`)).join('');
+      return {
+        pill: `<span class="pill ${st === 'resolved' ? 'ok' : 'self-correction'}">Deferred</span>`,
+        line: `<code>${escapeHtml(e.tool || e.priority_tool || '')}</code> ${escapeHtml(shorten(e.args_summary || '', 100))}`,
+        meta: `${escapeHtml(st)}${e.blocked_reason ? ` · ${escapeHtml(shorten(e.blocked_reason, 80))}` : ''}${e.block_count ? ` · blocked ${e.block_count}×` : ''} ${chips}`,
+      };
+    }
+    case 'trace_opened':
+      return {
+        pill: '<span class="pill">Trace opened</span>',
+        line: escapeHtml(shorten(e.detail || '', 120)),
+        meta: '',
+      };
+    case 'system_error':
+      return {
+        pill: '<span class="pill error">System error</span>',
+        line: `<code>[${escapeHtml(e.category || 'unknown')}]</code> ${escapeHtml(shorten(e.detail || '', 120))}`,
+        meta: '',
+      };
+    default:
+      return {
+        pill: '<span class="pill">?</span>',
+        line: escapeHtml(e.type),
+        meta: '',
+      };
+  }
+}
+
+const KNOWN_TYPES = new Set(Array.from(document.querySelectorAll('.type-filter')).map(el => el.value));
+
+function entryMatchesFilters(e) {
+  const F = State.filters;
+  // Only a type that has a chip can be switched off; anything the trace
+  // carries that no chip knows about is always listed — the list is the
+  // whole run, never what the filters happened to anticipate.
+  if (F.types.size && KNOWN_TYPES.has(e.type) && !F.types.has(e.type)) return false;
+  if (F.jump !== null) return e.call_id === F.jump;
+  if (F.window) {
+    const t = _parseTs(e.ts);
+    if (t === null || t < F.window[0] || t > F.window[1]) return false;
+  }
+  if (F.phase) {
+    const blk = State.phaseBlocks.find(b => b.anchor === F.phase);
+    if (blk && (e.call_id < blk.startCid || e.call_id > blk.endCid)) return false;
+  }
+  if (F.errorsOnly) {
+    const isError =
+      (e.type === 'tool_call' && (!e.success || e.protocol_violation)) ||
+      (e.type === 'reason_call' && /CHALLENGED/i.test(e.conclusion || '')) ||
+      e.type === 'self_correction' ||
+      e.type === 'call_abandoned' ||
+      e.type === 'system_error';
+    if (!isError) return false;
+  }
+  if (F.hasFindingOnly) {
+    // A call is "linked to a finding" if some finding's linked_call_id equals e.call_id
+    const linked = State.entries.some(x => x.type === 'finding' && x.linked_call_id === e.call_id);
+    if (!linked) return false;
+  }
+  if (F.search) {
+    const hay = JSON.stringify(e).toLowerCase();
+    if (!hay.includes(F.search.toLowerCase())) return false;
+  }
+  return true;
+}
+
+function _phaseBlockForCid(cid) {
+  for (const b of State.phaseBlocks) {
+    if (cid >= b.startCid && cid <= b.endCid) return b;
+  }
+  return null;
+}
+
+function _stripeFor(e) {
+  switch (e.type) {
+    case 'dair_call': return 'var(--partial)';
+    case 'reason_call': return e.success === false ? 'var(--bad)' : 'var(--accent)';
+    case 'tool_call': return e.success ? 'var(--neutral)' : 'var(--bad)';
+    case 'finding': return `var(--conf-${String(e.confidence || 'unconfirmed').toLowerCase()})`;
+    case 'self_correction': return 'var(--warn)';
+    case 'curiosity_probe': return 'var(--ok)';
+    case 'call_abandoned': case 'system_error': return 'var(--bad)';
+    case 'deferred_intent': return 'var(--warn)';
+    default: return 'var(--fg-2)';
+  }
+}
+
+function _rowHtml(e) {
+  const s = entrySummary(e);
+  const cls = ['entry', State.selectedId === e.call_id ? 'selected' : '',
+               e.protocol_violation ? 'protocol-violation' : ''].filter(Boolean).join(' ');
+  return `<div class="${cls}" data-cid="${e.call_id}" title="${escapeHtml(e.ts || '')}">
+    <span class="stripe" style="background:${_stripeFor(e)}"></span>
+    <span class="cid">${_fmtCid(e.call_id)}</span>
+    <span class="ts">${escapeHtml(_fmtEntryTs(e.ts))}</span>
+    <span class="type-col">${s.pill}</span>
+    <span class="text"><div class="line">${s.line}</div>${s.meta ? `<div class="meta">${s.meta}</div>` : ''}</span>
+  </div>`;
+}
+
+// Consecutive tool calls fold into one row: what ran, how many failed, and
+// the span it covered. Opens back into its rows on click.
+function _batchHtml(batch) {
+  const failed = batch.filter(e => !e.success).length;
+  const names = {};
+  for (const e of batch) { const n = _toolLabel(e); names[n] = (names[n] || 0) + 1; }
+  const top = Object.entries(names).sort((a, b) => b[1] - a[1]).slice(0, 3)
+    .map(([n, c]) => `${escapeHtml(n)}${c > 1 ? ` ×${c}` : ''}`).join(' · ');
+  const more = Object.keys(names).length - Math.min(3, Object.keys(names).length);
+  const first = batch[batch.length - 1], last = batch[0];   // batch is newest-first
+  return `<div class="entry batch" data-batch="${first.call_id}" title="Open the ${batch.length} calls">
+    <span class="stripe" style="background:${failed ? 'var(--bad)' : 'var(--neutral)'}"></span>
+    <span class="cid">${_fmtCid(first.call_id)}</span>
+    <span class="ts">${escapeHtml(_fmtEntryTs(first.ts))}</span>
+    <span class="type-col"><span class="pill tool">Tools ×${batch.length}</span></span>
+    <span class="text"><div class="line">${top}${more > 0 ? ` <span class="dim">+${more} more</span>` : ''}</div>
+      <div class="meta">#${first.call_id} – #${last.call_id}${failed ? ` · <span style="color:var(--bad)">${failed} failed</span>` : ' · all succeeded'}</div></span>
+  </div>`;
+}
+
+function renderEntries() {
+  const container = $('#entries-list');
+  const empty = $('#empty-state');
+  if (!State.entries.length) {
+    container.innerHTML = '';
+    empty.style.display = '';
+    renderFigures();
+    return;
+  }
+  empty.style.display = 'none';
+
+  // Newest on top, so "follow new" is a scroll to the top; a phase header
+  // opens each block as it is read down the page.
+  let html = '';
+  let visibleCount = 0;
+  let prevBlockAnchor = null;
+  let batch = [];
+  let header = '';   // a phase header waits for the first entry it will list
+  const flush = () => {
+    if (!batch.length) return;
+    const opened = State.openBatches.has(batch[batch.length - 1].call_id) || batch.some(e => e.call_id === State.selectedId);
+    if (State.fold && batch.length > 1 && !opened) {
+      html += _batchHtml(batch);
+    } else {
+      for (const e of batch) html += _rowHtml(e);
+    }
+    batch = [];
+  };
+  for (let i = State.entries.length - 1; i >= 0; i--) {
+    const e = State.entries[i];
+    const block = _phaseBlockForCid(e.call_id);
+    if (block && block.anchor !== prevBlockAnchor) {
+      flush();
+      header = `<div class="phase-group" id="${block.anchor}"><span class="ph" style="background:${phaseHue(block.phase)}"></span>${escapeHtml(block.phase)}<span class="range">#${block.startCid} – #${block.endCid} · newest first</span></div>`;
+      prevBlockAnchor = block.anchor;
+    }
+    if (!entryMatchesFilters(e)) continue;
+    visibleCount += 1;
+    if (header) { html += header; header = ''; }
+    if (e.type === 'tool_call') { batch.push(e); continue; }
+    flush();
+    html += _rowHtml(e);
+  }
+  flush();
+  container.innerHTML = html || paneEmpty('No entries match the current filters.');
+
+  const counts = {};
+  for (const e of State.entries) counts[e.type] = (counts[e.type] || 0) + 1;
+  for (const el of $$('.count')) el.textContent = counts[el.dataset.count] || 0;
+  $('#entry-count').textContent = State.entries.length;
+  $('#shown-count').textContent = `${visibleCount} of ${State.entries.length} shown`;
+  renderFigures();
+
+  if (State.followTail) {
+    requestAnimationFrame(() => {
+      const scroller = container.parentElement;
+      if (scroller) scroller.scrollTop = 0;
+    });
+  }
+}
+
+function renderFigures() {
+  const es = State.entries;
+  const tools = es.filter(e => e.type === 'tool_call');
+  const failed = tools.filter(e => !e.success).length;
+  const abandoned = es.filter(e => e.type === 'call_abandoned').length;
+  const findings = es.filter(e => e.type === 'finding');
+  const corrections = es.filter(e => e.type === 'self_correction').length;
+  const gates = es.filter(e => e.type === 'reason_call');
+  $('#phase-count').textContent = State.phaseBlocks.length;
+  $('#fig-tools').textContent = tools.length;
+  $('#fig-tools-bar').innerHTML = tools.length
+    ? `<span style="width:${(100 * (tools.length - failed) / tools.length).toFixed(1)}%;background:var(--neutral)"></span><span style="width:${(100 * failed / tools.length).toFixed(1)}%;background:var(--bad)"></span>` : '';
+  $('#fig-tools-sub').textContent = tools.length
+    ? `${failed} failed${abandoned ? ` · ${abandoned} abandoned` : ''}` : '';
+  $('#fig-findings').textContent = findings.length;
+  const byConf = {};
+  for (const f of findings) { const c = String(f.confidence || 'unconfirmed').toLowerCase(); byConf[c] = (byConf[c] || 0) + 1; }
+  $('#fig-findings-sub').textContent = [
+    ...['confirmed', 'likely', 'suspected', 'unconfirmed'].filter(c => byConf[c]).map(c => `${byConf[c]} ${c}`),
+    ...(corrections ? [`${corrections} correction${corrections > 1 ? 's' : ''}`] : []),
+  ].join(' · ');
+  $('#fig-gates').textContent = gates.length;
+  const byGate = {};
+  for (const g of gates) { const n = String(g.tool || 'reason').replace(/^reason[._]/, ''); byGate[n] = (byGate[n] || 0) + 1; }
+  $('#fig-gates-sub').textContent = Object.entries(byGate).sort((a, b) => b[1] - a[1]).slice(0, 3)
+    .map(([n, c]) => `${c} ${n}`).join(' · ');
+}
+
+// ── The run in time ──────────────────────────────────────────────────────────
+// Phases get a hue in order of first appearance — names are whatever the
+// director used, never a fixed list.
+const PHASE_HUES = ['rgba(91,157,255,.35)', 'rgba(55,201,142,.32)', 'rgba(180,140,255,.35)',
+                    'rgba(240,179,78,.35)', 'rgba(242,109,109,.32)', 'rgba(138,147,166,.35)'];
+function phaseHue(name) {
+  if (!State.phaseHues.has(name)) State.phaseHues.set(name, PHASE_HUES[State.phaseHues.size % PHASE_HUES.length]);
+  return State.phaseHues.get(name);
+}
+
+// Lanes of the chart, each with the entry types it draws. Failures are a
+// filter rather than a type, so that lane solos through the failures box.
+const LANES = [
+  ['director', 'Director', ['dair_call']],
+  ['reasoning', 'Reasoning', ['reason_call']],
+  ['tools', 'Tools', ['tool_call']],
+  ['failures', 'Failures', null],
+  ['findings', 'Findings', ['finding', 'self_correction']],
+];
+function laneSoloed(lane) {
+  if (lane === 'failures') return State.filters.errorsOnly;
+  const want = LANES.find(l => l[0] === lane)[2];
+  const T = State.filters.types;
+  return T.size === want.length && want.every(t => T.has(t));
+}
+
+function renderChart() {
+  const host = $('#chart');
+  const es = State.entries.filter(e => _parseTs(e.ts) !== null);
+  if (es.length < 2) { host.innerHTML = ''; $('#chart-range').innerHTML = ''; State.chartSpan = null; return; }
+  const times = es.map(e => _parseTs(e.ts));
+  const bounds = [Math.min(...times), Math.max(...times)];
+  // The chart shows the whole run, or a view zoomed and slid within it; a
+  // view at the run's end rides along while the list follows new entries.
+  let v = State.view;
+  if (v) v = State.followTail && State.chartRun ? TimeView.follow(v, State.chartRun[1], bounds) : TimeView.fit(v, bounds);
+  State.view = v; State.chartRun = bounds;
+  const [t0, t1] = v || bounds;
+  const span = Math.max(1, t1 - t0);
+  const x = (t) => (100 * (t - t0) / span);
+  const fmt = (t) => _fmtUtcHMS(new Date(t)).slice(0, span < 600e3 ? 8 : 5);
+  $('#chart-range').innerHTML = `${fmt(t0)} – ${fmt(t1)} UTC${v ? ' · <button type="button" class="lnk" id="chart-reset">full run</button>' : ''}`;
+  State.chartSpan = { t0, span };
+  if (!$('#chart-fold').open) { host.innerHTML = ''; return; }
+  const m = span * .02;                                   // a hair beyond each edge
+  const inView = (t) => t >= t0 - m && t <= t1 + m;
+  const tsOf = (cid) => { const e = State.entriesById.get(cid); return e ? _parseTs(e.ts) : null; };
+  const sel = State.selectedId;
+
+  const phases = State.phaseBlocks.map(b => {
+    const a = tsOf(b.startCid), z = tsOf(b.endCid);
+    return { name: b.phase, anchor: b.anchor, from: a === null ? bounds[0] : a, to: z === null ? bounds[1] : z };
+  }).filter(p => p.to >= p.from);
+  const phaseRow = phases.map((p, i) => {
+    const to = i + 1 < phases.length ? phases[i + 1].from : bounds[1];
+    if (to < t0 || p.from > t1) return '';
+    const w = Math.max(0.4, x(Math.min(to, t1)) - x(Math.max(p.from, t0)));
+    const dur = _fmtDuration(to - p.from);
+    // The band shows the longest of its label, its name or a three-letter
+    // code that fits (fitPhaseLabels), never a cut-off word.
+    return `<div class="${State.filters.phase === p.anchor ? 'on' : ''}" data-phase="${escapeHtml(p.anchor)}" role="button" tabindex="0" style="flex:${w.toFixed(2)};background:${phaseHue(p.name)}" title="${escapeHtml(p.name)} · ${escapeHtml(dur)} · click to list only this phase" data-label="${escapeHtml(p.name)} · ${escapeHtml(dur)}" data-name="${escapeHtml(p.name)}" data-short="${escapeHtml(p.name.slice(0, 3).toUpperCase())}">${escapeHtml(p.name)} · ${escapeHtml(dur)}</div>`;
+  }).join('');
+
+  // A block is one entry, or a run of tool calls from `e` through `to`;
+  // either lights up while the selected step is inside it.
+  const blk = (e, left, width, bg, label, fg, to) => {
+    const on = sel !== null && (to === undefined ? sel === e.call_id : (sel >= e.call_id && sel <= to));
+    return `<div class="blk${on ? ' on' : ''}" data-cid="${e.call_id}"${to !== undefined ? ` data-to="${to}"` : ''} style="left:${left.toFixed(2)}%;width:${Math.max(0.35, width).toFixed(2)}%;background:${bg}${fg ? `;color:${fg}` : ''}" title="#${e.call_id} ${escapeHtml(label || '')}">${width > 6 ? escapeHtml(label || '') : ''}</div>`;
+  };
+
+  const director = es.filter(e => e.type === 'dair_call' && inView(_parseTs(e.ts)))
+    .map(e => blk(e, x(_parseTs(e.ts)), 0.8, 'var(--partial)', `${e.current_phase || ''}${e.transition_recommended ? ` → ${e.next_phase}` : ''}`)).join('');
+  const reasoning = es.filter(e => e.type === 'reason_call' && inView(_parseTs(e.ts)))
+    .map(e => blk(e, x(_parseTs(e.ts)), 1.2, e.success === false ? 'var(--bad)' : 'var(--accent)',
+                  String(e.tool || 'reason').replace(/^reason[._]/, ''))).join('');
+  // Consecutive tool calls become one span, so the run's shape reads as
+  // "60 calls here, 80 there" rather than 140 slivers.
+  let toolsHtml = '', run = [];
+  const flushRun = () => {
+    if (!run.length) return;
+    const a = _parseTs(run[0].ts), z = _parseTs(run[run.length - 1].ts);
+    if (z < t0 - m || a > t1 + m) { run = []; return; }
+    const failed = run.filter(e => !e.success).length;
+    toolsHtml += blk(run[0], x(a), x(z) - x(a) + 0.3, 'var(--fg-2)',
+      `${run.length} call${run.length > 1 ? 's' : ''}${failed ? ` · ${failed} failed` : ''}`, '#0c0f14', run[run.length - 1].call_id);
+    run = [];
+  };
+  // Zoomed in, a batch splits wherever two calls have room between them.
+  for (const e of es) {
+    if (e.type !== 'tool_call') { flushRun(); continue; }
+    if (run.length && x(_parseTs(e.ts)) - x(_parseTs(run[run.length - 1].ts)) > 1.5) flushRun();
+    run.push(e);
+  }
+  flushRun();
+  const failures = es.filter(e => ((e.type === 'tool_call' && !e.success) || e.type === 'call_abandoned' || e.type === 'system_error') && inView(_parseTs(e.ts)))
+    .map(e => `<div class="tick${sel === e.call_id ? ' on' : ''}" data-cid="${e.call_id}" style="left:${x(_parseTs(e.ts)).toFixed(2)}%" title="#${e.call_id} ${escapeHtml(_toolLabel(e) || e.type)}"></div>`).join('');
+  const findings = es.filter(e => (e.type === 'finding' || e.type === 'self_correction') && inView(_parseTs(e.ts)))
+    .map(e => `<div class="dia${sel === e.call_id ? ' on' : ''}" data-cid="${e.call_id}" style="left:${x(_parseTs(e.ts)).toFixed(2)}%;background:${e.type === 'self_correction' ? 'var(--warn)' : `var(--conf-${String(e.confidence || 'unconfirmed').toLowerCase()})`}" title="#${e.call_id} ${escapeHtml(shorten(e.description || e.prior_belief || '', 120))}"></div>`).join('');
+
+  const axis = [0, .25, .5, .75, 1].map(f => `<span style="left:${(100 * f).toFixed(0)}%">${escapeHtml(fmt(t0 + f * span))}</span>`).join('');
+  const w = State.filters.window;
+  const brush = w ? `<div class="brush" style="left:${x(w[0]).toFixed(2)}%;width:${(x(w[1]) - x(w[0])).toFixed(2)}%"></div>` : '';
+  const marks = { director, reasoning, tools: toolsHtml, failures, findings };
+  const lanesHtml = LANES.map(([key, label]) =>
+    `<div class="ln"><div class="nm${laneSoloed(key) ? ' on' : ''}" data-lane="${key}" role="button" tabindex="0" title="Click to list only this lane">${label}</div><div class="tr">${marks[key]}</div></div>`).join('');
+
+  host.innerHTML = `
+    <div class="gantt" id="gantt">
+      <div class="phl${State.filters.phase ? ' has-on' : ''}"><div></div><div class="row">${phaseRow}</div></div>
+      <div class="lanes">${lanesHtml}<div class="brush-layer">${brush}</div></div>
+      <div class="axis"><div></div><div class="ax">${axis}</div></div>
+    </div>
+    <div class="chart-legend">
+      <span><i style="background:var(--partial)"></i>Director ruling</span>
+      <span><i style="background:var(--accent)"></i>Reasoning gate</span>
+      <span><i style="background:var(--fg-2)"></i>Tool calls</span>
+      <span><i style="background:var(--bad)"></i>Failed or aborted call</span>
+      <span><i style="background:var(--conf-confirmed)"></i>Finding, by confidence</span>
+      <span><i style="background:var(--warn)"></i>Self-correction</span>
+    </div>`;
+  const gantt = host.querySelector('#gantt');
+  const act = (el) => { if (el.dataset.phase) togglePhase(el.dataset.phase); else toggleLane(el.dataset.lane); };
+  gantt.querySelectorAll('[data-phase], [data-lane]').forEach(el => el.addEventListener('click', () => act(el)));
+  gantt.addEventListener('keydown', (ev) => {
+    if (ev.key !== 'Enter' && ev.key !== ' ') return;
+    const el = ev.target.closest('[data-phase], [data-lane]');
+    if (el) { ev.preventDefault(); act(el); }
+  });
+  setupBrush(gantt.querySelector('.lanes'));
+  fitPhaseLabels();
+}
+
+// ── The chart drives the list ───────────────────────────────────────────────
+function togglePhase(anchor) {
+  State.filters.phase = State.filters.phase === anchor ? '' : anchor;
+  $('#phase-select').value = State.filters.phase;
+  renderEntries(); renderChart(); scrollListTop();
+}
+
+// A lane solos its types in the list; a second click restores the chips'
+// defaults. The failures lane is the failures-only box.
+function toggleLane(lane) {
+  if (lane === 'failures') {
+    const box = $('#filter-errors');
+    box.checked = !box.checked;
+    box.dispatchEvent(new Event('change'));
+  } else {
+    const want = LANES.find(l => l[0] === lane)[2];
+    const solo = !laneSoloed(lane);
+    const chips = $$('.type-filter');
+    for (const c of chips) c.checked = solo ? want.includes(c.value) : c.defaultChecked;
+    chips[0].dispatchEvent(new Event('change'));   // one change event reads every chip
+  }
+  scrollListTop();
+}
+
+// A run of tool calls scopes the list to its span; a single mark lands on
+// its step.
+function markClicked(el) {
+  const cid = parseInt(el.dataset.cid, 10);
+  const to = parseInt(el.dataset.to, 10);
+  if (Number.isFinite(to) && to !== cid) {
+    const a = State.entriesById.get(cid), z = State.entriesById.get(to);
+    if (a && z) { setWindow([_parseTs(a.ts), _parseTs(z.ts)]); scrollListTop(); }
+    return;
+  }
+  locateEntry(cid);
+}
+
+// The step is selected, scrolled into view and pulsed. A folded batch opens
+// around it (renderEntries), and whatever hid it is released, narrowest
+// first, until it shows.
+function locateEntry(cid) {
+  const e = State.entriesById.get(cid);
+  if (!e) return;
+  const F = State.filters;
+  const release = [
+    () => { F.jump = null; $('#jump').value = ''; },
+    () => { F.window = null; $('#window-chip').hidden = true; },
+    () => { F.phase = ''; $('#phase-select').value = ''; },
+    () => { F.errorsOnly = false; $('#filter-errors').checked = false; },
+    () => { F.hasFindingOnly = false; $('#filter-has-finding').checked = false; },
+    () => { F.search = ''; $('#search').value = ''; },
+    () => { const c = $(`.type-filter[value="${e.type}"]`); if (c) c.checked = true; F.types.add(e.type); },
+  ];
+  for (const undo of release) { if (entryMatchesFilters(e)) break; undo(); }
+  pauseFollow();
+  State.selectedId = cid;
+  renderEntries(); renderChart();
+  const row = document.querySelector(`.entry[data-cid="${cid}"]`);
+  if (!row) return;
+  row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  row.classList.add('linked-highlight');
+  setTimeout(() => row.classList.remove('linked-highlight'), 1700);
+}
+
+function scrollListTop() { const s = $('#entries-list').parentElement; if (s) s.scrollTop = 0; }
+
+// Following the tail would pull the list back to the top under the reader.
+function pauseFollow() {
+  if (!State.followTail) return;
+  State.followTail = false;
+  const ft = $('#follow-tail'); if (ft) ft.checked = false;
+}
+
+// Press on a track and move: a window. Press and release in place: the mark
+// under the pointer, or nothing, which clears the window.
+function setupBrush(lanes) {
+  if (!lanes || !State.chartSpan) return;
+  const layer = lanes.querySelector('.brush-layer');
+  let start = null, live = null, pressed = null;
+  const frac = (ev) => { const r = layer.getBoundingClientRect(); return Math.min(1, Math.max(0, (ev.clientX - r.left) / r.width)); };
+  const ms = (f) => State.chartSpan.t0 + f * State.chartSpan.span;
+  const reset = () => { start = null; pressed = null; if (live) { live.remove(); live = null; } };
+  lanes.addEventListener('pointerdown', (ev) => {
+    if (ev.button !== 0 || !ev.target.closest('.tr')) return;
+    pressed = ev.target.closest('[data-cid]');
+    start = frac(ev);
+    lanes.setPointerCapture(ev.pointerId);
+  });
+  lanes.addEventListener('pointermove', (ev) => {
+    if (start === null) return;
+    const a = Math.min(start, frac(ev)), b = Math.max(start, frac(ev));
+    if (b - a < 0.01) return;
+    if (!live) { live = document.createElement('div'); live.className = 'brush'; layer.appendChild(live); }
+    live.style.left = `${(100 * a).toFixed(2)}%`; live.style.width = `${(100 * (b - a)).toFixed(2)}%`;
+  });
+  lanes.addEventListener('pointerup', (ev) => {
+    if (start === null) return;
+    const a = Math.min(start, frac(ev)), b = Math.max(start, frac(ev));
+    const el = pressed;
+    reset();
+    if (b - a >= 0.01) setWindow([ms(a), ms(b)]);
+    else if (el) markClicked(el);
+    else setWindow(null);
+  });
+  lanes.addEventListener('pointercancel', reset);
+}
+
+function setWindow(w) {
+  State.filters.window = w;
+  const chip = $('#window-chip');
+  if (w) {
+    chip.hidden = false;
+    chip.textContent = `${_fmtUtcHMS(new Date(w[0])).slice(0, 5)} – ${_fmtUtcHMS(new Date(w[1])).slice(0, 5)} UTC · clear`;
+  } else {
+    chip.hidden = true;
+  }
+  renderEntries();
+  renderChart();
+}
+
+// Wheel over the chart zooms the time axis about the pointer; a sideways
+// wheel or shift+wheel slides the view. Out past the run is the run again.
+function setupChartView() {
+  const host = $('#chart');
+  let queued = false;
+  const redraw = () => { if (queued) return; queued = true; requestAnimationFrame(() => { queued = false; renderChart(); }); };
+  host.addEventListener('wheel', (ev) => {
+    const layer = host.querySelector('.brush-layer');
+    if (!layer || !State.chartRun || !ev.target.closest('.gantt')) return;
+    ev.preventDefault();
+    const r = layer.getBoundingClientRect();
+    const unit = ev.deltaMode === 1 ? 16 : ev.deltaMode === 2 ? r.width : 1;   // lines, pages, pixels
+    const dx = ev.deltaX * unit, dy = ev.deltaY * unit;
+    if (ev.shiftKey || Math.abs(dx) > Math.abs(dy)) {
+      State.view = TimeView.pan(State.view, State.chartRun, (ev.shiftKey ? (dy || dx) : dx) / r.width);
+    } else {
+      const frac = Math.min(1, Math.max(0, (ev.clientX - r.left) / r.width));
+      State.view = TimeView.zoom(State.view, State.chartRun, frac, Math.exp(dy * 0.002));
+    }
+    redraw();
+  }, { passive: false });
+  $('#chart-range').addEventListener('click', (ev) => {
+    if (!ev.target.closest('#chart-reset')) return;
+    ev.preventDefault();                       // a click in the summary would fold the chart
+    State.view = null; renderChart();
+  });
+  const fold = $('#chart-fold');
+  try { if (localStorage.getItem(LS_CHART) === 'closed') fold.open = false; } catch (_e) { /* storage blocked */ }
+  fold.addEventListener('toggle', () => {
+    try { localStorage.setItem(LS_CHART, fold.open ? 'open' : 'closed'); } catch (_e) { /* storage blocked */ }
+    renderChart();
+  });
+  // The list takes the height left under whatever sits above it: the chart
+  // open or folded, a toolbar on one row or three, the response panel shown.
+  const onResize = () => { fitList(); fitPhaseLabels(); };
+  const ro = new ResizeObserver(onResize);
+  $$('.band, .tools, #response-panel').forEach(el => ro.observe(el));
+  window.addEventListener('resize', onResize);
+}
+
+// A phase band shows the longest of its label with duration, its bare name
+// or a three-letter code that fits its width, and nothing when even that
+// is too wide; the tooltip always carries the full name.
+function fitPhaseLabels() {
+  for (const el of $$('#chart .phl .row > div')) {
+    for (const text of [el.dataset.label, el.dataset.name, el.dataset.short, '']) {
+      el.textContent = text;
+      if (el.scrollWidth <= el.clientWidth) break;
+    }
+  }
+}
+
+function fitList() {
+  const s = $('#entries-scroll');
+  if (!matchMedia('(min-width: 761px)').matches) { s.style.height = ''; return; }
+  const top = s.getBoundingClientRect().top + window.scrollY;
+  s.style.height = `${Math.max(440, window.innerHeight - top - 64)}px`;
+}
+
+// ── The sheet ────────────────────────────────────────────────────────────────
+function openSheet() {
+  document.getElementById('sheet').classList.add('open');
+  document.getElementById('scrim').classList.add('on');
+}
+function closeSheet() {
+  document.getElementById('sheet').classList.remove('open');
+  document.getElementById('scrim').classList.remove('on');
+}
+function setupBoardControls() {
+  $('#fold-batches').addEventListener('change', (ev) => { State.fold = ev.target.checked; renderEntries(); });
+  $('#window-chip').addEventListener('click', () => setWindow(null));
+  $('#sheet-close').addEventListener('click', closeSheet);
+  $('#scrim').addEventListener('click', closeSheet);
+  document.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') closeSheet(); });
+  $('#entries-list').addEventListener('click', (ev) => {
+    const b = ev.target.closest('.entry.batch');
+    if (b) { State.openBatches.add(parseInt(b.dataset.batch, 10)); renderEntries(); }
+  });
+}
+
+// ── Render detail pane ──────────────────────────────────────────────────────
+function renderDetail(e) {
+  if (!e) {
+    $('#detail').innerHTML = paneEmpty('Click an entry on the left to see its details.');
+    return;
+  }
+  const phaseTag = e.dair_phase
+    ? ` <span class="pill dair" style="font-weight:400;font-size:var(--fs-label);">phase: ${escapeHtml(e.dair_phase)}${e.dair_depth ? ' d='+e.dair_depth : ''}</span>`
+    : '';
+  const head = `
+    <h2>${entrySummary(e).pill} <code>${_fmtCid(e.call_id)}</code>${phaseTag} <span style="color:var(--fg-2);font-weight:400;font-size:var(--fs-small);">${escapeHtml(e.ts || '')}</span></h2>
+  `;
+  let body = '';
+  switch (e.type) {
+    case 'tool_call': body = renderToolCall(e); break;
+    case 'reason_call': body = renderReasonCall(e); break;
+    case 'dair_call': body = renderDairCall(e); break;
+    case 'finding': body = renderFinding(e); break;
+    case 'self_correction': body = renderSelfCorrection(e); break;
+    case 'curiosity_probe': body = renderCuriosityProbe(e); break;
+    case 'investigation_narration': body = renderNarration(e); break;
+    case 'call_initiated':
+    case 'call_abandoned': body = renderInit(e); break;
+    case 'system_error': body = renderSystemError(e); break;
+    default: body = `<pre>${escapeHtml(JSON.stringify(e, null, 2))}</pre>`;
+  }
+  $('#detail').innerHTML = head + body;
+  $('#detail').querySelectorAll('.link[data-jump]').forEach(el => {
+    el.addEventListener('click', () => selectEntry(parseInt(el.dataset.jump, 10)));
+  });
+}
+
+function _findingsLinkedHere(cid) {
+  const rev = (State.reverseIndex && State.reverseIndex.get(cid)) || [];
+  if (!rev.length) return '';
+  return `<h3>findings linked to this call</h3><ul>` +
+    rev.map(f => `<li>${_linkChip(f.call_id, `→ #${f.call_id}`)} <span class="pill finding-${(f.confidence||'').toLowerCase()}">${escapeHtml((f.confidence||'').toUpperCase())}</span> ${escapeHtml(f.description || '')}</li>`).join('') +
+    `</ul>`;
+}
+
+function renderToolCall(e) {
+  return `
+    <div class="kv">
+      <span class="k">cmd</span><span class="v"><code>${escapeHtml(e.cmd)}</code></span>
+      <span class="k">status</span><span class="v">${e.success ? '<span class="pill ok">OK</span>' : '<span class="pill error">FAIL</span>'} ${e.exit_code !== undefined ? `exit=${e.exit_code}` : ''}${e.timed_out ? ' TIMEOUT' : ''}</span>
+      <span class="k">elapsed</span><span class="v">${e.elapsed_seconds || 0}s</span>
+      <span class="k">retries</span><span class="v">${e.retries || 0}</span>
+      ${e.protocol_violation ? `<span class="k">protocol</span><span class="v"><span class="pill error">${escapeHtml(e.protocol_violation)}</span></span>` : ''}
+      ${e.truncated ? `<span class="k">truncated</span><span class="v">true</span>` : ''}
+    </div>
+    ${e.stdout_excerpt ? `<h3>stdout excerpt</h3><pre>${escapeHtml(e.stdout_excerpt)}</pre>` : ''}
+    ${e.stderr ? `<h3>stderr</h3><pre>${escapeHtml(e.stderr)}</pre>` : ''}
+    ${_findingsLinkedHere(e.call_id)}
+  `;
+}
+
+function renderReasonCall(e) {
+  const inputs = e.inputs || {};
+  const directives = e.directives || {};
+  const audit = e.evidence_audit || [];
+  return `
+    <div class="kv">
+      <span class="k">tool</span><span class="v"><code>${escapeHtml(e.tool)}</code></span>
+      <span class="k">success</span><span class="v">${e.success ? '<span class="pill ok">OK</span>' : '<span class="pill error">FAIL</span>'}</span>
+      <span class="k">tokens</span><span class="v">in=${e.input_tokens || 0} out=${e.output_tokens || 0}</span>
+      ${e.hypothesis_id ? `<span class="k">hypothesis</span><span class="v"><code>${escapeHtml(e.hypothesis_id)}</code></span>` : ''}
+    </div>
+    ${inputs.user_message ? `<h3>input — user message</h3><pre>${escapeHtml(inputs.user_message)}</pre>` : ''}
+    ${inputs.system_prompt_kind ? `<div class="kv"><span class="k">system_prompt_kind</span><span class="v"><code>${escapeHtml(inputs.system_prompt_kind)}</code></span></div>` : ''}
+    ${e.conclusion ? `<h3>conclusion</h3><pre>${escapeHtml(e.conclusion)}</pre>` : ''}
+    ${directives.priority_tools && directives.priority_tools.length ? `<h3>directives — priority_tools</h3><pre>${escapeHtml(JSON.stringify(directives.priority_tools, null, 2))}</pre>` : ''}
+    ${audit.length ? `<h3>evidence audit</h3><pre>${escapeHtml(JSON.stringify(audit, null, 2))}</pre>` : ''}
+    ${_findingsLinkedHere(e.call_id)}
+  `;
+}
+
+function renderDairCall(e) {
+  const inputs = e.inputs || {};
+  const challenges = e.verification_challenges || [];
+  const dirs = e.directives || {};
+  const rec = e.recommended_actions || [];
+  return `
+    <div class="kv">
+      <span class="k">phase</span><span class="v"><strong>${escapeHtml(e.current_phase)}</strong></span>
+      <span class="k">stack_action</span><span class="v">${escapeHtml(e.stack_action)}</span>
+      <span class="k">transition</span><span class="v">${e.transition_recommended ? `→ ${escapeHtml(e.next_phase)}` : 'none'}</span>
+      ${e.verification_satisfied ? `<span class="k">satisfied</span><span class="v">yes</span>` : ''}
+      ${e.investigation_focus ? `<span class="k">focus</span><span class="v">${escapeHtml(e.investigation_focus)}</span>` : ''}
+    </div>
+    ${e.phase_rationale ? `<h3>phase rationale</h3><pre>${escapeHtml(e.phase_rationale)}</pre>` : ''}
+    ${e.transition_rationale ? `<h3>transition rationale</h3><pre>${escapeHtml(e.transition_rationale)}</pre>` : ''}
+    ${inputs.tool_results_summary ? `<h3>input — tool_results_summary</h3><pre>${escapeHtml(inputs.tool_results_summary)}</pre>` : ''}
+    ${inputs.phase_stack !== undefined ? `<h3>input — phase_stack</h3><pre>${escapeHtml(JSON.stringify(inputs.phase_stack, null, 2))}</pre>` : ''}
+    ${inputs.case_context ? `<h3>input — case_context</h3><pre>${escapeHtml(inputs.case_context)}</pre>` : ''}
+    ${challenges.length ? renderChallenges(challenges) : ''}
+    ${dirs.priority_tools && dirs.priority_tools.length ? `<h3>directives — priority_tools</h3><pre>${escapeHtml(JSON.stringify(dirs.priority_tools, null, 2))}</pre>` : ''}
+    ${rec.length ? `<h3>recommended actions (advisory)</h3><ul>${rec.map(r => `<li>${escapeHtml(r)}</li>`).join('')}</ul>` : ''}
+  `;
+}
+
+function renderChallenges(challenges) {
+  return `<h3>verification challenges</h3><table>
+    <thead><tr><th>claim</th><th>method</th><th>result</th><th>impact</th></tr></thead>
+    <tbody>
+      ${challenges.map(c => {
+        const r = c.verified === true ? '<span class="badge confirmed">verified</span>'
+               : c.verified === false ? '<span class="badge refuted">refuted</span>'
+               : '<span class="badge pending">pending</span>';
+        return `<tr>
+          <td>${escapeHtml(c.claim || '')}</td>
+          <td><code>${escapeHtml(c.challenge_method || '')}</code></td>
+          <td>${r}${c.notes ? '<br/><span style="color:var(--fg-2);font-size:var(--fs-label);">'+escapeHtml(c.notes)+'</span>' : ''}</td>
+          <td>${escapeHtml(c.confidence_impact || '—')}</td>
+        </tr>`;
+      }).join('')}
+    </tbody>
+  </table>`;
+}
+
+function renderFinding(e) {
+  const conf = (e.confidence || '').toUpperCase();
+  const cls = `finding-${conf.toLowerCase()}`;
+  return `
+    <div class="kv">
+      <span class="k">confidence</span><span class="v"><span class="pill ${cls}">${conf}</span></span>
+      ${e.source ? `<span class="k">source</span><span class="v"><code>${escapeHtml(e.source)}</code></span>` : ''}
+      ${e.linked_call_id ? `<span class="k">linked call</span><span class="v"><span class="link" data-jump="${e.linked_call_id}">#${e.linked_call_id}</span></span>` : ''}
+      ${e.tested_hypothesis_id ? `<span class="k">hypothesis</span><span class="v"><code>${escapeHtml(e.tested_hypothesis_id)}</code></span>` : ''}
+    </div>
+    <h3>description</h3>
+    <pre>${escapeHtml(e.description)}</pre>
+  `;
+}
+
+function renderSelfCorrection(e) {
+  return `
+    <div class="kv">
+      <span class="k">trigger</span><span class="v"><code>${escapeHtml(e.trigger)}</code></span>
+      ${e.linked_call_id ? `<span class="k">from call</span><span class="v"><span class="link" data-jump="${e.linked_call_id}">#${e.linked_call_id}</span></span>` : ''}
+    </div>
+    <h3>prior belief</h3><pre>${escapeHtml(e.prior_belief)}</pre>
+    <h3>revised belief</h3><pre>${escapeHtml(e.new_belief)}</pre>
+    ${e.evidence ? `<h3>evidence</h3><pre>${escapeHtml(e.evidence)}</pre>` : ''}
+  `;
+}
+
+function renderNarration(e) {
+  const refs = e.input_call_ids || [];
+  return `
+    ${refs.length ? `<div class="kv"><span class="k">refers to</span><span class="v">${refs.map(c => `<span class="link" data-jump="${c}">#${c}</span>`).join(' ')}</span></div>` : ''}
+    <h3>content</h3><pre>${escapeHtml(e.content)}</pre>
+  `;
+}
+
+function renderCuriosityProbe(e) {
+  const refs = e.input_call_ids || [];
+  return `
+    <div class="kv">
+      ${e.seeded_by ? `<span class="k">seeded by</span><span class="v"><code>${escapeHtml(e.seeded_by)}</code> <span style="color:var(--fg-2);font-size:var(--fs-label);">(absence hypothesis)</span></span>` : ''}
+      ${refs.length ? `<span class="k">probed</span><span class="v">${refs.map(c => `<span class="link" data-jump="${c}">#${c}</span>`).join(' ')}</span>` : ''}
+    </div>
+    <h3>probe rationale</h3><pre>${escapeHtml(e.probe_rationale || '')}</pre>
+    <p style="color:var(--fg-2);font-size:var(--fs-small);">A self-directed read-only look outside the work order. Carries no evidentiary weight alone — its <code>call_id</code> must flow into a finding via <code>input_call_ids</code> for the gates to apply.</p>
+    ${_findingsLinkedHere(e.call_id)}
+  `;
+}
+
+function renderInit(e) {
+  const inputs = e.inputs || {};
+  return `
+    <div class="kv">
+      <span class="k">tool</span><span class="v"><code>${escapeHtml(e.tool)}</code></span>
+      ${e.backend ? `<span class="k">backend</span><span class="v">${escapeHtml(e.backend)}</span>` : ''}
+      ${e.reason ? `<span class="k">reason</span><span class="v">${escapeHtml(e.reason)}</span>` : ''}
+    </div>
+    ${Object.keys(inputs).length ? `<h3>inputs</h3><pre>${escapeHtml(JSON.stringify(inputs, null, 2))}</pre>` : ''}
+  `;
+}
+
+function renderSystemError(e) {
+  return `
+    <div class="kv">
+      <span class="k">category</span><span class="v"><code>${escapeHtml(e.category || 'unknown')}</code></span>
+    </div>
+    <h3>detail</h3><pre>${escapeHtml(e.detail || '')}</pre>
+  `;
+}
+
+// ── Selection ────────────────────────────────────────────────────────────────
+function selectEntry(cid) {
+  State.selectedId = cid;
+  pauseFollow();
+  renderEntries();
+  renderChart();
+  const e = State.entriesById.get(cid);
+  if (e) {
+    renderDetail(e);
+    $('#sheet-title').textContent = `${_fmtCid(cid)} · ${entrySummary(e).pill.replace(/<[^>]+>/g, '')}`;
+    openSheet();
+    const row = document.querySelector(`.entry[data-cid="${cid}"]`);
+    if (row) row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    // Pulse-highlight the linked entry so the eye can follow the link.
+    pulseLinked(e);
+  }
+}
+
+function pulseLinked(e) {
+  const targets = [];
+  if (e.linked_call_id) targets.push(e.linked_call_id);
+  if (Array.isArray(e.input_call_ids)) targets.push(...e.input_call_ids);
+  // For tool_call/reason_call entries, also highlight findings linked TO them.
+  if (e.type === 'tool_call' || e.type === 'reason_call') {
+    const rev = (State.reverseIndex && State.reverseIndex.get(e.call_id)) || [];
+    for (const f of rev) targets.push(f.call_id);
+  }
+  for (const cid of targets) {
+    const row = document.querySelector(`.entry[data-cid="${cid}"]`);
+    if (!row) continue;
+    row.classList.remove('linked-highlight');
+    // re-trigger CSS animation by forcing reflow
+    void row.offsetWidth;
+    row.classList.add('linked-highlight');
+    setTimeout(() => row.classList.remove('linked-highlight'), 1700);
+  }
+}
+
+// ── Wall-clock metric ────────────────────────────────────────────────────────
+// Total elapsed time since the first trace entry. Computed client-side.
+function _parseTs(ts) {
+  if (!ts) return null;
+  // ISO 8601 with timezone; trace stamps are always UTC.
+  const t = Date.parse(String(ts).replace(' ', 'T'));
+  return Number.isFinite(t) ? t : null;
+}
+function _fmtDuration(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return '—';
+  if (ms < 1000) return `${ms}ms`;
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  const rem = s % 60;
+  if (m < 60) return rem ? `${m}m ${rem}s` : `${m}m`;
+  const h = Math.floor(m / 60);
+  return `${h}h ${m % 60}m`;
+}
+function updateIrVelocityMetrics(entries) {
+  if (!entries || entries.length === 0) return;
+  const firstTs = _parseTs(entries[0].ts);
+  if (firstTs === null) return;
+  let lastTs = firstTs;
+  for (const e of entries) {
+    const t = _parseTs(e.ts);
+    if (t !== null) lastTs = Math.max(lastTs, t);
+  }
+  const el = document.getElementById('metric-wall');
+  if (el) {
+    el.textContent = _fmtDuration(lastTs - firstTs);
+    el.classList.add('fired');
+  }
+  // Trace-only placeholder, shown ONLY until /api/tokens answers once. It
+  // counts just the loaded trace; the API counts the whole case (agent
+  // transcripts + reason/DAIR), so the two legitimately disagree by an order
+  // of magnitude. Both used to write this metric on the same 2s interval,
+  // which made it flip between the two totals forever.
+  if (!State.tokensFromApi) {
+    let tin = 0, tout = 0;
+    for (const e of entries) {
+      tin += Number(e.input_tokens) || 0;
+      tout += Number(e.output_tokens) || 0;
+    }
+    if (tin + tout > 0) {
+      updateTokenMetric({ input_tokens: tin, output_tokens: tout, total_tokens: tin + tout });
+    }
+  }
+}
+function _fmtTokens(n) {
+  if (!Number.isFinite(n) || n <= 0) return '—';
+  if (n < 1000) return String(Math.round(n));
+  if (n < 1_000_000) {
+    const k = n / 1000;
+    return (k < 10 ? k.toFixed(1) : Math.round(k).toString()).replace(/\.0$/, '') + 'k';
+  }
+  const m = n / 1_000_000;
+  return (m < 10 ? m.toFixed(2) : m.toFixed(1)).replace(/\.?0+$/, '') + 'M';
+}
+function updateTokenMetric(tok) {
+  const el = document.getElementById('metric-tokens');
+  if (!el || !tok) return;
+  const total = Number(tok.total_tokens) || ((Number(tok.input_tokens) || 0) + (Number(tok.output_tokens) || 0));
+  const tin = Number(tok.input_tokens) || 0;
+  const tout = Number(tok.output_tokens) || 0;
+  if (total <= 0) {
+    el.textContent = '—';
+    el.classList.remove('fired');
+    el.title = 'Total LLM tokens for this case (agent + reason/DAIR)';
+    return;
+  }
+  el.textContent = _fmtTokens(total);
+  el.classList.add('fired');
+  el.title = `Total tokens consumed for this case\n` +
+    `in ${_fmtTokens(tin)} (${tin.toLocaleString()}) · ` +
+    `out ${_fmtTokens(tout)} (${tout.toLocaleString()}) · ` +
+    `total ${total.toLocaleString()}\n` +
+    `(agent transcripts + reason/DAIR in the execution log)`;
+}
+async function refreshCaseTokens() {
+  // Prefer case folder from picker / ?trace= so totals are case-wide, not
+  // only the currently loaded trace file.
+  const params = new URLSearchParams(window.location.search);
+  const trace = params.get('trace') || State.traceUrl || '';
+  let caseDir = '';
+  const m = String(trace).match(/^\/?([^/?#]+)\/analysis\//);
+  if (m) caseDir = m[1];
+  if (!caseDir && window.AtlasShell) caseDir = AtlasShell.activeCase() || '';
+  if (!caseDir) return;
+  try {
+    const data = await AtlasShell.fetchJson(
+      `/_dashboard/api/tokens?case=${encodeURIComponent(caseDir)}`,
+      { cache: 'no-store' },
+    );
+    const total = Number(data && data.total_tokens)
+      || ((Number(data && data.input_tokens) || 0) + (Number(data && data.output_tokens) || 0));
+    // An empty/zero answer is not authoritative -- keep showing the trace
+    // placeholder rather than blanking a number the analyst is watching.
+    if (total > 0) State.tokensFromApi = true;
+    updateTokenMetric(data);
+  } catch (_e) { /* API optional when opened via file:// */ }
+}
+// ── Data load ────────────────────────────────────────────────────────────────
+// Matches /<case>/analysis/<name>_trace.json (leading slash optional) — the
+// only shape a real trace source is ever supposed to have. Guards both the
+// #trace-url change handler and load() itself, since State.traceUrl can
+// also be set from ?trace= or traces[0].path — never trust a string just
+// because it landed in State.traceUrl by some other path than user typing.
+function isTracePath(url) {
+  return /^\/?[^/]+\/analysis\/[^/]+_trace\.json$/.test(url || '');
+}
+
+async function load() {
+  if (!State.traceUrl) return;
+  if (!isTracePath(State.traceUrl)) {
+    $('#live').classList.remove('on');
+    $('#live-text').textContent = 'error: not a trace path';
+    const empty = $('#empty-state');
+    if (empty) {
+      empty.style.display = '';
+      empty.innerHTML =
+        `<strong>Not a trace path.</strong><br>` +
+        `Source: <code>${escapeHtml(State.traceUrl)}</code><br>` +
+        `Expected something like <code>/&lt;case&gt;/analysis/&lt;case&gt;_trace.json</code> — ` +
+        `pick a trace from the dropdown above instead of typing one in.`;
+    }
+    return;
+  }
+  try {
+    const data = await AtlasShell.fetchJson(State.traceUrl, { cache: 'no-store' });
+    State.caseId = data.case_id || '';
+    // A session's trace-open mark is a note, not an error; older traces
+    // wrote it as a system_error with category trace_initialized.
+    const newEntries = (data.entries || []).map(e =>
+      (e.type === 'system_error' && e.category === 'trace_initialized')
+        ? { ...e, type: 'trace_opened' } : e);
+    const oldCount = State.prevEntryCount;
+    State.entries = newEntries;
+    State.entriesById = new Map(newEntries.map(e => [e.call_id, e]));
+    State.reverseIndex = buildReverseFindingIndex(newEntries);
+    State.phaseBlocks = buildPhaseIndex(newEntries);
+    $('#case-id').textContent = State.caseId;
+    $('#last-fetch').textContent = `fetched ${_fmtLocalHMS(new Date())}`;
+    $('#live').classList.add('on');
+    $('#live-text').textContent = 'live';
+    updateIrVelocityMetrics(newEntries);
+    refreshCaseTokens();
+    // Phase select options
+    const sel = $('#phase-select');
+    const cur = sel.value;
+    sel.innerHTML = '<option value="">all phases</option>' +
+      State.phaseBlocks.map(b => `<option value="${b.anchor}">${escapeHtml(b.phase)} (#${b.startCid}–#${b.endCid})</option>`).join('');
+    sel.value = cur;
+    // An unchanged trace leaves the page alone: a redraw every poll would
+    // cut a drag on the chart short and hide the tooltip under the pointer.
+    const sig = JSON.stringify(newEntries);
+    if (sig !== State.lastSig) { State.lastSig = sig; renderEntries(); renderChart(); }
+    // Deep link ?call=N (from Questions/Claims evidence links): select once.
+    if (!State._callDeepLinkDone) {
+      const wantCall = parseInt(getQueryParam('call') || '', 10);
+      if (Number.isFinite(wantCall) && State.entriesById.has(wantCall)) {
+        State._callDeepLinkDone = true;
+        State.followTail = false;
+        const ft = $('#follow-tail'); if (ft) ft.checked = false;
+        selectEntry(wantCall);
+      }
+    }
+    if (newEntries.length > oldCount) {
+      // Flash new entries
+      requestAnimationFrame(() => {
+        for (let i = oldCount; i < newEntries.length; i++) {
+          const row = document.querySelector(`.entry[data-cid="${newEntries[i].call_id}"]`);
+          if (row) row.classList.add('new');
+        }
+      });
+    }
+    State.prevEntryCount = newEntries.length;
+  } catch (err) {
+    $('#live').classList.remove('on');
+    // A dropped request is not a broken trace: keep the entries on screen,
+    // say so in the chip, and let the next poll retry.
+    if (AtlasShell.isTransient(err)) { $('#live-text').textContent = 'reconnecting'; return; }
+    $('#live-text').textContent = `error: ${err.message}`;
+    // Fail loudly: a silent 404 otherwise looks like an empty run. Show the
+    // exact URL we tried and the reason, so a case-root/filename mismatch
+    // (the classic deep-link 404) is diagnosable at a glance.
+    const empty = $('#empty-state');
+    if (empty) {
+      empty.style.display = '';
+      empty.innerHTML =
+        `<strong>Could not load trace.</strong><br>` +
+        `URL: <code>${escapeHtml(State.traceUrl || '(none)')}</code><br>` +
+        `Reason: ${escapeHtml(err.message)}<br>` +
+        `Check the case is under the dashboard's cases-root and the ` +
+        `trace filename (case-sensitive) matches, or pick a trace from the ` +
+        `dropdown above.`;
+    }
+  }
+}
+
+// ── Wiring ───────────────────────────────────────────────────────────────────
+function setupFilters() {
+  const updateTypes = () => {
+    State.filters.types = new Set(
+      $$('.type-filter:checked').map(el => el.value)
+    );
+    renderEntries();
+    renderChart();
+  };
+  $$('.type-filter').forEach(el => el.addEventListener('change', updateTypes));
+  updateTypes();
+
+  $('#search').addEventListener('input', (ev) => {
+    State.filters.search = ev.target.value.trim();
+    renderEntries();
+  });
+  $('#jump').addEventListener('input', (ev) => {
+    const v = parseInt(ev.target.value, 10);
+    State.filters.jump = Number.isFinite(v) && v > 0 ? v : null;
+    renderEntries();
+    if (State.filters.jump !== null) selectEntry(State.filters.jump);
+  });
+  $('#phase-select').addEventListener('change', (ev) => {
+    State.filters.phase = ev.target.value;
+    renderEntries(); renderChart();
+  });
+  $('#filter-errors').addEventListener('change', (ev) => {
+    State.filters.errorsOnly = ev.target.checked;
+    renderEntries(); renderChart();
+  });
+  $('#filter-has-finding').addEventListener('change', (ev) => {
+    State.filters.hasFindingOnly = ev.target.checked;
+    renderEntries();
+  });
+  $('#follow-tail').addEventListener('change', (ev) => {
+    State.followTail = ev.target.checked;
+  });
+  // Auto-pause follow-tail the moment the user scrolls away from the top —
+  // otherwise the 2s auto-refresh keeps yanking a manually-scrolled reader
+  // back to the newest entry. Our own programmatic reset (renderEntries)
+  // always scrolls TO 0, so it never re-triggers this — only a real
+  // scrollTop > 0 does.
+  $('#entries-list').parentElement.addEventListener('scroll', (ev) => {
+    if (State.followTail && ev.target.scrollTop > 4) {
+      State.followTail = false;
+      const ft = $('#follow-tail'); if (ft) ft.checked = false;
+    }
+  });
+  $('#autorefresh').addEventListener('change', (ev) => {
+    State.autorefresh = ev.target.checked;
+    setupRefreshTimer();
+  });
+  $('#trace-url').addEventListener('change', (ev) => {
+    const val = ev.target.value.trim();
+    // Browser autofill treats this text input as the "username" half of a
+    // login pair with the adjacent password field (#resp-secret) and can
+    // silently drop the logged-in username in here — e.g. "Admin" — which
+    // then gets fetched as a relative URL (GET /_dashboard/Admin, a 404
+    // that looks like a cases-root/filename problem but isn't). Reject
+    // anything that isn't shaped like a trace path before it ever reaches
+    // load(); autocomplete="off" (see the <input> itself) is the primary
+    // defense, this is the belt for whatever slips past it.
+    if (!isTracePath(val)) {
+      ev.target.value = State.traceUrl || '';
+      $('#live-text').textContent = 'error: not a trace path';
+      return;
+    }
+    State.traceUrl = val;
+    State.prevEntryCount = 0; State.lastSig = null; State.view = null; State.chartRun = null;
+    load();
+  });
+  $('#entries-list').addEventListener('click', (ev) => {
+    // Chip click → jump to that entry instead of opening the parent row.
+    const chip = ev.target.closest('.chip-link[data-jump]');
+    if (chip) {
+      ev.stopPropagation();
+      selectEntry(parseInt(chip.dataset.jump, 10));
+      return;
+    }
+    const row = ev.target.closest('.entry');
+    if (row && row.dataset.cid) selectEntry(parseInt(row.dataset.cid, 10));
+  });
+}
+
+function setupRefreshTimer() {
+  if (State.stopRefresh) { State.stopRefresh(); State.stopRefresh = null; }
+  if (State.autorefresh) {
+    // refreshCaseTokens is case-wide (see its own comment) and must not
+    // depend on load() succeeding — load() returns early with no trace
+    // file loaded/selected, which would otherwise starve the token metric.
+    State.stopRefresh = AtlasShell.poll(async () => {
+      await load();
+      await refreshCaseTokens();
+    }, 2000);
+  }
+}
+
+// ── Header clocks ────────────────────────────────────────────────────────────
+function _pad(n) { return String(n).padStart(2, '0'); }
+
+function _tzAbbrev() {
+  // e.g. "PDT", "EST", "UTC+5". Falls back to a numeric offset on browsers
+  // that don't expose a TZ short name.
+  try {
+    const parts = new Intl.DateTimeFormat([], {
+      timeZoneName: 'short', hour: '2-digit'
+    }).formatToParts(new Date());
+    const tz = parts.find(p => p.type === 'timeZoneName');
+    if (tz && tz.value) return tz.value;
+  } catch (_e) { /* fall through */ }
+  const off = -new Date().getTimezoneOffset();
+  const sign = off >= 0 ? '+' : '-';
+  const h = Math.floor(Math.abs(off) / 60);
+  const m = Math.abs(off) % 60;
+  return `UTC${sign}${h}${m ? ':' + _pad(m) : ''}`;
+}
+
+function _fmtLocalHMS(d) {
+  return `${_pad(d.getHours())}:${_pad(d.getMinutes())}:${_pad(d.getSeconds())} ${_tzAbbrev()}`;
+}
+
+function _fmtUtcHMS(d) {
+  return `${_pad(d.getUTCHours())}:${_pad(d.getUTCMinutes())}:${_pad(d.getUTCSeconds())} UTC`;
+}
+
+function tickClocks() {
+  const now = new Date();
+  const local = $('#clock-local');
+  const utc = $('#clock-utc');
+  if (local) local.textContent = _fmtLocalHMS(now);
+  if (utc)   utc.textContent   = _fmtUtcHMS(now);
+}
+
+// ── Trace picker ─────────────────────────────────────────────────────────────
+// Case selection is owned by the shared shell (AtlasShell); this page only
+// picks WHICH run/trace of the active case to inspect. If the URL carries no
+// ?trace=, the newest trace of the active case loads automatically so the
+// Process view is never a dead end.
+const TracePicker = {
+  traceCase() {
+    const m = String(State.traceUrl || '').match(/^\/?([^/]+)\/analysis\//);
+    return m ? m[1] : '';
+  },
+  init() {
+    $('#trace-select').addEventListener('change', () => {
+      const path = $('#trace-select').value;
+      if (path) this.navigateTo(path);
+    });
+  },
+  populate(caseDir) {
+    const sel = $('#trace-select');
+    const c = AtlasShell.cases().find(x => x.case_dir === caseDir);
+    if (!c || !c.traces.length) {
+      sel.innerHTML = '<option value="">— no traces —</option>';
+      sel.disabled = true;
+      return [];
+    }
+    sel.innerHTML = c.traces.map(t =>
+      `<option value="${escapeHtml(t.path)}">${escapeHtml(t.name)}</option>`).join('');
+    sel.disabled = false;
+    return c.traces;
+  },
+  navigateTo(tracePath) {
+    const u = new URL(window.location.href);
+    u.searchParams.set('trace', tracePath);
+    window.location.href = u.toString();
+  },
+  /** Called by the shell whenever the active case changes (incl. initial). */
+  onCase(caseDir) {
+    if (!caseDir) return;
+    const traces = this.populate(caseDir);
+    const current = this.traceCase();
+    if (current === caseDir && State.traceUrl) {
+      // URL trace already belongs to the active case — keep it selected.
+      $('#trace-select').value = State.traceUrl;
+      return;
+    }
+    if (current && current !== caseDir) {
+      // Case switched: never keep showing another case's process state.
+      if (traces.length) this.navigateTo(traces[0].path);
+      else {
+        const u = new URL(window.location.href);
+        u.searchParams.delete('trace');
+        window.location.href = u.toString();
+      }
+      return;
+    }
+    if (!State.traceUrl && traces.length) {
+      // No deep link: auto-load the newest trace (traces are newest-first).
+      State.traceUrl = traces[0].path;
+      $('#trace-select').value = State.traceUrl;
+      $('#trace-url').value = State.traceUrl;
+      const u = new URL(window.location.href);
+      u.searchParams.set('trace', State.traceUrl);
+      history.replaceState(null, '', u.toString());
+      load();
+      setupRefreshTimer();
+    }
+  },
+};
+
+function init() {
+  const url = getQueryParam('trace');
+  if (url) {
+    State.traceUrl = url;
+    $('#trace-url').value = url;
+  } else {
+    $('#trace-url').placeholder = '/path/to/trace.json or ?trace=...';
+  }
+  setupFilters();
+  setupBoardControls();
+  setupChartView();
+  TracePicker.init();
+  tickClocks();
+  setInterval(tickClocks, 1000);
+  if (State.traceUrl) {
+    load();
+  }
+  // Start the refresh loop unconditionally — token totals are case-wide
+  // and must keep updating even when this case has no trace file to load.
+  setupRefreshTimer();
+  AtlasShell.init({
+    page: 'process',
+    onCase: (cd) => {
+      TracePicker.onCase(cd);
+      refreshCaseTokens();
+      try { ResponsePanel.refresh(); } catch (_e) { /* optional */ }
+    },
+  });
+}
+init();
+</script>
+
+<script>
+// ── Live-response panel ──────────────────────────────────────────────────────
+// Polls /_dashboard/api/response for the selected case and renders pending
+// containment actions. Approve/deny are FAIL-CLOSED: they only work when the
+// operator has pasted the shared secret (0600 file) — the server 403s
+// otherwise. Each POST fetches a fresh single-use nonce first.
+const ResponsePanel = {
+  esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g,
+    c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); },
+
+  caseDir() {
+    // Case selection is owned by the shared shell.
+    return (window.AtlasShell && AtlasShell.activeCase()) || '';
+  },
+  secret() {
+    const el = document.querySelector('#resp-secret');
+    return el ? el.value : '';
+  },
+
+  async refresh() {
+    const panel = document.querySelector('#response-panel');
+    const cd = this.caseDir();
+    if (!cd) { panel.style.display = 'none'; return; }
+    let data;
+    try {
+      data = await AtlasShell.fetchJson(
+        `/_dashboard/api/response?case=${encodeURIComponent(cd)}`, { cache: 'no-store' });
+    } catch (_e) { panel.style.display = 'none'; return; }
+    const actions = (data.actions || []).filter(a => !a.executed);
+    panel.style.display = actions.length ? 'block' : 'none';
+    document.querySelector('#resp-count').textContent = actions.length;
+    this.render(actions);
+  },
+
+  render(actions) {
+    const host = document.querySelector('#resp-actions');
+    host.innerHTML = actions.map(a => {
+      const badge = a.status === 'approved' ? 'approved'
+        : a.status === 'denied' ? 'denied' : 'needs approval';
+      const disabled = (a.status === 'denied') ? 'disabled' : '';
+      return `<div class="resp-card" data-aid="${this.esc(a.action_id)}"
+                   style="border:1px solid var(--border);border-radius:var(--radius);
+                          padding:6px;margin-bottom:6px;font-size:var(--fs-small);">
+        <div><b>${this.esc(a.action_id)}</b> · ${this.esc(a.risk||'')}
+             ${a.reversible ? '· reversible' : '· <span title="no rollback">irreversible</span>'}
+             <span style="float:right;">${badge}</span></div>
+        <div style="opacity:.8;margin:2px 0;">${this.esc(a.description||'')}</div>
+        <code style="display:block;white-space:pre-wrap;word-break:break-all;
+                     background:rgba(127,127,127,.12);padding:3px;border-radius:var(--radius-row);">${this.esc(a.manual_command||'')}</code>
+        <div style="margin-top:4px;">
+          <button class="resp-approve" ${disabled}>Approve</button>
+          <button class="resp-deny" ${disabled}>Deny</button>
+        </div>
+      </div>`;
+    }).join('');
+    host.querySelectorAll('.resp-approve').forEach(b =>
+      b.addEventListener('click', e => this.act(e, 'approve')));
+    host.querySelectorAll('.resp-deny').forEach(b =>
+      b.addEventListener('click', e => this.act(e, 'deny')));
+  },
+
+  async nonce() {
+    const r = await fetch('/_dashboard/api/approval/nonce', {
+      cache: 'no-store',
+      headers: { 'X-Atlas-Approval-Secret': this.secret() },
+    });
+    if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.error || `HTTP ${r.status}`); }
+    return (await r.json()).nonce;
+  },
+
+  async act(ev, decision) {
+    const aid = ev.target.closest('.resp-card').dataset.aid;
+    const secret = this.secret();
+    if (!secret) { alert('Paste the approval secret first.'); return; }
+    let operator_text = '';
+    if (decision === 'approve') {
+      operator_text = prompt(`Type the action id to approve (e.g. "approve ${aid}")`, `approve ${aid}`) || '';
+      if (!operator_text.includes(aid)) { alert(`Text must contain ${aid} verbatim.`); return; }
+    }
+    try {
+      const nonce = await this.nonce();
+      const r = await fetch('/_dashboard/api/approval', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json',
+                   'X-Atlas-Approval-Secret': secret },
+        body: JSON.stringify({ case: this.caseDir(), action_id: aid,
+                               operator_text, nonce, decision }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || d.success === false) { alert(d.error || `Failed (HTTP ${r.status}).`); }
+    } catch (e) { alert(`Failed: ${e.message}`); }
+    this.refresh();
+  },
+
+  init() {
+    AtlasShell.poll(() => this.refresh(), 3000);
+    // Case switches are handled via the shell's onCase callback in init().
+  },
+};
+try { ResponsePanel.init(); } catch (_e) { /* trace-only view */ }
+
+</script>
+</body>
+</html>

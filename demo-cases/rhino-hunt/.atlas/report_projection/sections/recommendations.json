@@ -1,0 +1,30 @@
+{
+  "id": "recommendations",
+  "prose": "## 7. Recommendations\n\n*This case is an examination after the fact. The owner's duties remain: each measure below applies to systems still in service, and only if the owner has not already taken it. A measure derived from the ATT&CK mitigation table is a lesson for the owner, not a first-hour step.*\n\n*The brief does not say whose system this is; the recommendations assume the owner is the victim.*\n\n### Do now\n\n- **Assess legal and notification duties for the data believed to be taken** (host, now) — derived from the findings: C0004 [LIKELY]\n  - precaution for a suspected exfiltration incident, indicated by C0004\n- **Preserve proxy, firewall and DNS logs covering the suspected window: RHINOUSB** (network, now) — derived from the findings: C0004 [LIKELY]\n  - precaution for a suspected exfiltration incident, indicated by C0004\n- **Preserve volatile state and logs before any remediation: memory, event logs, shadow copies, firewall and proxy logs** (estate, now) — from prior knowledge\n  - precaution every incident shares\n\n### Escalate\n\n- **Keep a timestamped record of every response action taken from now on** (estate, soon) — from prior knowledge\n  - precaution every incident shares\n\n### Contain\n\n- **Block the identified egress destinations at the perimeter and review outbound traffic** (network, soon) — derived from the findings: C0004 [LIKELY]\n  - precaution for a suspected exfiltration incident, indicated by C0004; to be scoped: the finding names no typed addresses, domains, URLs or mail addresses on the attacker side\n\n*Items marked 'from prior knowledge' rest on what the analyst told Atlas before any evidence was read, not on findings.*\n",
+  "format": "dfir_notes",
+  "generated_at": "2026-09-29T17:44:19Z",
+  "generator_version": "report-projection/2.1",
+  "context_claim_ids": [
+    "C0003",
+    "C0004",
+    "C0008",
+    "C0009",
+    "C0010",
+    "C0011",
+    "C0012",
+    "C0013",
+    "C0014",
+    "C0015",
+    "C0016",
+    "C0017",
+    "C0018",
+    "C0019",
+    "C0020",
+    "C0021"
+  ],
+  "context_conclusion_ids": [
+    "N0022"
+  ],
+  "context_conflict_ids": [],
+  "content_sha256": "e14627fcd30cf0a06eaa87632f5e719f16f667ced25306643d29f26743a3c5b2"
+}

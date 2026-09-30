@@ -1,0 +1,25 @@
+{
+ "stack": "litellm",
+ "model": "example-model",
+ "scenario": "error-cap-below-budget",
+ "source": "hand-written in the LiteLLM error format for an Anthropic model, inside a gateway's detail text",
+ "status": 400,
+ "request": {
+  "model": "example-model",
+  "messages": [
+   {
+    "role": "user",
+    "content": "Reply with the single word: ok"
+   }
+  ],
+  "max_tokens": 512,
+  "reasoning_effort": "low"
+ },
+ "response": {
+  "detail": "Error: 400 - Bad Request - {\"error\": {\"message\": \"litellm.BadRequestError: {\\\"type\\\": \\\"error\\\", \\\"error\\\": {\\\"type\\\": \\\"invalid_request_error\\\", \\\"message\\\": \\\"max_tokens must be greater than thinking.budget_tokens.\\\"}}. The upstream provider rejected the request.\", \"code\": \"400\"}}"
+ },
+ "expect": {
+  "error_contains": "budget_tokens",
+  "accepted_values": null
+ }
+}

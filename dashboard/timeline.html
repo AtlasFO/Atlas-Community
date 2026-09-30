@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Atlas · Timeline</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<link rel="stylesheet" href="assets/atlas.css" />
+<script src="assets/i18n.js"></script>
+<style>
+  .picker-row {
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    margin-bottom: 18px;
+  }
+  .picker-row label {
+    font-size: var(--fs-label); text-transform: uppercase;
+    letter-spacing: 0.07em; color: var(--fg-2); font-weight: 600;
+  }
+  .picker-row select { min-width: 280px; max-width: 100%; }
+  .picker-row .meta { color: var(--fg-2); font-size: var(--fs-small); }
+  .picker-row a.dl { font-size: 12.5px; }
+  .picker-row .spacer { flex: 1; }
+  .tl-wrap {
+    background: var(--bg-2); border: 1px solid var(--border);
+    border-radius: var(--radius); overflow: auto; max-height: 70vh;
+  }
+  table.tl {
+    border-collapse: collapse; width: 100%; font-size: 12.5px;
+  }
+  table.tl th, table.tl td {
+    border-bottom: 1px solid var(--border); padding: 6px 10px;
+    text-align: left; vertical-align: top; white-space: nowrap;
+  }
+  table.tl th {
+    position: sticky; top: 0; background: var(--bg-3);
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em;
+    color: var(--fg-2); z-index: 1;
+  }
+  table.tl td.desc {
+    white-space: normal; min-width: 220px; max-width: 420px;
+    color: var(--fg-1);
+  }
+  table.tl tr:hover td { background: rgba(91,157,255,.06); }
+  .tl-note {
+    margin-top: 10px; font-size: var(--fs-small); color: var(--fg-2);
+  }
+  pre.plain {
+    background: var(--bg-2); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 14px 16px; overflow: auto;
+    font-size: 12px; white-space: pre-wrap;
+  }
+</style>
+</head>
+<body>
+<div class="page" id="app">
+  <div class="state-loading">Loading</div>
+</div>
+
+<script src="assets/shell.js"></script>
+<script>
+'use strict';
+const esc = AtlasShell.esc;
+const $app = () => document.getElementById('app');
+const PREVIEW_ROWS = 500;
+
+let tlFiles = [];
+let selectedPath = '';
+
+function parseTsv(text) {
+  const lines = text.replace(/^\uFEFF/, '').split(/\r?\n/).filter(l => l.length);
+  if (!lines.length) return { headers: [], rows: [] };
+  const headers = lines[0].split('\t');
+  const rows = [];
+  for (let i = 1; i < lines.length; i++) {
+    rows.push(lines[i].split('\t'));
+  }
+  return { headers, rows };
+}
+
+function renderTable(headers, rows) {
+  const shown = rows.slice(0, PREVIEW_ROWS);
+  const descIdx = headers.findIndex(h => /^description$/i.test(h));
+  const head = headers.map(h => `<th>${esc(h)}</th>`).join('');
+  const body = shown.map(row => {
+    const cells = headers.map((_, i) => {
+      const v = row[i] == null ? '' : row[i];
+      const cls = i === descIdx ? ' class="desc"' : '';
+      return `<td${cls}>${esc(v)}</td>`;
+    }).join('');
+    return `<tr>${cells}</tr>`;
+  }).join('');
+  const note = rows.length > PREVIEW_ROWS
+    ? `<div class="tl-note">Showing first ${PREVIEW_ROWS.toLocaleString()} of ${rows.length.toLocaleString()} rows — download the file for the full timeline.</div>`
+    : `<div class="tl-note">${rows.length.toLocaleString()} row${rows.length === 1 ? '' : 's'}</div>`;
+  return `<div class="tl-wrap"><table class="tl"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>${note}`;
+}
+
+async function showFile(path) {
+  selectedPath = path;
+  const host = document.getElementById('tl-preview');
+  const meta = document.getElementById('tl-meta');
+  const dl = document.getElementById('tl-download');
+  const f = tlFiles.find(x => x.path === path);
+  if (dl) {
+    dl.href = path || '#';
+    dl.hidden = !path;
+    dl.download = f ? f.name : '';
+  }
+  if (meta) {
+    meta.textContent = f
+      ? `${AtlasShell.fmtBytes(f.size)} · updated ${AtlasShell.timeAgo(f.mtime)}`
+      : '';
+  }
+  if (!host) return;
+  if (!path) {
+    host.innerHTML = '<div class="state-empty">Select a timeline file to preview.</div>';
+    return;
+  }
+  host.innerHTML = '<div class="state-loading">Loading</div>';
+  try {
+    const r = await fetch(path, { cache: 'no-store' });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const text = await r.text();
+    if (selectedPath !== path) return;
+    const low = (f && f.name || path).toLowerCase();
+    if (low.endsWith('.tsv') || low.endsWith('.csv')) {
+      const sep = low.endsWith('.csv') ? ',' : '\t';
+      let headers, rows;
+      if (sep === '\t') {
+        ({ headers, rows } = parseTsv(text));
+      } else {
+        const lines = text.replace(/^\uFEFF/, '').split(/\r?\n/).filter(Boolean);
+        headers = lines[0] ? lines[0].split(',') : [];
+        rows = lines.slice(1).map(l => l.split(','));
+      }
+      host.innerHTML = headers.length
+        ? renderTable(headers, rows)
+        : `<pre class="plain">${esc(text.slice(0, 20000))}</pre>`;
+    } else {
+      host.innerHTML = `<pre class="plain">${esc(text.slice(0, 50000))}</pre>`;
+    }
+  } catch (e) {
+    if (selectedPath !== path) return;
+    host.innerHTML = `<div class="state-error">Could not load timeline.\n${esc(path)}\n${esc(e.message)}</div>`;
+  }
+}
+
+function renderPage(cd, files) {
+  tlFiles = files;
+  const master = files.find(f => /master_timeline\.tsv$/i.test(f.name));
+  const sel = (new URLSearchParams(location.search).get('file'))
+    || (master && master.path)
+    || (files[0] && files[0].path)
+    || '';
+
+  const templateBtn = AtlasShell.timelinePluginActive()
+    ? `<a class="dl" href="/_dashboard/api/timeline_template?case=${encodeURIComponent(cd)}"
+         download title="Empty master_timeline.tsv with the correct columns">Download template</a>`
+    : '';
+
+  if (!files.length) {
+    $app().innerHTML = `
+      <h1 class="page-title">Timeline</h1>
+      <div class="picker-row">
+        <span class="spacer"></span>
+        ${templateBtn}
+      </div>
+      <div class="state-empty">No timeline file for this case yet.
+        <div class="hint"><code>master_timeline.tsv</code> is written under
+        <code>reports/</code> when the timeline builder finalizes a run.
+        ${templateBtn ? 'Use <strong>Download template</strong> for an empty column header.' : ''}</div>
+      </div>`;
+    return;
+  }
+
+  $app().innerHTML = `
+    <h1 class="page-title">Timeline</h1>
+    <p class="page-sub">Investigation timeline deliverables for this case.</p>
+    <div class="picker-row">
+      <label for="tl-select">File</label>
+      <select id="tl-select">
+        ${files.map(f =>
+          `<option value="${esc(f.path)}"${f.path === sel ? ' selected' : ''}>${esc(f.name)}</option>`
+        ).join('')}
+      </select>
+      <span class="meta" id="tl-meta"></span>
+      <a class="dl" id="tl-download" href="#" download>Download</a>
+      <span class="spacer"></span>
+      ${templateBtn}
+    </div>
+    <div id="tl-preview"></div>`;
+  document.getElementById('tl-select').addEventListener('change', (ev) => {
+    const u = new URL(window.location.href);
+    u.searchParams.set('file', ev.target.value);
+    history.replaceState(null, '', u.toString());
+    showFile(ev.target.value);
+  });
+  showFile(sel);
+}
+
+async function refresh() {
+  // Tab should only be reachable when the plugin is active; if someone deep-
+  // links here while it is off, send them back to Report.
+  if (!AtlasShell.timelinePluginActive()) {
+    const cd = AtlasShell.activeCase();
+    window.location.replace(
+      cd ? `report.html?case=${encodeURIComponent(cd)}` : 'report.html');
+    return;
+  }
+  const cd = AtlasShell.activeCase();
+  if (!cd) {
+    $app().innerHTML = `<h1 class="page-title">Timeline</h1>
+      <div class="state-empty">Select a case to see its timeline.</div>`;
+    return;
+  }
+  $app().innerHTML = '<div class="state-loading">Loading</div>';
+  let ov;
+  try {
+    ov = await AtlasShell.api('case_overview', { case: cd });
+  } catch (e) {
+    if (AtlasShell.activeCase() !== cd) return;
+    $app().innerHTML = `<div class="state-error">Could not load timeline status.\n${esc(e.message)}</div>`;
+    return;
+  }
+  if (AtlasShell.activeCase() !== cd) return;
+  const files = (ov.report && ov.report.files || [])
+    .filter(f => f.kind === 'timeline' || f.kind === 'timeline_readme');
+  renderPage(cd, files);
+}
+
+AtlasShell.init({ page: 'timeline', onCase: refresh });
+</script>
+</body>
+</html>

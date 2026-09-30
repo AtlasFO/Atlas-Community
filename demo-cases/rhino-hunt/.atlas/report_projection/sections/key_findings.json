@@ -1,0 +1,30 @@
+{
+  "id": "key_findings",
+  "prose": "## 3. Key Findings\n\n| ID | Confidence | Host | Statement |\n|----|------------|------|-----------|\n| [F-017](#f-017) | LIKELY | RHINOUSB | The USB key and the network traces are connected by the gnome account: the carved diary on the USB key (00335017.ole,... |\n",
+  "format": "dfir_notes",
+  "generated_at": "2026-09-29T17:43:00Z",
+  "generator_version": "report-projection/2.1",
+  "context_claim_ids": [
+    "C0003",
+    "C0004",
+    "C0008",
+    "C0009",
+    "C0010",
+    "C0011",
+    "C0012",
+    "C0013",
+    "C0014",
+    "C0015",
+    "C0016",
+    "C0017",
+    "C0018",
+    "C0019",
+    "C0020",
+    "C0021"
+  ],
+  "context_conclusion_ids": [
+    "N0022"
+  ],
+  "context_conflict_ids": [],
+  "content_sha256": "f7d3eb24b096f4d790d362423e9abf9a9030212913095a59c3db88672e332028"
+}

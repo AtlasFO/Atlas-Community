@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Atlas · Sign in</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<link rel="stylesheet" href="assets/atlas.css" />
+<script src="assets/i18n.js"></script>
+<style>
+  /* View-specific layout only — all tokens/components come from atlas.css. */
+  body {
+    min-height: 100vh; display: flex; align-items: center; justify-content: center;
+  }
+  .auth-card {
+    width: 340px; background: var(--bg-2); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 28px 26px;
+  }
+  .auth-brand {
+    font-size: var(--fs-title); font-weight: 600; margin: 0 0 4px;
+    color: var(--fg-0);
+  }
+  .auth-sub {
+    color: var(--fg-1); font-size: var(--fs-small); margin: 0 0 20px;
+  }
+  .field { margin-bottom: 14px; }
+  .field label {
+    display: block; font-size: var(--fs-label); color: var(--fg-1);
+    margin-bottom: 5px; text-transform: uppercase; letter-spacing: .03em;
+  }
+  .field input { width: 100%; box-sizing: border-box; }
+  .auth-submit { width: 100%; margin-top: 6px; }
+  .auth-error {
+    color: var(--bad); font-size: var(--fs-small); margin: 0 0 14px;
+    display: none;
+  }
+  .auth-error.show { display: block; }
+  .auth-links {
+    margin-top: 16px; font-size: var(--fs-small); text-align: center;
+  }
+  .auth-links a { color: var(--accent); text-decoration: none; }
+  .auth-links a:hover { text-decoration: underline; }
+  .auth-controls {
+    position: fixed; top: 14px; right: 16px; display: flex; gap: 8px;
+  }
+  .auth-controls button, .auth-controls select {
+    background: var(--bg-2); border: 1px solid var(--border); color: var(--fg-1);
+    border-radius: var(--radius-sm); padding: 5px 9px; font-size: var(--fs-small);
+    cursor: pointer; font-family: inherit;
+  }
+</style>
+</head>
+<body>
+<!-- No shell.js here (pre-auth) — this is the one page that needs its own
+     minimal theme/language controls rather than inheriting AtlasShell's
+     header. -->
+<div class="auth-controls">
+  <button id="auth-theme-toggle"></button>
+  <select id="auth-lang-select">
+    <option value="en">EN</option>
+    <option value="de">DE</option>
+  </select>
+</div>
+<div class="auth-card">
+  <p class="auth-brand" id="auth-brand">Atlas</p>
+  <p class="auth-sub" id="auth-sub"></p>
+  <p class="auth-error" id="auth-error"></p>
+
+  <form id="auth-form">
+    <div class="field" id="field-email" style="display:none">
+      <label for="f-email" id="label-email">Email</label>
+      <input type="email" id="f-email" autocomplete="email" />
+    </div>
+    <div class="field">
+      <label for="f-username" id="label-username">Username</label>
+      <input type="text" id="f-username" autocomplete="username" required />
+    </div>
+    <div class="field">
+      <label for="f-password" id="label-password">Password</label>
+      <input type="password" id="f-password" autocomplete="current-password" required />
+    </div>
+    <button type="submit" class="btn ok auth-submit" id="auth-submit"></button>
+  </form>
+  <div class="auth-links">
+    <a href="reset_password.html" id="forgot-link"></a>
+  </div>
+</div>
+
+<script>
+(function () {
+  const API = '/_dashboard/api/';
+  const form = document.getElementById('auth-form');
+  const errorEl = document.getElementById('auth-error');
+  const subEl = document.getElementById('auth-sub');
+  const submitBtn = document.getElementById('auth-submit');
+  const emailField = document.getElementById('field-email');
+  const forgotLink = document.getElementById('forgot-link');
+  let mode = 'login'; // or 'bootstrap'
+
+  function showError(msg) {
+    errorEl.textContent = msg;
+    errorEl.classList.add('show');
+  }
+  function clearError() {
+    errorEl.textContent = '';
+    errorEl.classList.remove('show');
+  }
+
+  async function api(path, body) {
+    const res = await fetch(API + path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body || {}),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.success === false) {
+      throw new Error(data.error || `request failed (${res.status})`);
+    }
+    return data;
+  }
+
+  const t = AtlasI18n.t;
+  const themeBtn = document.getElementById('auth-theme-toggle');
+  function renderThemeBtn() {
+    const next = AtlasI18n.getTheme() === 'dark' ? 'light' : 'dark';
+    const nextLabel = next === 'light' ? t('theme.toggle.toLight') : t('theme.toggle.toDark');
+    themeBtn.textContent = nextLabel;
+    themeBtn.title = t('theme.toggle.title', { mode: nextLabel });
+  }
+  themeBtn.addEventListener('click', () => {
+    AtlasI18n.setTheme(AtlasI18n.getTheme() === 'dark' ? 'light' : 'dark');
+    renderThemeBtn();
+  });
+  renderThemeBtn();
+  const langSelect = document.getElementById('auth-lang-select');
+  langSelect.value = AtlasI18n.getLang();
+  langSelect.title = t('lang.toggle.title');
+  langSelect.addEventListener('change', (ev) => {
+    AtlasI18n.setLang(ev.target.value);
+    location.reload();
+  });
+
+  document.getElementById('auth-brand').textContent = t('auth.brand');
+  document.getElementById('label-email').textContent = t('auth.email');
+  document.getElementById('label-username').textContent = t('auth.username');
+  document.getElementById('label-password').textContent = t('auth.password');
+  submitBtn.textContent = t('auth.signIn');
+  forgotLink.textContent = t('auth.forgotPassword');
+  subEl.textContent = t('auth.signInSub');
+
+  async function init() {
+    try {
+      const status = await fetch(API + 'bootstrap_status').then(r => r.json());
+      if (status.needs_setup) {
+        mode = 'bootstrap';
+        subEl.textContent = t('auth.bootstrapSub');
+        submitBtn.textContent = t('auth.createAdmin');
+        emailField.style.display = '';
+        document.getElementById('f-email').required = true;
+        forgotLink.style.display = 'none';
+      }
+    } catch (e) {
+      // Fail open to the normal login form — bootstrap check is a UX nicety,
+      // not a security boundary.
+    }
+  }
+
+  // After sign-in, only a page of this dashboard. The browser's own URL
+  // parser resolves `next`, so "//host", "/\\host" or "https://host" (all
+  // one origin to a real navigation) cannot send a signed-in user away.
+  // A fragment never reaches the server, so a redirect's `next` holds none;
+  // the browser carries the requested page's fragment onto this page's URL
+  // instead, and it is kept unless `next` names its own.
+  function safeNext(raw, here) {
+    if (!raw) return 'overview.html';
+    try {
+      const u = new URL(raw, here.href);
+      if (u.origin === here.origin) return u.pathname + u.search + (u.hash || here.hash);
+    } catch (e) { /* not a URL: the default page */ }
+    return 'overview.html';
+  }
+
+  form.addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    clearError();
+    submitBtn.disabled = true;
+    const username = document.getElementById('f-username').value.trim();
+    const password = document.getElementById('f-password').value;
+    try {
+      if (mode === 'bootstrap') {
+        const email = document.getElementById('f-email').value.trim();
+        await api('bootstrap', { username, email, password });
+      } else {
+        await api('login', { username, password });
+      }
+      const params = new URLSearchParams(window.location.search);
+      window.location.href = safeNext(params.get('next'), window.location);
+    } catch (e) {
+      showError(e.message);
+      submitBtn.disabled = false;
+    }
+  });
+
+  init();
+})();
+</script>
+</body>
+</html>

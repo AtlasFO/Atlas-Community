@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# atlas-dashboard — persistent multi-case Atlas trace dashboard.
+#
+# Long-running, independent of the MCP server. Picks up traces from every
+# case under $ATLAS_CASES_ROOT (default ~/cases); the case + trace dropdown
+# in the dashboard UI populates from /_dashboard/api/cases.
+#
+# Usage:
+#   atlas-dashboard                       # ~/cases on port 8765
+#   atlas-dashboard --port 9090
+#   atlas-dashboard --cases-root /data/cases
+#
+# Environment:
+#   ATLAS_CASES_ROOT      default cases root (fallback: ~/cases)
+#   ATLAS_DASHBOARD_PORT  default port       (fallback: 8765)
+#   ATLAS_DASHBOARD_BIND  listen address     (fallback: 127.0.0.1; 0.0.0.0 = LAN/HTTPS)
+
+set -euo pipefail
+
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+ATLAS_DIR="${ATLAS_DIR:-$(dirname "$(dirname "$SELF")")}"
+
+if [ ! -f "$ATLAS_DIR/dashboard/serve.py" ]; then
+    echo "atlas-dashboard: Atlas repo not found at $ATLAS_DIR — set ATLAS_DIR to the repo root" >&2
+    exit 1
+fi
+# Same order as bin/atlas: the repository's own venv first, then the
+# ~/.venv the installer may have linked, then whatever python3 is on PATH.
+# ~/.venv first used to win on a host where it is a foreign or dead venv,
+# and the dashboard died at import while the CLI ran.
+if [ -z "${VENV_PY:-}" ]; then
+    if [ -x "$ATLAS_DIR/.venv/bin/python" ]; then
+        VENV_PY="$ATLAS_DIR/.venv/bin/python"
+    elif [ -x "$HOME/.venv/bin/python3" ]; then
+        VENV_PY="$HOME/.venv/bin/python3"
+    else
+        VENV_PY="$(command -v python3)"
+    fi
+fi
+if [ ! -x "$VENV_PY" ]; then
+    echo "atlas-dashboard: no usable python found (tried VENV_PY, $ATLAS_DIR/.venv, ~/.venv, PATH)" >&2
+    exit 1
+fi
+
+# The venv's bin/ on PATH: tool wrappers resolve pip-installed console
+# scripts (capa, floss, olevba, usn.py, …) with shutil.which(), and runs
+# started by the dashboard inherit this PATH.
+export PATH="$(dirname "$VENV_PY")${PATH:+:$PATH}"
+cd "$ATLAS_DIR"
+exec "$VENV_PY" -m dashboard.serve "$@"

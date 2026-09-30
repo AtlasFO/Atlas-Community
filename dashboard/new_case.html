@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Atlas · New case</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<link rel="stylesheet" href="assets/atlas.css" />
+<script src="assets/i18n.js"></script>
+<style>
+  /* View-specific layout only — all tokens/components come from atlas.css. */
+  .nc-card {
+    max-width: 520px; background: var(--bg-2); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 22px 24px; margin-top: 10px;
+  }
+  .field { margin-bottom: 14px; }
+  .field label {
+    display: block; font-size: var(--fs-label); color: var(--fg-1);
+    margin-bottom: 5px; text-transform: uppercase; letter-spacing: .03em;
+  }
+  .field input, .field textarea { width: 100%; box-sizing: border-box; font-family: inherit; }
+  .field-hint { font-size: var(--fs-small); color: var(--fg-2); margin-top: 4px; }
+  .cfg-msg { font-size: var(--fs-small); margin-top: 12px; display: none; }
+  .cfg-msg.show { display: block; }
+  .cfg-msg.err { color: var(--bad); }
+  .cfg-msg.ok { color: var(--ok); }
+</style>
+</head>
+<body>
+<div class="page" id="app">
+  <h1 class="page-title" style="margin: 4px 0 4px;">New case</h1>
+  <p class="field-hint" style="margin-bottom: 4px;">Analyst or admin only.</p>
+
+  <div class="nc-card">
+    <form id="nc-form">
+      <div class="field">
+        <label for="nc-id">Case ID</label>
+        <input type="text" id="nc-id" placeholder="e.g. ACME-2026-0142" required
+               pattern="[A-Za-z0-9_-]+" />
+        <div class="field-hint">Letters, digits, underscore, or hyphen only.</div>
+      </div>
+      <div class="field">
+        <label for="nc-requests">Investigation requests (one per line, optional)</label>
+        <textarea id="nc-requests" rows="4"
+          placeholder="Determine whether the workstation was compromised.&#10;Identify the initial access vector."></textarea>
+      </div>
+      <div class="field">
+        <label for="nc-language">Report language</label>
+        <select id="nc-language">
+          <option value="en" selected>English (recommended)</option>
+          <option value="de">Deutsch</option>
+        </select>
+        <div class="field-hint">The report and its recommendations are written
+          in this language. English is recommended: the models Atlas drives are
+          trained mostly on English and tend to give sharper findings and
+          recommendations in it.</div>
+      </div>
+      <button type="submit" class="btn ok">Create case</button>
+      <p class="cfg-msg" id="nc-msg"></p>
+    </form>
+  </div>
+</div>
+
+<script src="assets/shell.js"></script>
+<script>
+(function () {
+  const form = document.getElementById('nc-form');
+  const msgEl = document.getElementById('nc-msg');
+
+  function showMsg(text, ok) {
+    msgEl.textContent = text;
+    msgEl.className = `cfg-msg show ${ok ? 'ok' : 'err'}`;
+  }
+
+  form.addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    const caseId = document.getElementById('nc-id').value.trim();
+    const requests = document.getElementById('nc-requests').value
+      .split('\n').map(s => s.trim()).filter(Boolean);
+    try {
+      const language = document.getElementById('nc-language').value;
+      const result = await AtlasShell.apiPost('case/create',
+        { case_id: caseId, requests, language });
+      showMsg('Case created.', true);
+      setTimeout(() => {
+        window.location.href = `overview.html?case=${encodeURIComponent(result.case_dir)}`;
+      }, 800);
+    } catch (e) { showMsg(e.message, false); }
+  });
+
+  AtlasShell.init({ page: 'new_case', requiresCase: false }).then(() => {
+    if (!AtlasShell.roleAtLeast('analyst')) {
+      document.getElementById('app').innerHTML =
+        '<p class="field-hint">Analyst or admin access required.</p>';
+    }
+  });
+})();
+</script>
+</body>
+</html>

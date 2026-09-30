@@ -1,0 +1,43 @@
+{
+ "stack": "sglang",
+ "model": "example-model",
+ "scenario": "starved",
+ "source": "hand-written from the documented sglang response shape",
+ "status": 200,
+ "request": {
+  "model": "example-model",
+  "max_tokens": 8192
+ },
+ "response": {
+  "id": "test0014",
+  "object": "chat.completion",
+  "created": 1924992000,
+  "model": "example-model",
+  "choices": [
+   {
+    "index": 0,
+    "message": {
+     "role": "assistant",
+     "content": "",
+     "reasoning_content": "Let me work out each point in turn.",
+     "tool_calls": null
+    },
+    "finish_reason": "length"
+   }
+  ],
+  "usage": {
+   "prompt_tokens": 1000,
+   "completion_tokens": 8192,
+   "reasoning_tokens": 8193
+  }
+ },
+ "expect": {
+  "content": "",
+  "reasoning_prefix": "Let me work",
+  "reasoning_tokens": 8193,
+  "tool_calls": 0,
+  "finish_reason": "length",
+  "starved": true,
+  "thinking_observed": true
+ }
+}

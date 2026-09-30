@@ -1,0 +1,48 @@
+{
+ "stack": "vllm",
+ "model": "example-model",
+ "scenario": "ok-effort-high",
+ "source": "hand-written from the documented vLLM response shape for a Mistral model",
+ "status": 200,
+ "request": {
+  "model": "example-model",
+  "messages": [
+   {
+    "role": "user",
+    "content": "Reply with the single word: ok"
+   }
+  ],
+  "max_tokens": 1024,
+  "reasoning_effort": "high"
+ },
+ "response": {
+  "id": "chatcmpl-test0022",
+  "object": "chat.completion",
+  "created": 1924992000,
+  "model": "example-model",
+  "choices": [
+   {
+    "index": 0,
+    "message": {
+     "role": "assistant",
+     "content": "ok",
+     "reasoning": "ok is the response asked for."
+    },
+    "finish_reason": "stop"
+   }
+  ],
+  "usage": {
+   "prompt_tokens": 10,
+   "completion_tokens": 20
+  }
+ },
+ "expect": {
+  "content": "ok",
+  "reasoning_prefix": "ok is the response",
+  "reasoning_tokens": 0,
+  "tool_calls": 0,
+  "finish_reason": "stop",
+  "starved": false,
+  "thinking_observed": true
+ }
+}

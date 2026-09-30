@@ -1,0 +1,50 @@
+{
+ "stack": "vllm",
+ "model": "example-model",
+ "scenario": "ok-count-zero-with-text",
+ "source": "hand-written from the documented vLLM response shape",
+ "status": 200,
+ "request": {
+  "model": "example-model",
+  "messages": [
+   {
+    "role": "user",
+    "content": "Reply with the single word: ok"
+   }
+  ],
+  "max_tokens": 512
+ },
+ "response": {
+  "id": "chatcmpl-test0018",
+  "object": "chat.completion",
+  "created": 1924992000,
+  "model": "example-model",
+  "choices": [
+   {
+    "index": 0,
+    "message": {
+     "role": "assistant",
+     "content": "ok",
+     "reasoning": "User says to reply ok, so reply ok."
+    },
+    "finish_reason": "stop"
+   }
+  ],
+  "usage": {
+   "prompt_tokens": 10,
+   "completion_tokens": 20,
+   "completion_tokens_details": {
+    "reasoning_tokens": 0
+   }
+  }
+ },
+ "expect": {
+  "content": "ok",
+  "reasoning_prefix": "User says",
+  "reasoning_tokens": 0,
+  "tool_calls": 0,
+  "finish_reason": "stop",
+  "starved": false,
+  "thinking_observed": true
+ }
+}

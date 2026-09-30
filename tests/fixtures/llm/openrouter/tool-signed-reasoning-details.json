@@ -1,0 +1,76 @@
+{
+ "stack": "openrouter",
+ "model": "example-model",
+ "scenario": "tool-signed-reasoning-details",
+ "source": "hand-written from the documented OpenRouter response shape for an Anthropic model",
+ "status": 200,
+ "request": {
+  "model": "example-model",
+  "messages": [
+   {
+    "role": "user",
+    "content": "List the processes in m.img. Call the tool."
+   }
+  ],
+  "max_tokens": 4096,
+  "reasoning": {
+   "max_tokens": 1024
+  }
+ },
+ "response": {
+  "id": "gen-test-0027",
+  "object": "chat.completion",
+  "created": 1924992000,
+  "model": "example-model",
+  "choices": [
+   {
+    "index": 0,
+    "finish_reason": "tool_calls",
+    "message": {
+     "role": "assistant",
+     "content": null,
+     "reasoning": "The user wants the processes of m.img; the tool takes the image name.",
+     "tool_calls": [
+      {
+       "id": "toolu_test0027",
+       "type": "function",
+       "function": {
+        "name": "vol_pslist",
+        "arguments": "{\"image\": \"m.img\"}"
+       }
+      }
+     ],
+     "reasoning_details": [
+      {
+       "type": "reasoning.text",
+       "text": "The user wants the processes of m.img; the tool takes the image name.",
+       "format": "anthropic-claude-v1",
+       "index": 0,
+       "signature": "AAAA"
+      }
+     ]
+    }
+   }
+  ],
+  "usage": {
+   "prompt_tokens": 100,
+   "completion_tokens": 33,
+   "completion_tokens_details": {
+    "reasoning_tokens": 28
+   }
+  }
+ },
+ "expect": {
+  "content": "",
+  "reasoning_prefix": "The user wants",
+  "reasoning_tokens": 28,
+  "tool_calls": 1,
+  "tool_name": "vol_pslist",
+  "finish_reason": "tool_calls",
+  "starved": false,
+  "thinking_observed": true,
+  "raw_keys": [
+   "reasoning_details"
+  ]
+ }
+}

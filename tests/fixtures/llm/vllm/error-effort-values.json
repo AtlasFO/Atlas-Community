@@ -1,0 +1,28 @@
+{
+ "stack": "vllm",
+ "model": "example-model",
+ "scenario": "error-effort-values",
+ "source": "hand-written in the vLLM error format for a Mistral model, inside a gateway's detail text",
+ "status": 400,
+ "request": {
+  "model": "example-model",
+  "messages": [
+   {
+    "role": "user",
+    "content": "Reply with the single word: ok"
+   }
+  ],
+  "max_tokens": 512,
+  "reasoning_effort": "low"
+ },
+ "response": {
+  "detail": "Error: 400 - Bad Request - {\"error\": {\"message\": \"reasoning_effort 'low' is not supported by Mistral models. Supported values are: ['none', 'high'].\", \"type\": \"BadRequestError\", \"code\": 400}}"
+ },
+ "expect": {
+  "error_contains": "not supported by Mistral",
+  "accepted_values": [
+   "none",
+   "high"
+  ]
+ }
+}

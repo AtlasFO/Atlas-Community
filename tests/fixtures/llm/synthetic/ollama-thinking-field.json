@@ -1,0 +1,34 @@
+{
+ "stack": "synthetic",
+ "model": "hand-written",
+ "scenario": "ollama-thinking-field",
+ "source": "docs.ollama.com: the native API returns the thinking in message.thinking",
+ "status": 200,
+ "request": {},
+ "response": {
+  "choices": [
+   {
+    "index": 0,
+    "message": {
+     "role": "assistant",
+     "content": "ok",
+     "thinking": "Reply briefly."
+    },
+    "finish_reason": "stop"
+   }
+  ],
+  "usage": {
+   "prompt_tokens": 10,
+   "completion_tokens": 5
+  }
+ },
+ "expect": {
+  "content": "ok",
+  "reasoning_prefix": "Reply briefly.",
+  "reasoning_tokens": 0,
+  "tool_calls": 0,
+  "finish_reason": "stop",
+  "starved": false,
+  "thinking_observed": true
+ }
+}

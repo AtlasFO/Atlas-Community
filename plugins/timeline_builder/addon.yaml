@@ -1,0 +1,7 @@
+name: timeline_builder
+version: "1.0.0"
+description: >
+  Collects forensic events during investigations and writes a curated
+  reports/master_timeline.tsv at report finalization.
+author: Atlas
+min_atlas_version: "0.9.8"

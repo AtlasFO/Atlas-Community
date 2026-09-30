@@ -1,0 +1,48 @@
+{
+ "stack": "synthetic",
+ "model": "hand-written",
+ "scenario": "tool-call-object-arguments-no-id",
+ "source": "local servers sometimes send arguments as an object and omit the id",
+ "status": 200,
+ "request": {},
+ "response": {
+  "choices": [
+   {
+    "index": 0,
+    "message": {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "type": "function",
+       "function": {
+        "name": "vol_pslist",
+        "arguments": {
+         "image": "m.img"
+        }
+       }
+      }
+     ]
+    },
+    "finish_reason": "tool_calls"
+   }
+  ],
+  "usage": {
+   "prompt_tokens": 10,
+   "completion_tokens": 5
+  }
+ },
+ "expect": {
+  "content": "",
+  "reasoning_empty": true,
+  "reasoning_tokens": 0,
+  "tool_calls": 1,
+  "tool_name": "vol_pslist",
+  "tool_arguments": {
+   "image": "m.img"
+  },
+  "finish_reason": "tool_calls",
+  "starved": false,
+  "thinking_observed": false
+ }
+}

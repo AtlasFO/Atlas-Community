@@ -1,0 +1,200 @@
+{
+  "schema_version": "1.1",
+  "case_id": "RHINO-HUNT",
+  "complete": true,
+  "updated_at": "2026-09-29T16:46:36Z",
+  "source": "misc_inventory_evidence",
+  "summary": {
+    "present_classes": [
+      "disk",
+      "pcap"
+    ],
+    "absent_classes": [
+      "memory",
+      "windows_eventlog",
+      "tabular",
+      "email",
+      "file",
+      "live"
+    ],
+    "top_level_count": 4,
+    "files_indexed": 4,
+    "high_value_count": 0,
+    "high_value_parsed": [],
+    "needs_processing_classes": [
+      "disk",
+      "pcap"
+    ],
+    "already_processed_count": 0,
+    "catalog_role": "reference_map"
+  },
+  "assessment": {
+    "what_exists": {
+      "files_indexed": 4,
+      "present_classes": [
+        "disk",
+        "pcap"
+      ],
+      "absent_classes": [
+        "memory",
+        "windows_eventlog",
+        "tabular",
+        "email",
+        "file",
+        "live"
+      ],
+      "counts": {
+        "pcap": 3,
+        "disk": 1
+      },
+      "sample_paths": {
+        "pcap": [
+          "evidence/rhino2.log",
+          "evidence/rhino3.log",
+          "evidence/rhino.log"
+        ],
+        "disk": [
+          "evidence/RHINOUSB.dd"
+        ]
+      },
+      "note": "The full evidence/ tree was indexed into classes/counts. Lists below are the working catalog to draw from — not a requirement to deep-analyze every file."
+    },
+    "catalog": {
+      "policy": "This is the evidence REFERENCE MAP — what exists and what you can fall back on. Analyze what is relevant to the case questions and incident time window. Items wholly outside the window (e.g. VPN logs with no overlap to the attack period) or clearly unrelated may be deferred without deep analysis; keep them on the list for later. Do not invent paths that are not in the catalog. Do not claim evidence is missing when it is listed here or under already_processed / class samples.",
+      "files_indexed": 4,
+      "top_level": [
+        {
+          "path": "evidence/RHINOUSB.dd",
+          "is_dir": false,
+          "role": "catalog_entry",
+          "class": "disk"
+        },
+        {
+          "path": "evidence/rhino.log",
+          "is_dir": false,
+          "role": "catalog_entry",
+          "class": "pcap"
+        },
+        {
+          "path": "evidence/rhino2.log",
+          "is_dir": false,
+          "role": "catalog_entry",
+          "class": "pcap"
+        },
+        {
+          "path": "evidence/rhino3.log",
+          "is_dir": false,
+          "role": "catalog_entry",
+          "class": "pcap"
+        }
+      ],
+      "top_level_count": 4,
+      "class_counts": {
+        "pcap": 3,
+        "disk": 1
+      },
+      "relevance_scoping": [
+        "Select evidence by case questions + time window — not by opening every file.",
+        "Defer out-of-window / unrelated items with a short reason; they remain available if pivots need them later.",
+        "Prefer already_processed exports when they cover an artifact family; re-parse raw sources only for a proven gap.",
+        "skip[] is only for ABSENT media classes (no memory → no vol), never for present files you chose not to deep-dive yet."
+      ]
+    },
+    "coverage": {
+      "policy": "This is the evidence REFERENCE MAP — what exists and what you can fall back on. Analyze what is relevant to the case questions and incident time window. Items wholly outside the window (e.g. VPN logs with no overlap to the attack period) or clearly unrelated may be deferred without deep analysis; keep them on the list for later. Do not invent paths that are not in the catalog. Do not claim evidence is missing when it is listed here or under already_processed / class samples.",
+      "files_indexed": 4,
+      "top_level": [
+        {
+          "path": "evidence/RHINOUSB.dd",
+          "is_dir": false,
+          "role": "catalog_entry",
+          "class": "disk"
+        },
+        {
+          "path": "evidence/rhino.log",
+          "is_dir": false,
+          "role": "catalog_entry",
+          "class": "pcap"
+        },
+        {
+          "path": "evidence/rhino2.log",
+          "is_dir": false,
+          "role": "catalog_entry",
+          "class": "pcap"
+        },
+        {
+          "path": "evidence/rhino3.log",
+          "is_dir": false,
+          "role": "catalog_entry",
+          "class": "pcap"
+        }
+      ],
+      "top_level_count": 4,
+      "class_counts": {
+        "pcap": 3,
+        "disk": 1
+      },
+      "relevance_scoping": [
+        "Select evidence by case questions + time window — not by opening every file.",
+        "Defer out-of-window / unrelated items with a short reason; they remain available if pivots need them later.",
+        "Prefer already_processed exports when they cover an artifact family; re-parse raw sources only for a proven gap.",
+        "skip[] is only for ABSENT media classes (no memory → no vol), never for present files you chose not to deep-dive yet."
+      ]
+    },
+    "already_processed": {
+      "available": false,
+      "paths": [],
+      "what_to_do": "No high-value parsed exports indexed — list directories and use class samples when those areas become relevant."
+    },
+    "no_processing_needed": [],
+    "reparse_not_required": [],
+    "needs_processing": [
+      {
+        "class": "disk",
+        "reason": "Disk image present — mount/open when case questions need image-level access not covered by extracts.",
+        "sample_raw": [
+          "evidence/RHINOUSB.dd"
+        ]
+      },
+      {
+        "class": "pcap",
+        "reason": "PCAP present — use when network capture analysis is relevant.",
+        "sample_raw": [
+          "evidence/rhino2.log",
+          "evidence/rhino3.log",
+          "evidence/rhino.log"
+        ]
+      }
+    ],
+    "skip": [
+      {
+        "class": "memory",
+        "reason": "No memory image — do not use volatility / memory hunters.",
+        "meaning": "Tool family unavailable — media class not in the package."
+      },
+      {
+        "class": "windows_eventlog",
+        "reason": "No EVTX — do not run event-log path parsers (parsed CSV event exports may still exist as tabular).",
+        "meaning": "Tool family unavailable — media class not in the package."
+      },
+      {
+        "class": "email",
+        "reason": "No email stores — skip mail extractors.",
+        "meaning": "Tool family unavailable — media class not in the package."
+      },
+      {
+        "class": "live",
+        "reason": "No live endpoint — skip live.*",
+        "meaning": "Tool family unavailable — media class not in the package."
+      }
+    ],
+    "recommended_first_actions": [
+      "Use catalog.top_level + already_processed as the evidence map you can fall back on.",
+      "Scope deep analysis by case questions and time window — defer out-of-window / unrelated items (they stay on the list).",
+      "Before any path parser: misc_list_evidence_dir on the parent — never invent basenames.",
+      "Address needs_processing only when those classes become relevant and parsed exports do not cover the question.",
+      "Respect skip[] for ABSENT media — do not invent missing disk/memory/pcap."
+    ],
+    "rule": "Forensic tools unlock after this assessment. Catalog = reference map to draw from. Relevance/time-window scopes depth. Prefer already_processed over re-parse. Skip only absent media."
+  }
+}

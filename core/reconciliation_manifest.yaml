@@ -1,0 +1,44 @@
+# Cross-source reconciliation profiles.
+# Each profile defines how to extract and compare events across evidence sources.
+profiles:
+  successful_logon:
+    description: "Successful Windows logons (EID 4624) across SIEM, disk EVTX, and timelines"
+    event_ids: [4624]
+    group_by: [src_ip, host]
+    earliest_triggers:
+      - initial access
+      - first successful
+      - first authentication
+      - first logon
+      - compromised credentials
+      - rdp logon
+      - rdp session
+    claim_patterns:
+      - "(?i)initial access"
+      - "(?i)first (?:successful )?(?:logon|authentication|access)"
+      - "(?i)rdp (?:logon|session|access)"
+
+  failed_logon:
+    description: "Failed Windows logons (EID 4625) — brute-force pattern detection"
+    event_ids: [4625]
+    group_by: [src_ip, host]
+
+  process_creation:
+    description: "Process creation (EID 4688 / Sysmon 1)"
+    event_ids: [4688, 1]
+    group_by: [host]
+
+  network_connection:
+    description: "Network connections (EID 5156 / Sysmon 3)"
+    event_ids: [5156, 3]
+    group_by: [src_ip, host]
+
+# Source family labels used in discrepancy reporting.
+source_families:
+  siem:
+    - wazuh_json
+  disk:
+    - evtx_csv
+    - hayabusa_csv
+  timeline:
+    - timeline_tsv

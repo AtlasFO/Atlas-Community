@@ -1,0 +1,30 @@
+{
+  "id": "exec_summary",
+  "prose": "## Executive Summary\n\nIn late April 2004, a suspect (identified as John) used a shared network account to upload and download images of endangered rhinos — contraband wildlife imagery — to and from a university server. The suspect also possessed a USB drive containing a personal diary and additional rhino images. The diary, recovered from the drive after it had been reformatted, reveals that the suspect deliberately destroyed a hard drive (reportedly by throwing it into the Mississippi River) and reformatted the USB drive to conceal the images.\n\nTwo individuals are identified in the evidence. John is the person who uploaded the rhino images and an encrypted archive to the server. A second person (identified as Georgia) controlled the shared account and provided it to John; a third person (Jeremy) is named in the diary as the original provider of the account. The USB drive and the network activity are confirmed to belong to the same actor: the diary on the drive names the same account used in the file transfers.\n\nThe following items remain uncertain. First, some of the rhino images appear to contain additional hidden data embedded within them, but the tools currently available to the investigation team cannot extract that data; a different version of the extraction software is required. Second, the encrypted archive uploaded to the server is known to contain at least one additional rhino image, but its password has not yet been confirmed.\n\nThe two most important next steps are: (1) obtain a compatible steganography extraction tool to recover the hidden payloads from the carrier images, and (2) confirm the password for the encrypted archive to verify its full contents.",
+  "format": "dfir_notes",
+  "generated_at": "2026-09-29T17:43:00Z",
+  "generator_version": "report-projection/2.1",
+  "context_claim_ids": [
+    "C0003",
+    "C0004",
+    "C0008",
+    "C0009",
+    "C0010",
+    "C0011",
+    "C0012",
+    "C0013",
+    "C0014",
+    "C0015",
+    "C0016",
+    "C0017",
+    "C0018",
+    "C0019",
+    "C0020",
+    "C0021"
+  ],
+  "context_conclusion_ids": [
+    "N0022"
+  ],
+  "context_conflict_ids": [],
+  "content_sha256": "38a69900bec0979be6d9123733a6290d58997c9b16ddd591e6804e46a63b2247"
+}

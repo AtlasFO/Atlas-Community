@@ -1,0 +1,11 @@
+{
+  "id": "scope_evidence",
+  "prose": "## 2. Scope and Evidence\n\n- Scope: estate / case-level synthesis\n- Evidence sources: tool outputs under analysis/, optional master_timeline.tsv, Claim Graph evidence references.\n- Investigation SoT: `.atlas/` (claims, conclusions, conflicts, journal) — this report is a projection only.\n",
+  "format": "dfir_notes",
+  "generated_at": "2026-09-29T17:43:00Z",
+  "generator_version": "report-projection/2.1",
+  "context_claim_ids": [],
+  "context_conclusion_ids": [],
+  "context_conflict_ids": [],
+  "content_sha256": "c382b308972473ad3aba3f64a63533f264087981932263c61a3662e18a7833c9"
+}

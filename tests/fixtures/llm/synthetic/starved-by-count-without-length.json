@@ -1,0 +1,36 @@
+{
+ "stack": "synthetic",
+ "model": "hand-written",
+ "scenario": "starved-by-count-without-length",
+ "source": "hidden thinking that used the whole budget while finish_reason still says stop",
+ "status": 200,
+ "request": {},
+ "response": {
+  "choices": [
+   {
+    "index": 0,
+    "message": {
+     "role": "assistant",
+     "content": null
+    },
+    "finish_reason": "stop"
+   }
+  ],
+  "usage": {
+   "prompt_tokens": 10,
+   "completion_tokens": 100,
+   "completion_tokens_details": {
+    "reasoning_tokens": 100
+   }
+  }
+ },
+ "expect": {
+  "content": "",
+  "reasoning_empty": true,
+  "reasoning_tokens": 100,
+  "tool_calls": 0,
+  "finish_reason": "stop",
+  "starved": true,
+  "thinking_observed": true
+ }
+}

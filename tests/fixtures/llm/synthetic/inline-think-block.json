@@ -1,0 +1,33 @@
+{
+ "stack": "synthetic",
+ "model": "hand-written",
+ "scenario": "inline-think-block",
+ "source": "vLLM without --reasoning-parser leaves the model's think block in content",
+ "status": 200,
+ "request": {},
+ "response": {
+  "choices": [
+   {
+    "index": 0,
+    "message": {
+     "role": "assistant",
+     "content": "<think>\nI should answer briefly.\n</think>\n\nok"
+    },
+    "finish_reason": "stop"
+   }
+  ],
+  "usage": {
+   "prompt_tokens": 10,
+   "completion_tokens": 5
+  }
+ },
+ "expect": {
+  "content": "ok",
+  "reasoning_prefix": "I should answer briefly.",
+  "reasoning_tokens": 0,
+  "tool_calls": 0,
+  "finish_reason": "stop",
+  "starved": false,
+  "thinking_observed": true
+ }
+}

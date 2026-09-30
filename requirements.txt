@@ -1,0 +1,56 @@
+fastmcp>=4.0.10
+httpx>=0.28.1
+
+# Dashboard HTTP layer (dashboard/app.py + dashboard/serve.py). fastmcp
+# already pulls these in transitively; declared here because the dashboard
+# imports them directly.
+starlette>=1.7.0          # routing, static files with ETag/304, gzip
+uvicorn[standard]>=0.54.0  # ASGI server; [standard] adds uvloop, httptools, watchfiles
+sse-starlette>=3.4.11       # server-sent events for the live change stream
+watchfiles>=1.3.0           # inotify-backed change feed behind that stream
+python-dotenv>=1.2.3
+pyyaml>=6.0.3
+rich>=15.0.0            # atlas CLI: banner, spinner, tool-call rendering
+prompt_toolkit>=3.0.53   # atlas chat: history, slash-command completion
+yara-python>=4.5.4
+cryptography>=50.0.1   # crypto.decrypt — AES (CBC/ECB/CTR/GCM) + RC4 symmetric decryption
+argon2-cffi>=25.1.0    # dashboard.auth — Argon2id password hashing (OWASP-recommended default)
+volatility3>=2.28.2,<3.0.0   # vol.* — memory forensics (pinned below the next major to avoid surprise breaks)
+
+# Malware analysis (FLARE)
+flare-capa>=9.4.0      # capability analysis → MITRE ATT&CK mapping
+flare-floss>=3.1.1     # obfuscated/stacked string extraction
+
+# Office document forensics (phishing initial access)
+oletools>=0.60.2         # olevba, mraptor — Office macro detection
+extract-msg>=0.56.1    # misc.parse_msg_ole — native OLE-format Outlook .msg
+
+# OneDrive sync logs: misc.onedrive_odl runs odl.py (install.sh, pinned)
+# with this interpreter, as a subprocess
+construct>=2.10.70
+pycryptodome>=3.23.0
+
+# Tabular evidence (SIEM/EDR xlsx exports)
+openpyxl>=3.1.5        # table.* — typed xlsx access, streaming read-only
+
+# Binary triage & deobfuscation (optional but recommended)
+py-tlsh>=5.0.0         # bin.tlsh_hash/compare — fuzzy similarity hashing
+jsbeautifier>=2.0.3   # deob.js_beautify — pretty-print obfuscated JS
+markdown>=3.11          # atlas report --format html, and the source of the PDF's markup
+fpdf2>=2.8.8           # atlas report --format pdf — pure-Python wheels only, no system libraries; 2.8.1 brings fpdf.fonts.TextStyle
+
+# OSINT enrichment
+machinae>=1.4.11          # enrichment.machinae_lookup — multi-source IOC lookup, no API key required
+# System binaries used when present (fail gracefully if absent):
+#   binwalk, diec (Detect It Easy), radare2/rizin, upx, zeek, suricata,
+#   tshark, whois
+# Hayabusa (Sigma triage of Windows event logs) is a standalone binary
+# provisioned by install.sh from github.com/Yamato-Security/hayabusa —
+# no Python package needed; see tools/hayabusa.py.
+libscca-python>=20260527   # ez.pecmd fallback — prefetch parsing off Windows
+pefile>=2024.8.26        # misc.pe_scanner — PE header, section and import triage
+usnparser>=4.1.5          # misc.usnparser_parse — NTFS $UsnJrnl:$J parsing (usn.py)
+pyhindsight>=20260600     # misc.hindsight_chrome — Chrome/Chromium profile parsing
+pe-carver>=2.0.0        # misc.pe_carver — carve PE files from raw data (-f/-o CLI)
+python-evtx>=0.8.1      # misc.evtx_dump / misc.evtx_filter — EVTX records without .NET (the Evtx package; its console scripts are not used)
+analyzeMFT>=3.1.1       # misc.analyzemft_parse — $MFT to CSV without .NET (analyzemft CLI)

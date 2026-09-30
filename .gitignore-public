@@ -1,0 +1,40 @@
+# .gitignore-public — the internal/public boundary, in one place.
+#
+# Paths listed here are INTERNAL: they stay on a private remote and are
+# STRIPPED from the scrubbed snapshot that `atlas publish` pushes to the
+# public GitHub remote. Keep this in sync with the pre-push guard
+# (.githooks/pre-push). This is NOT a normal .gitignore (git does not read
+# it) — it is consumed by `core/brain/publish.py`.
+#
+# Raw brain captures — per-run candidates, run logs, full investigation reports.
+brain/inbox/
+brain/logs/runs/
+brain/analytics/deliverables/
+brain/analytics/reports/
+
+# Internal-only durable brain:
+#   wiki/cases        — case pages embed raw IOCs
+#   wiki/environments — client-provided environment baselines
+#   memory, issue     — name cases / carry live IOCs
+brain/wiki/cases/
+brain/wiki/environments/
+brain/memory/
+brain/issue/
+
+# Contributor PII (personal + work e-mail + GitHub identity).
+brain/CONTRIBUTORS
+
+# Internal cases (NOT on the public cases allowlist).
+#
+# No internal case is committed at present, so no prefix is listed — a stale
+# prefix that matches nothing is worse than no prefix, since it lets a test
+# claim boundary coverage that isn't real. If a new internal case is added
+# under demo-cases/ or cases/, list its prefix here in both forms (the
+# committed location is demo-cases/, not cases/; a path that does not exist
+# is skipped by the scrub in core/brain/publish.py, so listing both costs
+# nothing and survives either layout).
+#
+# Identifier scanning is deliberately NOT the guard here — see the comment on
+# _SCAN_TREES in publish.py. Public case evidence legitimately contains IOCs,
+# so scanning demo-cases/ would fail on the public datasets, not on a real
+# leak.

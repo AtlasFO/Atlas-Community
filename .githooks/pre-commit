@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+# Atlas pre-commit hook — durable brain growth is limited to brain/CONTRIBUTORS.
+#
+# Blocks commits that touch the durable brain trees
+# (brain/{memory,wiki,logs,indexes}) unless the committer's git email is listed
+# in brain/CONTRIBUTORS. brain/inbox/ is exempt, so anyone may propose a
+# candidate via a branch + merge request. The gate is a no-op while
+# brain/CONTRIBUTORS is absent or empty (single-user / dev checkouts).
+#
+# Installed per clone by install.sh via:  git config core.hooksPath .githooks
+set -euo pipefail
+
+# ── CHANGELOG reminder (advisory only — never blocks) ────────────────────────
+# Convention: whoever merges writes the user-facing entry, in the same change.
+# A rule that has to be remembered at review time loses to one that speaks up at
+# the point of use, so this says it here. It only ever WARNS: a commit is not the
+# place to lose work over a missing doc line, and an emergency fix must not be
+# held up by it. Silence with ATLAS_SKIP_CHANGELOG_CHECK=1.
+#
+# Deliberately NOT in pre-push: that hook keeps internal paths off the public
+# remote, reads the ref list from stdin (consumable once), and relies on `fail`
+# surviving its loop. Adding a second stdin reader there would have to pipe the
+# loop into a subshell, where `fail` no longer propagates — silently disarming
+# the guard. Not a trade worth making for a nag.
+if [ "${ATLAS_SKIP_CHANGELOG_CHECK:-0}" != "1" ]; then
+    _cl_base="$(git rev-parse -q --verify refs/remotes/origin/main 2>/dev/null || true)"
+    if [ -n "$_cl_base" ]; then
+        # Everything this branch changes, plus what is staged right now.
+        _cl_files="$( { git diff --name-only "$_cl_base" HEAD 2>/dev/null || true
+                        git diff --cached --name-only 2>/dev/null || true; } | sort -u)"
+        # Paths that never need an entry: tests, docs, the brain, generated
+        # validation reports, and the changelog itself.
+        _cl_exempt='^(tests/|docs/|hub/|brain/|devtools/validation/reports/|CHANGELOG\.md$|\.githooks/|.*\.md$)'
+        _cl_code="$(printf '%s\n' "$_cl_files" | grep -vE "$_cl_exempt" || true)"
+        _cl_has_entry="$(printf '%s\n' "$_cl_files" | grep -cE '^CHANGELOG\.md$' || true)"
+        if [ -n "$_cl_code" ] && [ "${_cl_has_entry:-0}" = "0" ]; then
+            {
+                echo "pre-commit: this branch changes code but adds no CHANGELOG.md entry."
+                echo "  Changed outside the exempt paths, e.g.:"
+                printf '%s\n' "$_cl_code" | head -5 | sed 's/^/    /'
+                echo "  Add one line under Unreleased saying what a USER will notice."
+                echo "  See the 'How to add an entry' section at the top of CHANGELOG.md."
+                echo "  Not applicable? ATLAS_SKIP_CHANGELOG_CHECK=1 git commit ..."
+            } >&2
+        fi
+    fi
+fi
+# ── private-terms guard ──────────────────────────────────────────────────────
+# Refuses to commit text that names internal cases, hosts, principals or
+# incidents. The term list lives OUTSIDE the tracked tree (.git-private-terms,
+# git-ignored, one fixed string per line, case-insensitive) so the list itself
+# never ships. Only ADDED lines of staged text files are checked. Silence for
+# one commit with ATLAS_SKIP_PRIVATE_TERMS=1.
+if [ "${ATLAS_SKIP_PRIVATE_TERMS:-0}" != "1" ] && [ -s .git-private-terms ]; then
+    _pt_hits="$(git diff --cached -U0 --no-color \
+        | grep -E '^\+' | grep -vE '^\+\+\+' \
+        | grep -inFf <(sed 's/#.*//' .git-private-terms | grep -v '^[[:space:]]*$') || true)"
+    if [ -n "$_pt_hits" ]; then
+        {
+            echo "pre-commit: staged text contains private terms (see .git-private-terms):"
+            printf '%s\n' "$_pt_hits" | head -8 | cut -c1-160 | sed 's/^/    /'
+            echo "  Rewrite the comment or fixture so it names no internal case, host,"
+            echo "  principal or incident. Deliberate? ATLAS_SKIP_PRIVATE_TERMS=1 git commit ..."
+        } >&2
+        exit 1
+    fi
+fi
+# ── end private-terms guard ──────────────────────────────────────────────────
+
+# ── end CHANGELOG reminder ───────────────────────────────────────────────────
+
+# Staged paths under a durable brain tree, plus the allow-list itself (so a
+# non-contributor cannot add themselves). Any change type (incl. delete/rename).
+staged="$(git diff --cached --name-only \
+    | grep -E '^brain/(memory|wiki|logs|indexes)/|^brain/CONTRIBUTORS$' || true)"
+[ -z "$staged" ] && exit 0        # nothing durable-brain — allow
+
+CONTRIB="brain/CONTRIBUTORS"
+[ -f "$CONTRIB" ] || exit 0       # allow-list absent — gate disabled
+
+# Allow-list: lowercased emails, comments and blank lines stripped.
+allow="$(sed 's/#.*//' "$CONTRIB" | tr 'A-Z' 'a-z' | grep -oE '[^[:space:]]+' || true)"
+[ -z "$allow" ] && exit 0         # empty allow-list — gate disabled
+
+email="$(printf '%s' "${ATLAS_BRAIN_IDENTITY:-$(git config user.email || true)}" \
+    | tr 'A-Z' 'a-z' | tr -d '[:space:]')"
+
+if [ -n "$email" ] && printf '%s\n' "$allow" | grep -qxF "$email"; then
+    exit 0
+fi
+
+{
+    echo "pre-commit: refusing durable brain changes from '${email:-<no git email>}'."
+    echo "  These staged paths require a brain/CONTRIBUTORS identity:"
+    printf '    %s\n' $staged
+    echo "  Fixes: use a listed contributor git email, unstage the durable brain"
+    echo "  files (keep only brain/inbox/ proposals), or open a merge request and"
+    echo "  let a maintainer approve + merge."
+} >&2
+exit 1

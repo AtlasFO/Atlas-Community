@@ -1,0 +1,69 @@
+{
+ "stack": "litellm",
+ "model": "example-model",
+ "scenario": "ok-signed-thinking-blocks",
+ "source": "hand-written from the documented LiteLLM response shape for an Anthropic model",
+ "status": 200,
+ "request": {
+  "model": "example-model",
+  "messages": [
+   {
+    "role": "user",
+    "content": "Reply with the single word: ok"
+   }
+  ],
+  "reasoning_effort": "low"
+ },
+ "response": {
+  "id": "chatcmpl-test0003",
+  "object": "chat.completion",
+  "created": 1924992000,
+  "model": "example-model",
+  "choices": [
+   {
+    "index": 0,
+    "message": {
+     "role": "assistant",
+     "content": "ok",
+     "reasoning_content": "The user is asking for one word, so I reply ok.",
+     "thinking_blocks": [
+      {
+       "type": "thinking",
+       "thinking": "The user is asking for one word, so I reply ok.",
+       "signature": "AAAA"
+      }
+     ],
+     "provider_specific_fields": {
+      "thinking_blocks": [
+       {
+        "type": "thinking",
+        "thinking": "The user is asking for one word, so I reply ok.",
+        "signature": "AAAA"
+       }
+      ]
+     }
+    },
+    "finish_reason": "stop"
+   }
+  ],
+  "usage": {
+   "prompt_tokens": 10,
+   "completion_tokens": 17,
+   "completion_tokens_details": {
+    "reasoning_tokens": 12
+   }
+  }
+ },
+ "expect": {
+  "content": "ok",
+  "reasoning_prefix": "The user is asking",
+  "reasoning_tokens": 12,
+  "tool_calls": 0,
+  "finish_reason": "stop",
+  "starved": false,
+  "thinking_observed": true,
+  "raw_keys": [
+   "thinking_blocks"
+  ]
+ }
+}

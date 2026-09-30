@@ -1,0 +1,23 @@
+# Keep the build context small and avoid baking machine-local state into the
+# image — install.sh recreates all of this at build time anyway.
+.git/
+.venv
+.cache/
+__pycache__/
+**/__pycache__/
+.pytest_cache/
+*.pyc
+
+# Machine-local / secrets — never bake these into an image
+.env
+.install-manifest.json
+cases/
+/cases
+
+# Case evidence must never end up in an image layer
+**/evidence/
+**/analysis/tcp_streams/
+
+# Not needed for a running container
+.github/
+.githooks/

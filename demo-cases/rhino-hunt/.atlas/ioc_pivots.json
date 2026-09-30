@@ -1,0 +1,205 @@
+{
+  "schema_version": "1.0",
+  "pivots": {
+    "ip:137.30.122.253": {
+      "origin": "C0003",
+      "targets": {
+        "analysis/contraband_data.pcap": "searched",
+        "analysis/contraband_data2.pcap": "searched",
+        "analysis/pcap_staging/rhino.log/17d05d01.pcap": "searched",
+        "analysis/pcap_staging/rhino2.log/606d1aab.pcap": "searched",
+        "analysis/pcap_staging/rhino3.log/af5043ea.pcap": "searched",
+        "evidence/rhino.log": "searched",
+        "evidence/rhino2.log": "searched",
+        "evidence/rhino3.log": "searched",
+        "analysis/evidence_index.db": "searched"
+      },
+      "generic_checked_absent": 385
+    },
+    "ip:137.30.120.40": {
+      "origin": "C0003",
+      "targets": {
+        "analysis/contraband_data.pcap": "searched",
+        "analysis/contraband_data2.pcap": "searched",
+        "analysis/pcap_staging/rhino.log/17d05d01.pcap": "searched",
+        "analysis/pcap_staging/rhino2.log/606d1aab.pcap": "searched",
+        "analysis/pcap_staging/rhino3.log/af5043ea.pcap": "searched",
+        "evidence/rhino.log": "searched",
+        "evidence/rhino2.log": "searched",
+        "evidence/rhino3.log": "searched",
+        "analysis/evidence_index.db": "searched"
+      },
+      "generic_checked_absent": 385
+    },
+    "file:contraband.zip": {
+      "origin": "C0004",
+      "targets": {
+        "evidence/rhino.log": "searched",
+        "evidence/rhino2.log": "searched",
+        "evidence/rhino3.log": "searched",
+        "analysis/evidence_index.db": "searched"
+      },
+      "generic_checked_absent": 385
+    },
+    "file:rhino1.jpg": {
+      "origin": "C0004",
+      "targets": {
+        "evidence/rhino.log": "searched",
+        "evidence/rhino2.log": "searched",
+        "evidence/rhino3.log": "searched",
+        "analysis/evidence_index.db": "searched"
+      },
+      "generic_checked_absent": 385
+    },
+    "file:rhino3.jpg": {
+      "origin": "C0004",
+      "targets": {
+        "evidence/rhino.log": "searched",
+        "evidence/rhino2.log": "searched",
+        "evidence/rhino3.log": "searched",
+        "analysis/evidence_index.db": "searched"
+      },
+      "generic_checked_absent": 385
+    },
+    "file:rhino5.gif": {
+      "origin": "C0011",
+      "targets": {
+        "evidence/rhino.log": "searched",
+        "evidence/rhino2.log": "searched",
+        "evidence/rhino3.log": "searched",
+        "analysis/evidence_index.db": "searched",
+        "analysis/streams_rhino2/00000009.html": "searched",
+        "analysis/streams_rhino2/00000010.html": "searched"
+      },
+      "generic_checked_absent": 383
+    },
+    "ip:137.30.120.37": {
+      "origin": "C0011",
+      "targets": {
+        "analysis/contraband_data.pcap": "searched",
+        "analysis/contraband_data2.pcap": "searched",
+        "analysis/pcap_staging/rhino.log/17d05d01.pcap": "searched",
+        "analysis/pcap_staging/rhino2.log/606d1aab.pcap": "searched",
+        "analysis/pcap_staging/rhino3.log/af5043ea.pcap": "searched",
+        "evidence/rhino.log": "searched",
+        "evidence/rhino2.log": "searched",
+        "evidence/rhino3.log": "searched",
+        "analysis/evidence_index.db": "searched"
+      },
+      "generic_checked_absent": 385
+    },
+    "file:rhino4.jpg": {
+      "origin": "C0011",
+      "targets": {
+        "evidence/rhino.log": "searched",
+        "evidence/rhino2.log": "searched",
+        "evidence/rhino3.log": "searched",
+        "analysis/evidence_index.db": "searched",
+        "analysis/streams_rhino2/00000009.html": "searched",
+        "analysis/streams_rhino2/00000010.html": "searched"
+      },
+      "generic_checked_absent": 383
+    },
+    "ip:137.30.123.234": {
+      "origin": "C0011",
+      "targets": {
+        "analysis/contraband_data.pcap": "searched",
+        "analysis/contraband_data2.pcap": "searched",
+        "analysis/pcap_staging/rhino.log/17d05d01.pcap": "searched",
+        "analysis/pcap_staging/rhino2.log/606d1aab.pcap": "searched",
+        "analysis/pcap_staging/rhino3.log/af5043ea.pcap": "searched",
+        "evidence/rhino.log": "searched",
+        "evidence/rhino2.log": "searched",
+        "evidence/rhino3.log": "searched",
+        "analysis/evidence_index.db": "searched"
+      },
+      "generic_checked_absent": 385
+    },
+    "file:rhino.exe": {
+      "origin": "C0012",
+      "targets": {
+        "evidence/rhino.log": "searched",
+        "evidence/rhino2.log": "searched",
+        "evidence/rhino3.log": "searched",
+        "analysis/evidence_index.db": "searched",
+        "analysis/streams_rhino3/00000000.html": "searched",
+        "analysis/streams_rhino3/00000001.html": "searched",
+        "analysis/streams_rhino3/00000003.html": "searched",
+        "analysis/streams_rhino3/00000004.html": "searched",
+        "analysis/streams_rhino3/00000005.html": "searched",
+        "analysis/streams_rhino3/00000006.html": "searched",
+        "analysis/streams_rhino3/00000007.html": "searched",
+        "analysis/streams_rhino3/00000008.html": "searched"
+      },
+      "generic_checked_absent": 332,
+      "generic_unowed": 45
+    },
+    "account:x03/x04": {
+      "origin": "C0015",
+      "targets": {
+        "evidence/rhino.log": "searched",
+        "evidence/rhino2.log": "searched",
+        "evidence/rhino3.log": "searched",
+        "analysis/evidence_index.db": "searched"
+      },
+      "generic_checked_absent": 385
+    },
+    "email:bighonkingrhino@hotmail.com": {
+      "origin": "C0018",
+      "targets": {
+        "analysis/contraband_data.pcap": "searched",
+        "analysis/contraband_data2.pcap": "searched",
+        "analysis/pcap_staging/rhino.log/17d05d01.pcap": "pending",
+        "analysis/pcap_staging/rhino2.log/606d1aab.pcap": "pending",
+        "analysis/pcap_staging/rhino3.log/af5043ea.pcap": "pending",
+        "evidence/rhino.log": "searched",
+        "evidence/rhino2.log": "searched",
+        "evidence/rhino3.log": "searched",
+        "analysis/evidence_index.db": "searched",
+        "analysis/streams_rhino1/00000070.html": "searched",
+        "analysis/streams_rhino1/00000071.html": "searched",
+        "analysis/streams_rhino1/00000167.html": "searched"
+      },
+      "generic_checked_absent": 373,
+      "generic_unowed": 9
+    },
+    "email:hugerhinolover@hotmail.com": {
+      "origin": "C0018",
+      "targets": {
+        "analysis/contraband_data.pcap": "searched",
+        "analysis/contraband_data2.pcap": "searched",
+        "analysis/pcap_staging/rhino.log/17d05d01.pcap": "pending",
+        "analysis/pcap_staging/rhino2.log/606d1aab.pcap": "pending",
+        "analysis/pcap_staging/rhino3.log/af5043ea.pcap": "pending",
+        "evidence/rhino.log": "searched",
+        "evidence/rhino2.log": "searched",
+        "evidence/rhino3.log": "searched",
+        "analysis/REPORT_LIMITATIONS_ACCEPTED.md": "searched",
+        "analysis/evidence_index.db": "searched",
+        "analysis/streams_rhino1/00000014.html": "searched",
+        "analysis/streams_rhino1/00000015.html": "searched"
+      },
+      "generic_checked_absent": 364,
+      "generic_unowed": 18
+    },
+    "domain:cook.cs.uno.edu": {
+      "origin": "C0018",
+      "targets": {
+        "analysis/contraband_data.pcap": "searched",
+        "analysis/contraband_data2.pcap": "searched",
+        "analysis/pcap_staging/rhino.log/17d05d01.pcap": "pending",
+        "analysis/pcap_staging/rhino2.log/606d1aab.pcap": "searched",
+        "analysis/pcap_staging/rhino3.log/af5043ea.pcap": "searched",
+        "evidence/rhino.log": "searched",
+        "evidence/rhino2.log": "searched",
+        "evidence/rhino3.log": "searched",
+        "analysis/evidence_index.db": "searched",
+        "analysis/streams_rhino1/00000209.html": "searched",
+        "analysis/streams_rhino1/00000210.html": "searched",
+        "analysis/streams_rhino1/00000219.html": "searched"
+      },
+      "generic_checked_absent": 381,
+      "generic_unowed": 1
+    }
+  }
+}

@@ -1,0 +1,76 @@
+{
+  "schema_version": "1.2",
+  "case_id": "RHINO-HUNT",
+  "updated_at": "2026-09-29T17:40:45Z",
+  "steps": [
+    {
+      "id": "step-01",
+      "action": "inventory_evidence",
+      "summary": "Call misc_inventory_evidence first — assess what exists, what is already parsed (consume those), what still needs processing, and what classes to skip. No mounts/parsers/DAIR/reason until then."
+    },
+    {
+      "id": "step-02",
+      "action": "review_mount_plan",
+      "summary": "0 auto-mount candidate(s), 1 plan-only image(s) — see .atlas/mount_plan.json"
+    }
+  ],
+  "actionable_task_ids": [],
+  "blocked_task_ids": [],
+  "revisit_claim_ids": [],
+  "dirty_evidence_paths": [],
+  "focus_hosts": [],
+  "focus_evidence": [],
+  "candidates": [],
+  "context_budget": {
+    "window_tokens": 262144,
+    "available_for_tool_output_tokens": 98863,
+    "available_for_evidence_tokens": 53925,
+    "detail_policy": "rich",
+    "max_bulk_dir_files": 8,
+    "model": "Qwen3.8-27B-FP8-Preview",
+    "provider": "llmhub",
+    "disk_first": false,
+    "conversation_included": true,
+    "conversation_tokens": 60033
+  },
+  "coverage": {
+    "mode": "not_needed",
+    "chunks": []
+  },
+  "resources": {
+    "orchestrator": "investigation_resource_manager",
+    "schema_hint": "1.2",
+    "open_task_count": 0,
+    "revisit_claim_count": 0,
+    "open_conflict_count": 0,
+    "catalog_unit_count": 4,
+    "claim_node_count": 22,
+    "finding_count": 15,
+    "context_budget": {
+      "window_tokens": 262144,
+      "available_for_tool_output_tokens": 98863,
+      "available_for_evidence_tokens": 53925,
+      "detail_policy": "rich",
+      "max_bulk_dir_files": 8,
+      "model": "Qwen3.8-27B-FP8-Preview",
+      "provider": "llmhub",
+      "disk_first": false,
+      "conversation_included": true,
+      "conversation_tokens": 60033
+    },
+    "tool_manifest_version": "2026-09-28.1",
+    "focus_text_preview": " ",
+    "note": "Context budget is one resource. Rank actions by investigation value × tool fit × budget fit × inverse cost.",
+    "ranking_source": "deterministic",
+    "dirty_rebuild": false,
+    "stewardship_turn": 112
+  },
+  "note": "Investigation execution plan from the Resource Orchestrator. Optimises investigation value under context, tool, and cost constraints — not token usage alone. Disk-first; full coverage via table.* is last resort when still dark.",
+  "open_conflict_ids": [],
+  "evidence_links": {
+    "hosts": [],
+    "paths": [],
+    "aliases": {},
+    "principals": []
+  }
+}

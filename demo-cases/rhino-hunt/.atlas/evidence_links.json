@@ -1,0 +1,11 @@
+{
+  "schema_version": "1.0",
+  "case_id": "RHINO-HUNT",
+  "updated_at": "2026-09-29T17:40:45Z",
+  "source": "CASE.md",
+  "entries": [],
+  "aliases": {},
+  "hosts": [],
+  "paths": [],
+  "principals": []
+}

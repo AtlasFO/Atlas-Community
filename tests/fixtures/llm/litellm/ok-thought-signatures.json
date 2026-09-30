@@ -1,0 +1,62 @@
+{
+ "stack": "litellm",
+ "model": "example-model",
+ "scenario": "ok-thought-signatures",
+ "source": "hand-written from the documented LiteLLM response shape for a Gemini model",
+ "status": 200,
+ "request": {
+  "model": "example-model",
+  "messages": [
+   {
+    "role": "user",
+    "content": "Reply with the single word: ok"
+   }
+  ],
+  "max_tokens": 512,
+  "reasoning_effort": "low"
+ },
+ "response": {
+  "id": "test0005",
+  "object": "chat.completion",
+  "created": 1924992000,
+  "model": "example-model",
+  "choices": [
+   {
+    "index": 0,
+    "message": {
+     "role": "assistant",
+     "content": "ok",
+     "reasoning_content": "**My Thought Process**\n\nThe request names the exact word to reply with, so I reply with it.\n\n",
+     "thinking_blocks": [
+      {
+       "type": "thinking",
+       "thinking": "**My Thought Process**\n\nThe request names the exact word to reply with, so I reply with it.\n\n"
+      }
+     ],
+     "provider_specific_fields": {
+      "thought_signatures": [
+       "AAAA"
+      ]
+     }
+    },
+    "finish_reason": "stop"
+   }
+  ],
+  "usage": {
+   "prompt_tokens": 10,
+   "completion_tokens": 23,
+   "completion_tokens_details": {
+    "reasoning_tokens": 18
+   }
+  }
+ },
+ "expect": {
+  "content": "ok",
+  "reasoning_prefix": "**My Thought Process**",
+  "reasoning_tokens": 18,
+  "tool_calls": 0,
+  "finish_reason": "stop",
+  "starved": false,
+  "thinking_observed": true
+ }
+}

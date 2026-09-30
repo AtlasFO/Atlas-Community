@@ -1,0 +1,659 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Atlas · Case Findings</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<link rel="stylesheet" href="assets/atlas.css" />
+<script src="assets/i18n.js"></script>
+<style>
+  /* View-specific layout only — tokens and the shared band, chips, board,
+     list and sheet come from atlas.css. */
+  .hero { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; margin-bottom: 6px; }
+  .hero .page-title { margin: 0; }
+  .hero .meta { color: var(--fg-2); font-size: var(--fs-label); }
+
+  /* ── The board ─────────────────────────────────────────────────────────
+     A lane per host (or per kind), four confidence columns across. Where a
+     belief sits says what it is; nothing needs a line drawn to it. */
+
+  .bc.kind-conflict { border-color: rgba(242,109,109,.45); }
+  .bc.tied { box-shadow: 0 0 0 2px rgba(242,109,109,.55); }
+  /* An older version sits behind its successor. */
+  .bc.stack { margin-bottom: 14px; }
+  .bc.stack::after {
+    content: ""; position: absolute; left: 5px; right: -4px; bottom: -6px; height: 7px;
+    border: 1px solid var(--border); border-top: 0;
+    border-radius: 0 0 var(--radius-sm) var(--radius-sm); background: var(--bg-1);
+  }
+
+  /* Observations fold per lane: they are the raw material, not the reading. */
+  details.obs { margin: 2px 0 0; }
+  details.obs summary {
+    cursor: pointer; user-select: none; list-style: none;
+    display: flex; align-items: center; gap: 8px;
+    font-size: var(--fs-small); color: var(--fg-2); padding: 6px 2px;
+  }
+  details.obs summary::-webkit-details-marker { display: none; }
+  details.obs summary .chev { transition: transform .15s var(--ease); display: inline-flex; }
+  details.obs summary .chev svg { display: block; }
+  details.obs[open] summary .chev { transform: rotate(90deg); }
+  details.obs summary:hover { color: var(--fg-1); }
+  .obs-row {
+    display: flex; gap: 10px; align-items: baseline; padding: 5px 4px;
+    border-top: 1px solid var(--border); font-size: var(--fs-small); cursor: pointer;
+  }
+  .obs-row:hover { background: var(--bg-3); }
+  .obs-row .otxt { color: var(--fg-1); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+  .obs-row .oct { flex: none; color: var(--fg-2); font-size: var(--fs-label); font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+<div class="page" id="app">
+  <div class="state-loading">Loading</div>
+</div>
+<!-- Outside #app: the board re-renders whenever the graph moves, and the
+     open sheet must survive that untouched. -->
+<div class="scrim" id="scrim"></div>
+<aside class="sheet" id="sheet" aria-label="Belief detail">
+  <div class="sheet-head">
+    <span class="sheet-title" id="sheet-title"></span>
+    <button class="sheet-close" id="sheet-close" aria-label="Close"><svg viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+  </div>
+  <div class="sheet-body" id="sheet-body"></div>
+</aside>
+
+<script src="assets/shell.js"></script>
+<script>
+'use strict';
+const $app = () => document.getElementById('app');
+const esc = AtlasShell.esc;
+
+const TIERS = ['CONFIRMED', 'LIKELY', 'SUSPECTED', 'UNCONFIRMED'];
+const TIER_RANK = { CONFIRMED: 4, LIKELY: 3, SUSPECTED: 2, UNCONFIRMED: 1 };
+const TIER_COLOR = {
+  CONFIRMED: 'var(--conf-confirmed)', LIKELY: 'var(--conf-likely)',
+  SUSPECTED: 'var(--conf-suspected)', UNCONFIRMED: 'var(--conf-unconfirmed)',
+};
+// Beliefs that get a card. Observations are the raw material and fold per
+// lane; evidence nodes are what the cards cite, not beliefs of their own.
+const CARD_KINDS = ['claim', 'conclusion', 'hypothesis', 'conflict', 'recommendation'];
+const KIND_LABEL = {
+  claim: 'Claim', conclusion: 'Conclusion', hypothesis: 'Hypothesis',
+  conflict: 'Conflict', recommendation: 'Recommendation', observation: 'Observation',
+  evidence: 'Evidence',
+};
+const KIND_PILL = { claim: 'info', conclusion: 'ok', hypothesis: 'partial', conflict: 'bad', recommendation: 'info', observation: 'neutral', evidence: 'neutral' };
+const kindPill = (k) => `<span class="pill ${KIND_PILL[k] || 'neutral'}">${esc(KIND_LABEL[k] || k)}</span>`;
+const SEVERAL = '*several*';   // never a real hostname   // lane key for beliefs that name more than one host
+const CHEVRON = '<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 5l7 7-7 7"/></svg>';
+
+// Board or list is a per-viewer convenience, so it lives in this browser only.
+const LS_LAYOUT = 'atlas.board.layout';
+let storedLayout = 'board';
+try { storedLayout = localStorage.getItem(LS_LAYOUT) === 'list' ? 'list' : 'board'; } catch (_e) { /* storage blocked */ }
+
+const State = {
+  data: null, mtime: null, stopPoll: null,
+  layout: storedLayout,   // 'board' | 'list'
+  sort: 'newest',         // list order: 'newest' | 'oldest' | 'confidence'
+  view: 'all',            // 'all' | 'attention'
+  search: '', confMin: 0,
+  hosts: new Set(),       // selected lanes; empty = every lane
+  kinds: new Set(CARD_KINDS.concat(['observation'])),
+  groupBy: 'host',        // 'host' | 'kind'
+  showGone: false,
+  selectedId: null,
+  openDrawers: new Set(), // lanes whose observations are unfolded
+  lastHtml: null, animTimer: null, deepLinked: false,
+};
+
+/* ── graph helpers ─────────────────────────────────────────────────────── */
+const nodes = () => (State.data && State.data.graph && State.data.graph.nodes) || {};
+const edges = () => (State.data && State.data.graph && State.data.graph.edges) || [];
+const meta = (id) => (State.data && State.data.board && State.data.board[id]) || {};
+const edgeEnds = (e) => [e.source || e.from || e.src, e.target || e.to || e.dst];
+const edgeKind = (e) => e.type || e.kind || e.relation || 'related';
+const tierOf = (n) => (String(n.confidence || 'UNCONFIRMED').toUpperCase());
+
+function confPill(conf) {
+  if (!conf) return '';
+  const c = String(conf).toUpperCase();
+  return `<span class="pill conf-${esc(c.toLowerCase())}">${esc(c)}</span>`;
+}
+function statusPill(n) {
+  const s = n.status || '';
+  if (s === 'needs_review') return '<span class="pill warn">needs review</span>';
+  if (s === 'conflict') return '<span class="pill bad">open conflict</span>';
+  if (s === 'superseded' || s === 'withdrawn') return `<span class="pill neutral">${esc(s)}</span>`;
+  return '';
+}
+function versionPill(n) {
+  const v = meta(n.id).version;
+  if (!v) return '';
+  return v.current
+    ? `<span class="pill neutral" title="Recorded ${v.of} times; this is the latest">v${v.index} of ${v.of}</span>`
+    : `<span class="pill neutral" title="Superseded by ${esc(v.superseded_by || '')}">v${v.index} of ${v.of} · superseded</span>`;
+}
+function processHref(callId) {
+  const info = AtlasShell.caseInfo();
+  const trace = info && info.traces && info.traces.length ? info.traces[0].path : null;
+  if (!trace) return null;
+  return `dashboard.html?case=${encodeURIComponent(AtlasShell.activeCase())}`
+    + `&trace=${encodeURIComponent(trace)}&call=${encodeURIComponent(callId)}`;
+}
+
+// claim id → the open conflicts that name it
+function conflictIndex() {
+  const idx = new Map();
+  for (const n of Object.values(nodes())) {
+    if (n.kind !== 'conflict' || n.status !== 'conflict') continue;
+    for (const cid of (n.conflicting_claim_ids || [])) {
+      if (!idx.has(cid)) idx.set(cid, []);
+      idx.get(cid).push(n.id);
+    }
+  }
+  return idx;
+}
+
+/* ── filtering ─────────────────────────────────────────────────────────── */
+function laneKeyOf(n) {
+  if (State.groupBy === 'kind') return n.kind || 'claim';
+  const m = meta(n.id);
+  if (m.host) return m.host;
+  return (m.hosts || []).length > 1 ? SEVERAL : '';
+}
+function laneTitle(key) {
+  if (State.groupBy === 'kind') return KIND_LABEL[key] || key;
+  if (key === SEVERAL) return 'Several hosts';
+  return key || 'Not attributed to a host';
+}
+function matches(n) {
+  const m = meta(n.id);
+  if (!State.kinds.has(n.kind || 'claim')) return false;
+  if (!State.showGone && m.gone) return false;
+  if (State.view === 'attention' && !m.attention) return false;
+  if (State.hosts.size && !State.hosts.has(laneKeyOf(n))) return false;
+  if (State.confMin > 0 && n.kind !== 'conflict' && n.kind !== 'hypothesis') {
+    if ((TIER_RANK[tierOf(n)] || 0) < State.confMin) return false;
+  }
+  if (State.search) {
+    const q = State.search.toLowerCase();
+    const hay = `${n.id} ${n.statement || ''} ${m.host || ''} ${(m.hosts || []).join(' ')} ${n.kind || ''}`.toLowerCase();
+    if (!hay.includes(q)) return false;
+  }
+  return true;
+}
+
+/* ── rendering ─────────────────────────────────────────────────────────── */
+function cardHtml(n, conflicts) {
+  const m = meta(n.id);
+  const tier = tierOf(n);
+  const kind = n.kind || 'claim';
+  const v = m.version;
+  const top = [];
+  if (kind !== 'claim') top.push(kindPill(kind));
+  const st = statusPill(n); if (st) top.push(st);
+  if (conflicts.has(n.id)) top.push('<span class="pill bad">in conflict</span>');
+  const hostsMeta = (m.hosts || []).length > 1
+    ? `<span title="Names more than one host">${esc(m.hosts.join(' · '))}</span>` : '';
+  const refs = (n.evidence || []).filter(e => e && typeof e === 'object').length;
+  return `
+    <article class="bc conf-${esc(tier.toLowerCase())} kind-${esc(kind)}${m.gone ? ' gone' : ''}${v && v.current && v.of > 1 ? ' stack' : ''}${State.selectedId === n.id ? ' selected' : ''}"
+             data-id="${esc(n.id)}" tabindex="0" role="button" aria-label="${esc(n.id)}: ${esc((n.statement || '').slice(0, 120))}">
+      ${top.length ? `<div class="bc-top">${top.join('')}</div>` : ''}
+      <div class="bc-txt">${esc(n.statement || n.summary || '(no statement)')}</div>
+      <div class="bc-meta">
+        <span class="mono">${esc(n.id)}</span>
+        <span>${refs} ref${refs === 1 ? '' : 's'}</span>
+        ${versionPill(n)}${hostsMeta}
+      </div>
+    </article>`;
+}
+
+function observationsHtml(laneKey, obs) {
+  if (!obs.length) return '';
+  // Identical observations are the same event seen more than once.
+  const groups = new Map();
+  for (const o of obs) {
+    const k = (o.statement || '').trim();
+    if (!groups.has(k)) groups.set(k, { first: o, n: 0 });
+    groups.get(k).n += 1;
+  }
+  const open = State.openDrawers.has(laneKey);
+  const rows = [...groups.values()].map(g => `
+      <div class="obs-row" data-id="${esc(g.first.id)}" role="button" tabindex="0">
+        <span style="display:inline-block;width:6px;height:6px;border-radius:50%;flex:none;background:${TIER_COLOR[tierOf(g.first)] || 'var(--fg-2)'}"></span>
+        <span class="otxt" title="${esc(g.first.statement || '')}">${esc(g.first.statement || '')}</span>
+        <span class="oct">${g.n > 1 ? `×${g.n} · ` : ''}${esc(g.first.id)}</span>
+      </div>`).join('');
+  return `
+    <details class="obs" data-lane="${esc(laneKey)}" ${open ? 'open' : ''}>
+      <summary><span class="chev">${CHEVRON}</span>${obs.length} observation${obs.length === 1 ? '' : 's'}${groups.size < obs.length ? ` · ${groups.size} distinct` : ''}</summary>
+      ${rows}
+    </details>`;
+}
+
+function laneHtml(key, cards, obs, conflicts, index) {
+  const byTier = { CONFIRMED: [], LIKELY: [], SUSPECTED: [], UNCONFIRMED: [] };
+  for (const n of cards) (byTier[tierOf(n)] || byTier.UNCONFIRMED).push(n);
+  const sub = [];
+  if (cards.length) sub.push(`${cards.length} belief${cards.length === 1 ? '' : 's'}`);
+  if (obs.length) sub.push(`${obs.length} observation${obs.length === 1 ? '' : 's'}`);
+  return `
+    <section class="lane" style="--d:${(index * 0.05).toFixed(2)}s">
+      <div class="lane-h">
+        <div class="lname">${esc(laneTitle(key))}</div>
+        <div class="lsub">${esc(sub.join(' · '))}</div>
+      </div>
+      <div>
+        ${cards.length ? `<div class="cols">
+          ${TIERS.map(t => `
+            <div class="col">
+              <div class="col-h"><span class="cdot" style="background:${TIER_COLOR[t]}"></span>${esc(t.toLowerCase())}<span class="n">${byTier[t].length}</span></div>
+              ${byTier[t].length ? byTier[t].map(n => cardHtml(n, conflicts)).join('') : '<div class="col-empty">none</div>'}
+            </div>`).join('')}
+        </div>` : ''}
+        ${observationsHtml(key, obs)}
+      </div>
+    </section>`;
+}
+
+/* ── the list ─────────────────────────────────────────────────────────── */
+function sortList(arr) {
+  const when = (n) => String(n.created_at || '');
+  const newest = (x, y) => when(y).localeCompare(when(x)) || String(y.id).localeCompare(String(x.id));
+  if (State.sort === 'oldest') return arr.sort((x, y) => newest(y, x));
+  if (State.sort === 'confidence') return arr.sort((x, y) => (TIER_RANK[tierOf(y)] || 0) - (TIER_RANK[tierOf(x)] || 0) || newest(x, y));
+  return arr.sort(newest);
+}
+
+function rowHtml(n, conflicts) {
+  const m = meta(n.id);
+  const kind = n.kind || 'claim';
+  const tier = tierOf(n);
+  const pills = [statusPill(n), conflicts.has(n.id) ? '<span class="pill bad">in conflict</span>' : '', versionPill(n)].filter(Boolean);
+  const refs = (n.evidence || []).filter(e => e && typeof e === 'object').length;
+  const hosts = m.host ? [m.host] : (m.hosts || []);
+  return `
+    <div class="lrow${m.gone ? ' gone' : ''}${State.selectedId === n.id ? ' selected' : ''}" data-id="${esc(n.id)}" role="button" tabindex="0">
+      <span class="rid">${esc(n.id)}</span>
+      <span>${kindPill(kind)}</span>
+      <span class="rconf"><span class="cdot" style="background:${TIER_COLOR[tier] || 'var(--fg-2)'}"></span>${esc(tier.toLowerCase())}</span>
+      <span class="rtxt">${esc(n.statement || n.summary || '(no statement)')}${pills.length ? `<span class="pills">${pills.join('')}</span>` : ''}</span>
+      <span class="rhost">${esc(hosts.join(' · '))}</span>
+      <span class="rrefs">${refs}</span>
+      <span class="rwhen" title="${esc(n.created_at || '')}">${n.created_at ? esc(AtlasShell.timeAgo(n.created_at)) : ''}</span>
+    </div>`;
+}
+
+function listHtml(rows, conflicts) {
+  return `
+    <div class="rows">
+      <div class="rows-h" aria-hidden="true"><span>Id</span><span>Kind</span><span>Confidence</span><span>Statement</span><span>Host</span><span class="rrefs">Refs</span><span>Recorded</span></div>
+      ${rows.map(n => rowHtml(n, conflicts)).join('')}
+    </div>`;
+}
+
+function bandHtml(counts, hosts) {
+  const claimConf = (counts.confidence || {}).claim || {};
+  const claims = (counts.kind || {}).claim || 0;
+  const observations = (counts.kind || {}).observation || 0;
+  const parts = TIERS.map(t => [t, claimConf[t] || 0]).filter(p => p[1] > 0);
+  const bar = claims ? `
+    <div class="minibar" aria-hidden="true">${parts.map(([t, n]) =>
+      `<span style="width:${(100 * n / claims).toFixed(1)}%;background:${TIER_COLOR[t]}"></span>`).join('')}</div>
+    <div class="conf-legend">${parts.map(([t, n]) =>
+      `<span><span class="cdot" style="background:${TIER_COLOR[t]}"></span>${n} ${esc(t.toLowerCase())}</span>`).join('')}</div>`
+    : '<div class="f-sub">nothing recorded yet</div>';
+  const other = ['conclusion', 'hypothesis', 'recommendation']
+    .map(k => [(counts.kind || {})[k] || 0, k]).filter(p => p[0] > 0)
+    .map(([n, k]) => `${n} ${KIND_LABEL[k].toLowerCase()}${n > 1 ? 's' : ''}`).join(' · ');
+  return `
+    <div class="band">
+      <div class="band-figures">
+        <div class="band-cell">
+          <div class="f-v">${claims}</div><div class="f-l">Claims</div>${bar}
+        </div>
+        <div class="band-cell">
+          <div class="f-v">${observations}</div><div class="f-l">Observations</div>
+          <div class="f-sub">${other || 'the raw material, folded per lane'}</div>
+        </div>
+        <div class="band-cell">
+          <div class="f-v" ${counts.conflicts ? 'style="color:var(--bad)"' : ''}>${counts.conflicts || 0}</div>
+          <div class="f-l">Open conflicts</div>
+          <div class="f-sub">${counts.needs_review || 0} need review${counts.chains ? ` · ${counts.chains} revised belief${counts.chains > 1 ? 's' : ''}` : ''}</div>
+        </div>
+        <div class="band-cell">
+          <div class="f-v">${(counts.evidence_refs || 0).toLocaleString()}</div>
+          <div class="f-l">Evidence references</div>
+          <div class="f-sub">${counts.active ? `${(counts.evidence_refs / counts.active).toFixed(1)} per belief` : ''}</div>
+        </div>
+        <div class="band-cell">
+          <div class="f-v">${hosts.length}</div><div class="f-l">Hosts</div>
+          <div class="f-sub" title="${esc(hosts.join(' · '))}">${hosts.length ? esc(hosts.join(' · ')) : 'no host named yet'}</div>
+        </div>
+      </div>
+    </div>`;
+}
+
+function toolsHtml(counts, laneKeys, shown, total) {
+  const kindCount = counts.kind || {};
+  const attention = Object.values(nodes()).filter(n => meta(n.id).attention).length;
+  const kindChip = (k) => {
+    const n = kindCount[k] || 0;
+    const label = k === 'hypothesis' ? 'Hypotheses' : `${KIND_LABEL[k]}s`;
+    return `<button type="button" class="chip${State.kinds.has(k) ? ' on' : ''}${n ? '' : ' zero'}" data-kind="${k}">${esc(label)} <span class="n">${n}</span></button>`;
+  };
+  const hostChips = State.groupBy === 'host'
+    ? laneKeys.map(k => `<button type="button" class="chip${State.hosts.has(k) ? ' on' : ''}" data-host="${esc(k)}">${esc(laneTitle(k))}</button>`).join('')
+    : '';
+  // The board's lanes are by host or by kind; the list is always by host.
+  const laneSwitch = State.layout === 'board' ? `<span class="seg">
+          <button type="button" class="chip${State.groupBy === 'host' ? ' on' : ''}" data-group="host" title="A lane per host the beliefs name">By host</button>
+          <button type="button" class="chip${State.groupBy === 'kind' ? ' on' : ''}" data-group="kind" title="A lane per kind of belief">By kind</button>
+        </span>` : '';
+  return `
+    <div class="tools lead">
+      <input type="search" class="search" id="search" placeholder="Search statements, hosts, addresses, users…" value="${esc(State.search)}" />
+      <span class="seg">
+        <button type="button" class="chip${State.layout === 'board' ? ' on' : ''}" data-layout="board" title="Lanes by host, columns by confidence">Board</button>
+        <button type="button" class="chip${State.layout === 'list' ? ' on' : ''}" data-layout="list" title="Every belief and observation as one list">List</button>
+      </span>
+      ${State.layout === 'list' ? `<select class="chip" id="sort" title="Order of the list">
+        <option value="newest"${State.sort === 'newest' ? ' selected' : ''}>Newest first</option>
+        <option value="oldest"${State.sort === 'oldest' ? ' selected' : ''}>Oldest first</option>
+        <option value="confidence"${State.sort === 'confidence' ? ' selected' : ''}>By confidence</option>
+      </select>` : ''}
+      <span class="tail">${shown} of ${total} shown</span>
+    </div>
+    <div class="tools filters">
+      <span class="tg"><span class="tg-l">Show</span>
+        <span class="seg">
+          <button type="button" class="chip${State.view === 'all' ? ' on' : ''}" data-view="all">Everything</button>
+          <button type="button" class="chip${State.view === 'attention' ? ' on' : ''}${attention ? '' : ' zero'}" data-view="attention" title="Conclusions, open conflicts and beliefs flagged for review">Needs attention <span class="n">${attention}</span></button>
+        </span>
+        <select class="chip" id="conf-min" title="Minimum confidence">
+          <option value="0"${State.confMin === 0 ? ' selected' : ''}>Any confidence</option>
+          <option value="2"${State.confMin === 2 ? ' selected' : ''}>Suspected or higher</option>
+          <option value="3"${State.confMin === 3 ? ' selected' : ''}>Likely or higher</option>
+          <option value="4"${State.confMin === 4 ? ' selected' : ''}>Confirmed only</option>
+        </select>
+        <button type="button" class="chip${State.showGone ? ' on' : ''}" data-gone="1" title="Include superseded and withdrawn beliefs">Include superseded</button>
+      </span>
+      <span class="tg"><span class="tg-l">Kinds</span>${['claim', 'conclusion', 'hypothesis', 'conflict', 'recommendation', 'observation'].map(kindChip).join('')}</span>
+      ${laneSwitch || hostChips ? `<span class="tg"><span class="tg-l">${State.layout === 'board' ? 'Lanes' : 'Hosts'}</span>${laneSwitch}${hostChips}</span>` : ''}
+    </div>`;
+}
+
+function render() {
+  const d = State.data;
+  const cd = AtlasShell.activeCase();
+  const all = Object.values(nodes());
+  const counts = d.counts || {};
+  const hosts = d.hosts || [];
+  const conflicts = conflictIndex();
+
+  // Lane chips list every lane the data has, before filters; the board
+  // shows the lanes that survive them.
+  const allLaneKeys = [...new Set(all.map(laneKeyOf))];
+  const visible = all.filter(matches);
+  const lanes = new Map();
+  for (const n of visible) {
+    const key = laneKeyOf(n);
+    if (!lanes.has(key)) lanes.set(key, { cards: [], obs: [] });
+    (n.kind === 'observation' ? lanes.get(key).obs : lanes.get(key).cards).push(n);
+  }
+  const laneOrder = (a, b) => {
+    if (State.groupBy === 'kind') {
+      const order = CARD_KINDS.concat(['observation', 'evidence']);
+      return order.indexOf(a) - order.indexOf(b);
+    }
+    // Named hosts first, then "several", then unattributed.
+    const rank = (k) => (k === SEVERAL ? 1 : k === '' ? 2 : 0);
+    return rank(a) - rank(b) || a.localeCompare(b);
+  };
+  const keys = [...lanes.keys()].sort(laneOrder);
+  allLaneKeys.sort(laneOrder);
+  const sortCards = (arr) => arr.sort((x, y) => (TIER_RANK[tierOf(y)] || 0) - (TIER_RANK[tierOf(x)] || 0)
+    || String(y.created_at || '').localeCompare(String(x.created_at || '')));
+
+  let boardHtml;
+  if (!all.length) {
+    boardHtml = `<div class="state-empty">No beliefs recorded yet.
+      <div class="hint">Beliefs appear here as the investigation records findings.
+      Run <code>atlas run</code> or <code>atlas rerun</code> on this case.</div></div>`;
+  } else if (!visible.length) {
+    boardHtml = `<div class="state-empty">Nothing matches these filters.
+      <div class="hint">${State.view === 'attention'
+        ? 'Nothing needs attention: no conclusion, open conflict or belief flagged for review yet.'
+        : 'Widen the confidence floor, clear the search, or include superseded beliefs.'}</div></div>`;
+  } else if (State.layout === 'list') {
+    boardHtml = listHtml(sortList(visible), conflicts);
+  } else {
+    boardHtml = keys.map((k, i) => {
+      const l = lanes.get(k);
+      return laneHtml(k, sortCards(l.cards), l.obs, conflicts, i);
+    }).join('');
+  }
+
+  const html = `
+    <div class="hero">
+      <h1 class="page-title">Case Findings</h1>
+      <span class="meta">${esc(cd)} · ${State.layout === 'list' ? 'every belief and observation, in one list' : 'what the case holds, by confidence and host'}</span>
+    </div>
+    ${bandHtml(counts, hosts)}
+    ${toolsHtml(counts, allLaneKeys, visible.length, all.length)}
+    ${boardHtml}`;
+
+  if (html === State.lastHtml) return;
+  const first = State.lastHtml === null;
+  $app().innerHTML = html;
+  State.lastHtml = html;
+  if (first) {
+    $app().classList.add('anim-in');
+    clearTimeout(State.animTimer);
+    State.animTimer = setTimeout(() => $app().classList.remove('anim-in'), 1400);
+  }
+  wire();
+}
+
+function rerender() { State.lastHtml = null; render(); }
+
+function setLayout(layout) {
+  if (State.layout === layout) return;
+  State.layout = layout;
+  if (State.groupBy !== 'host') { State.groupBy = 'host'; State.hosts.clear(); }   // lanes by kind are a board reading
+  try { localStorage.setItem(LS_LAYOUT, layout); } catch (_e) { /* storage blocked */ }
+  rerender();
+}
+
+function wire() {
+  const app = $app();
+  const search = app.querySelector('#search');
+  let t = null;
+  search.addEventListener('input', (ev) => {
+    clearTimeout(t);
+    t = setTimeout(() => {
+      State.search = ev.target.value.trim(); rerender();
+      const s = app.querySelector('#search'); if (s) { s.focus(); s.setSelectionRange(s.value.length, s.value.length); }
+    }, 200);
+  });
+  app.querySelector('#conf-min').addEventListener('change', (ev) => { State.confMin = parseInt(ev.target.value, 10) || 0; rerender(); });
+  app.querySelectorAll('[data-view]').forEach(b => b.addEventListener('click', () => { State.view = b.dataset.view; rerender(); }));
+  app.querySelectorAll('[data-kind]').forEach(b => b.addEventListener('click', () => {
+    const k = b.dataset.kind;
+    if (State.kinds.has(k)) State.kinds.delete(k); else State.kinds.add(k);
+    rerender();
+  }));
+  app.querySelectorAll('[data-host]').forEach(b => b.addEventListener('click', () => {
+    const h = b.dataset.host;
+    if (State.hosts.has(h)) State.hosts.delete(h); else State.hosts.add(h);
+    rerender();
+  }));
+  app.querySelectorAll('[data-layout]').forEach(b => b.addEventListener('click', () => setLayout(b.dataset.layout)));
+  const sort = app.querySelector('#sort');
+  if (sort) sort.addEventListener('change', (ev) => { State.sort = ev.target.value; rerender(); });
+  app.querySelectorAll('[data-group]').forEach(b => b.addEventListener('click', () => {
+    if (State.groupBy === b.dataset.group) return;
+    State.groupBy = b.dataset.group; State.hosts.clear(); rerender();
+  }));
+  app.querySelectorAll('[data-gone]').forEach(b => b.addEventListener('click', () => { State.showGone = !State.showGone; rerender(); }));
+  app.querySelectorAll('details.obs').forEach(d => d.addEventListener('toggle', () => {
+    if (d.open) State.openDrawers.add(d.dataset.lane); else State.openDrawers.delete(d.dataset.lane);
+  }));
+  const open = (el) => { const id = el.dataset.id; if (id) openSheet(id); };
+  app.querySelectorAll('.bc, .obs-row, .lrow').forEach(el => {
+    el.addEventListener('click', () => open(el));
+    el.addEventListener('keydown', (ev) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); open(el); } });
+  });
+  // A conflict card lights up the beliefs it stands between.
+  app.querySelectorAll('.bc.kind-conflict').forEach(el => {
+    const ids = (nodes()[el.dataset.id] || {}).conflicting_claim_ids || [];
+    const tie = (on) => ids.forEach(id => { const c = app.querySelector(`.bc[data-id="${CSS.escape(id)}"]`); if (c) c.classList.toggle('tied', on); });
+    el.addEventListener('mouseenter', () => tie(true));
+    el.addEventListener('mouseleave', () => tie(false));
+  });
+}
+
+/* ── the sheet ─────────────────────────────────────────────────────────── */
+function openSheet(id) {
+  const n = nodes()[id];
+  if (!n) return;
+  State.selectedId = id;
+  renderSheet();
+  document.getElementById('sheet').classList.add('open');
+  document.getElementById('scrim').classList.add('on');
+  $app().querySelectorAll('.bc.selected, .lrow.selected').forEach(el => el.classList.remove('selected'));
+  const card = $app().querySelector(`.bc[data-id="${CSS.escape(id)}"], .lrow[data-id="${CSS.escape(id)}"]`);
+  if (card) card.classList.add('selected');
+}
+function closeSheet() {
+  State.selectedId = null;
+  document.getElementById('sheet').classList.remove('open');
+  document.getElementById('scrim').classList.remove('on');
+  $app().querySelectorAll('.bc.selected, .lrow.selected').forEach(el => el.classList.remove('selected'));
+}
+function renderSheet() {
+  const n = nodes()[State.selectedId];
+  if (!n) { closeSheet(); return; }
+  const m = meta(n.id);
+  const kind = n.kind || 'claim';
+  document.getElementById('sheet-title').textContent =
+    `${n.id} · ${KIND_LABEL[kind] || kind}${m.host ? ` · ${m.host}` : ''}`;
+
+  const evidence = (n.evidence || []).filter(e => e && typeof e === 'object');
+  const evHtml = evidence.length
+    ? evidence.map(e => {
+        const href = e.call_id != null ? processHref(e.call_id) : null;
+        const cid = e.call_id != null ? `#${e.call_id}` : '';
+        return `<div class="ref">
+          ${href ? `<a class="cid" href="${href}" title="Open this call in the Process view">${esc(cid)}</a>` : `<span class="cid">${esc(cid)}</span>`}
+          <span>${esc(e.artifact || 'evidence')}${e.locator ? ` · ${esc(e.locator)}` : ''}</span></div>`;
+      }).join('')
+    : '<div class="dim">No recorded evidence references.</div>';
+
+  const related = [];
+  const seen = new Set();
+  const push = (id, why) => { if (id && id !== n.id && !seen.has(id) && nodes()[id]) { seen.add(id); related.push([id, why]); } };
+  for (const e of edges()) {
+    const [s, t] = edgeEnds(e);
+    if (s === n.id) push(t, `${edgeKind(e)} →`);
+    else if (t === n.id) push(s, `← ${edgeKind(e)}`);
+  }
+  for (const cid of (n.conflicting_claim_ids || [])) push(cid, 'in conflict');
+  for (const other of Object.values(nodes())) {
+    if (other.kind === 'conflict' && (other.conflicting_claim_ids || []).includes(n.id)) push(other.id, 'conflict');
+  }
+  const relHtml = related.length
+    ? related.map(([id, why]) => `<div class="ref"><span class="cid" data-goto="${esc(id)}">${esc(id)}</span>
+        <span><span class="dim">${esc(why)}</span> ${esc(((nodes()[id] || {}).statement || '').slice(0, 90))}</span></div>`).join('')
+    : '<div class="dim">No linked beliefs.</div>';
+
+  let versionHtml = '';
+  if (m.version) {
+    const chain = Object.entries(State.data.board)
+      .filter(([, b]) => b.version && b.version.chain === m.version.chain)
+      .map(([id, b]) => [id, b.version]).sort((a, b) => a[1].index - b[1].index);
+    versionHtml = `<h4>Version history</h4>${chain.map(([id, v]) => `
+      <div class="ref"><span class="cid" data-goto="${esc(id)}">${esc(id)}</span>
+        <span>${confPill((nodes()[id] || {}).confidence)} ${v.current ? '<span class="pill info">current</span>' : ''}
+        <span class="dim">${esc(AtlasShell.timeAgo((nodes()[id] || {}).created_at))}</span></span></div>`).join('')}`;
+  }
+
+  document.getElementById('sheet-body').innerHTML = `
+    <div>${confPill(n.confidence)} ${statusPill(n)} ${versionPill(n)}
+      ${(m.hosts || []).length ? `<span class="pill neutral">${esc(m.hosts.join(' · '))}</span>` : ''}</div>
+    <div class="statement" style="margin-top:10px">${esc(n.statement || n.summary || '(no statement)')}</div>
+    ${n.reasoning ? `<h4>Reasoning</h4><div class="muted" style="line-height:1.6">${esc(n.reasoning)}</div>` : ''}
+    ${n.supersede_reason ? `<h4>Superseded because</h4><div class="muted">${esc(n.supersede_reason)}</div>` : ''}
+    <h4>Evidence (${evidence.length})</h4>${evHtml}
+    ${versionHtml}
+    <h4>Related beliefs (${related.length})</h4>${relHtml}
+    <div class="dim" style="margin-top:12px">Recorded ${esc(AtlasShell.timeAgo(n.created_at))}${n.updated_at ? ` · updated ${esc(AtlasShell.timeAgo(n.updated_at))}` : ''}</div>
+    <details class="raw" style="margin-top:14px"><summary>Raw record</summary><pre>${esc(JSON.stringify(n, null, 2))}</pre></details>`;
+  document.querySelectorAll('#sheet-body [data-goto]').forEach(a =>
+    a.addEventListener('click', () => { openSheet(a.dataset.goto); scrollToCard(a.dataset.goto); }));
+}
+function scrollToCard(id) {
+  const el = $app().querySelector(`[data-id="${CSS.escape(id)}"]`);
+  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+document.getElementById('sheet-close').addEventListener('click', closeSheet);
+document.getElementById('scrim').addEventListener('click', closeSheet);
+document.addEventListener('keydown', (ev) => { if (ev.key === 'Escape' && State.selectedId) closeSheet(); });
+
+/* ── loading ───────────────────────────────────────────────────────────── */
+async function load() {
+  const cd = AtlasShell.activeCase();
+  if (!cd) return;
+  let data;
+  try {
+    data = await AtlasShell.api('evidence_board', { case: cd });
+  } catch (e) {
+    if (AtlasShell.activeCase() !== cd) return;
+    if (AtlasShell.isTransient(e)) return;   // keep the board; the next poll retries
+    if (e.status === 404) {
+      State.data = { graph: { nodes: {}, edges: [] }, board: {}, hosts: [], counts: {}, mtime: null };
+      State.mtime = null; render(); return;
+    }
+    $app().innerHTML = `<div class="state-error">Could not load Case Findings.\n${esc(e.message)}</div>`;
+    State.lastHtml = null;
+    return;
+  }
+  if (AtlasShell.activeCase() !== cd) return;
+  if (State.data && State.mtime === data.mtime) return;
+  State.mtime = data.mtime;
+  State.data = data;
+  render();
+  if (State.selectedId) renderSheet();
+  // Deep link ?node=C0012 from Questions, IOCs or the Overview: open it once.
+  if (!State.deepLinked) {
+    const want = new URLSearchParams(location.search).get('node');
+    if (want && nodes()[want]) {
+      State.deepLinked = true;
+      if (meta(want).gone) { State.showGone = true; rerender(); }
+      openSheet(want); scrollToCard(want);
+    }
+  }
+}
+
+AtlasShell.init({
+  page: 'claims',
+  onCase: (cd) => {
+    if (State.stopPoll) State.stopPoll();
+    State.data = null; State.mtime = null; State.lastHtml = null;
+    State.deepLinked = false; State.hosts.clear(); State.openDrawers.clear();
+    closeSheet();
+    if (!cd) {
+      $app().innerHTML = `<h1 class="page-title">Case Findings</h1>
+        <div class="state-empty">Select a case to see what it holds.</div>`;
+      return;
+    }
+    $app().innerHTML = '<div class="state-loading">Loading</div>';
+    State.stopPoll = AtlasShell.poll(load, 2500);
+  },
+});
+</script>
+</body>
+</html>

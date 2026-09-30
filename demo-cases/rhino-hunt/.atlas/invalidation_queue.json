@@ -1,0 +1,28 @@
+{
+  "schema_version": "1.0",
+  "updated_at": "2026-09-29T16:46:20Z",
+  "dirty_evidence": [
+    "ev_415b7f37d5342e0d",
+    "ev_82d787513478995f",
+    "ev_40c2309e1b04b84f",
+    "ev_ce77321b4f22c119"
+  ],
+  "dirty_paths": [
+    "evidence/rhino2.log",
+    "evidence/rhino3.log",
+    "evidence/RHINOUSB.dd",
+    "evidence/rhino.log"
+  ],
+  "stale_nodes": [],
+  "context_matched_nodes": [],
+  "affected_report_sections": [],
+  "note": "Dirty set is the starting point of investigation, not a hard boundary. The AI may examine additional evidence.",
+  "diff_counts": {
+    "added": 4,
+    "changed": 0,
+    "removed": 0,
+    "unchanged": 0,
+    "touched": 0,
+    "total_current": 4
+  }
+}

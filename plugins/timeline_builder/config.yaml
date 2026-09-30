@@ -1,0 +1,83 @@
+# Timeline Builder defaults — copy to <case>/timeline_config.yaml to override.
+include_event_types:
+  - process_execution
+  - process_termination
+  - successful_logon
+  - failed_logon
+  - network_logon
+  - network_connection
+  - network_share_access
+  - persistence_service
+  - persistence_scheduled_task
+  - persistence_run_key
+  - lateral_movement
+  - remote_access
+  - privilege_escalation
+  - executable_created
+  - executable_deleted
+  - file_created
+  - file_modified
+  - file_accessed
+  # Optional narrative types from mapped artifacts (not Claim Graph)
+  - investigation_finding
+  - session_activity
+
+include_eids:
+  - 4624
+  - 4625
+  - 4634
+  - 4648
+  - 4672
+  - 4688
+  - 4689
+  - 4698
+  - 4723
+  - 4769
+  - 4776
+  - 5140
+  - 5145
+  - 7045
+
+exclude_eids:
+  - 0
+
+mft_timestamp_fields:
+  - Created0x10
+  - LastModified0x10
+
+mft_extensions:
+  - .exe
+  - .dll
+  - .bat
+  - .cmd
+  - .ps1
+  - .zip
+  - .rar
+  - .lnk
+
+max_rows_per_artifact: 5000
+# Cap for remote-session/SIEM session CSVs — full dumps are collapsed further, but
+# ingesting 10k+ rows just to throw them away wastes finalize time.
+max_session_rows_per_artifact: 800
+
+# Curated timeline (not a raw dump): collapse repetitive chains, then keep
+# only investigation-relevant rows (claim focus hosts/users/IPs from SoT).
+# Raw capture still lives under reports/.timeline_build/ for search.
+collapse:
+  enabled: true
+  keep_interior: 2
+  bulk_keep_interior: 1
+  max_gap_seconds: 1800
+  bulk_max_gap_seconds: 86400
+  bulk_event_types:
+    - session_activity
+
+curate:
+  enabled: true
+  # When claims exist, score events by narrative binding (entities + asserted
+  # evidence classes). 0 = no unmatched noise samples in master_timeline.tsv.
+  max_unmatched_noise: 0
+  # Collapse auth/process storms into summary rows (users listed in description).
+  aggregate: true
+  aggregate_min_group: 8
+  aggregate_bucket_seconds: 600

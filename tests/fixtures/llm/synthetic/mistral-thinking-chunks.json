@@ -1,0 +1,47 @@
+{
+ "stack": "synthetic",
+ "model": "hand-written",
+ "scenario": "mistral-thinking-chunks",
+ "source": "docs.mistral.ai/capabilities/reasoning: content is a list with ThinkChunk and TextChunk",
+ "status": 200,
+ "request": {},
+ "response": {
+  "choices": [
+   {
+    "index": 0,
+    "message": {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "thinking",
+       "thinking": [
+        {
+         "type": "text",
+         "text": "The answer is ok."
+        }
+       ]
+      },
+      {
+       "type": "text",
+       "text": "ok"
+      }
+     ]
+    },
+    "finish_reason": "stop"
+   }
+  ],
+  "usage": {
+   "prompt_tokens": 10,
+   "completion_tokens": 5
+  }
+ },
+ "expect": {
+  "content": "ok",
+  "reasoning_prefix": "The answer is ok.",
+  "reasoning_tokens": 0,
+  "tool_calls": 0,
+  "finish_reason": "stop",
+  "starved": false,
+  "thinking_observed": true
+ }
+}

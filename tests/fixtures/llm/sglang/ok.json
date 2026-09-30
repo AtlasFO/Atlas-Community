@@ -1,0 +1,50 @@
+{
+ "stack": "sglang",
+ "model": "example-model",
+ "scenario": "ok",
+ "source": "hand-written from the documented sglang response shape",
+ "status": 200,
+ "request": {
+  "model": "example-model",
+  "messages": [
+   {
+    "role": "user",
+    "content": "Reply with the single word: ok"
+   }
+  ],
+  "max_tokens": 512
+ },
+ "response": {
+  "id": "test0013",
+  "object": "chat.completion",
+  "created": 1924992000,
+  "model": "example-model",
+  "choices": [
+   {
+    "index": 0,
+    "message": {
+     "role": "assistant",
+     "content": "ok",
+     "reasoning_content": "The user asks for one word, so the reply is ok.",
+     "tool_calls": null
+    },
+    "finish_reason": "stop"
+   }
+  ],
+  "usage": {
+   "prompt_tokens": 10,
+   "completion_tokens": 25,
+   "prompt_tokens_details": null,
+   "reasoning_tokens": 20
+  }
+ },
+ "expect": {
+  "content": "ok",
+  "reasoning_prefix": "The user",
+  "reasoning_tokens": 20,
+  "tool_calls": 0,
+  "finish_reason": "stop",
+  "starved": false,
+  "thinking_observed": true
+ }
+}

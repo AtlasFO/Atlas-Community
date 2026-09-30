@@ -1,0 +1,44 @@
+{
+ "stack": "synthetic",
+ "model": "hand-written",
+ "scenario": "reasoning-details-encrypted-only",
+ "source": "OpenRouter reasoning_details may carry only encrypted entries",
+ "status": 200,
+ "request": {},
+ "response": {
+  "choices": [
+   {
+    "index": 0,
+    "message": {
+     "role": "assistant",
+     "content": "ok",
+     "reasoning": null,
+     "reasoning_details": [
+      {
+       "type": "reasoning.encrypted",
+       "data": "AAAA",
+       "id": "r1"
+      }
+     ]
+    },
+    "finish_reason": "stop"
+   }
+  ],
+  "usage": {
+   "prompt_tokens": 10,
+   "completion_tokens": 30,
+   "completion_tokens_details": {
+    "reasoning_tokens": 25
+   }
+  }
+ },
+ "expect": {
+  "content": "ok",
+  "reasoning_empty": true,
+  "reasoning_tokens": 25,
+  "tool_calls": 0,
+  "finish_reason": "stop",
+  "starved": false,
+  "thinking_observed": true
+ }
+}

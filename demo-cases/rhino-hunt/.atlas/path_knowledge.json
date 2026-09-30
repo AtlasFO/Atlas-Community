@@ -1,0 +1,234 @@
+{
+  "schema_version": "1.0",
+  "updated_at": "2026-09-29T17:34:31Z",
+  "known_paths": {
+    "evidence/RHINOUSB.dd": {
+      "resolved": "evidence/RHINOUSB.dd",
+      "source": "verified",
+      "at": 1790700903.0288327
+    },
+    "evidence/rhino.log": {
+      "resolved": "evidence/rhino.log",
+      "source": "verified",
+      "at": 1790700419.8881376
+    },
+    "evidence/rhino2.log": {
+      "resolved": "evidence/rhino2.log",
+      "source": "verified",
+      "at": 1790700420.3536255
+    },
+    "evidence/rhino3.log": {
+      "resolved": "evidence/rhino3.log",
+      "source": "verified",
+      "at": 1790700420.7980618
+    },
+    "analysis/gumbo1.txt": {
+      "resolved": "analysis/gumbo1.txt",
+      "source": "verified",
+      "at": 1790700873.0305672
+    },
+    "analysis/gumbo2.txt": {
+      "resolved": "analysis/gumbo2.txt",
+      "source": "verified",
+      "at": 1790700873.4712136
+    },
+    "analysis/carve_foremost": {
+      "resolved": "analysis/carve_foremost",
+      "source": "verified",
+      "at": 1790700936.5438895
+    },
+    "analysis/carve_foremost/jpg": {
+      "resolved": "analysis/carve_foremost/jpg",
+      "source": "verified",
+      "at": 1790700972.415993
+    },
+    "analysis/carve_foremost/gif": {
+      "resolved": "analysis/carve_foremost/gif",
+      "source": "verified",
+      "at": 1790700944.3676956
+    },
+    "analysis/carve_foremost/ole": {
+      "resolved": "analysis/carve_foremost/ole",
+      "source": "verified",
+      "at": 1790700944.753458
+    },
+    "analysis/carve_foremost/audit.txt": {
+      "resolved": "analysis/carve_foremost/audit.txt",
+      "source": "verified",
+      "at": 1790700945.1405168
+    },
+    "analysis/carve_foremost/ole/00335017.ole": {
+      "resolved": "analysis/carve_foremost/ole/00335017.ole",
+      "source": "verified",
+      "at": 1790701383.4028215
+    },
+    "analysis": {
+      "resolved": "analysis",
+      "source": "verified",
+      "at": 1790701060.9955764
+    },
+    "analysis/carve_foremost/jpg/00104249.jpg": {
+      "resolved": "analysis/carve_foremost/jpg/00104249.jpg",
+      "source": "verified",
+      "at": 1790701506.0211272
+    },
+    "analysis/carve_foremost/jpg/00105065.jpg": {
+      "resolved": "analysis/carve_foremost/jpg/00105065.jpg",
+      "source": "verified",
+      "at": 1790701409.689455
+    },
+    "analysis/carve_foremost/jpg/00105873.jpg": {
+      "resolved": "analysis/carve_foremost/jpg/00105873.jpg",
+      "source": "verified",
+      "at": 1790701505.633753
+    },
+    "/home/analyst/cases/RHINO-HUNT/analysis/tool-output/20260929T164942_551584_5_sudo.stdout": {
+      "resolved": "/home/analyst/cases/RHINO-HUNT/analysis/tool-output/20260929T164942_551584_5_sudo.stdout",
+      "source": "verified",
+      "at": 1790701255.906243
+    },
+    "/home/analyst/cases/RHINO-HUNT/analysis/tool-output/20260929T164943_551584_6_sudo.stdout": {
+      "resolved": "/home/analyst/cases/RHINO-HUNT/analysis/tool-output/20260929T164943_551584_6_sudo.stdout",
+      "source": "verified",
+      "at": 1790701130.9816983
+    },
+    "analysis/diary_strings.txt": {
+      "resolved": "analysis/diary_strings.txt",
+      "source": "verified",
+      "at": 1790701347.7028022
+    },
+    "analysis/streams_rhino2": {
+      "resolved": "analysis/streams_rhino2",
+      "source": "verified",
+      "at": 1790701256.8127267
+    },
+    "analysis/streams_rhino3": {
+      "resolved": "analysis/streams_rhino3",
+      "source": "verified",
+      "at": 1790701257.3088183
+    },
+    "analysis/carve_foremost/jpg/00104057.jpg": {
+      "resolved": "analysis/carve_foremost/jpg/00104057.jpg",
+      "source": "verified",
+      "at": 1790701408.7053761
+    },
+    "analysis/carve_foremost/jpg/00106393.jpg": {
+      "resolved": "analysis/carve_foremost/jpg/00106393.jpg",
+      "source": "verified",
+      "at": 1790701410.5770142
+    },
+    "analysis/carve_foremost/jpg/00106409.jpg": {
+      "resolved": "analysis/carve_foremost/jpg/00106409.jpg",
+      "source": "verified",
+      "at": 1790701411.0221794
+    },
+    "analysis/carve_foremost/jpg/00335081.jpg": {
+      "resolved": "analysis/carve_foremost/jpg/00335081.jpg",
+      "source": "verified",
+      "at": 1790701411.4666858
+    },
+    "analysis/streams_rhino2/00000014.jpg": {
+      "resolved": "analysis/streams_rhino2/00000014.jpg",
+      "source": "verified",
+      "at": 1790701500.9789803
+    },
+    "analysis/streams_rhino1": {
+      "resolved": "analysis/streams_rhino1",
+      "source": "verified",
+      "at": 1790701946.398589
+    },
+    "/home/analyst/cases/RHINO-HUNT/analysis/tool-output/20260929T165035_551584_8_sudo.stdout": {
+      "resolved": "/home/analyst/cases/RHINO-HUNT/analysis/tool-output/20260929T165035_551584_8_sudo.stdout",
+      "source": "verified",
+      "at": 1790701672.3176618
+    },
+    "analysis/contraband_stream": {
+      "resolved": "analysis/contraband_stream",
+      "source": "verified",
+      "at": 1790701738.2467728
+    },
+    "analysis/contraband_stream2/00000000.zip": {
+      "resolved": "analysis/contraband_stream2/00000000.zip",
+      "source": "verified",
+      "at": 1790701928.7748325
+    },
+    "/home/analyst/cases/RHINO-HUNT/analysis/streams_rhino3/00000000.html": {
+      "resolved": "/home/analyst/cases/RHINO-HUNT/analysis/streams_rhino3/00000000.html",
+      "source": "verified",
+      "at": 1790701959.7424572
+    },
+    "/home/analyst/cases/RHINO-HUNT/analysis/streams_rhino2/00000009.html": {
+      "resolved": "/home/analyst/cases/RHINO-HUNT/analysis/streams_rhino2/00000009.html",
+      "source": "verified",
+      "at": 1790701960.4939516
+    },
+    "/home/analyst/cases/RHINO-HUNT/analysis/streams_rhino3/00000001.html": {
+      "resolved": "/home/analyst/cases/RHINO-HUNT/analysis/streams_rhino3/00000001.html",
+      "source": "verified",
+      "at": 1790702233.0157068
+    },
+    "/home/analyst/cases/RHINO-HUNT/analysis/streams_rhino3/00000003.html": {
+      "resolved": "/home/analyst/cases/RHINO-HUNT/analysis/streams_rhino3/00000003.html",
+      "source": "verified",
+      "at": 1790702233.8838527
+    },
+    "/home/analyst/cases/RHINO-HUNT/analysis/streams_rhino3/00000005.html": {
+      "resolved": "/home/analyst/cases/RHINO-HUNT/analysis/streams_rhino3/00000005.html",
+      "source": "verified",
+      "at": 1790702646.7432053
+    },
+    "/home/analyst/cases/RHINO-HUNT/analysis/streams_rhino3/00000006.html": {
+      "resolved": "/home/analyst/cases/RHINO-HUNT/analysis/streams_rhino3/00000006.html",
+      "source": "verified",
+      "at": 1790702647.5782602
+    },
+    "/home/analyst/cases/RHINO-HUNT/analysis/streams_rhino3/00000007.html": {
+      "resolved": "/home/analyst/cases/RHINO-HUNT/analysis/streams_rhino3/00000007.html",
+      "source": "verified",
+      "at": 1790702648.314129
+    },
+    "/home/analyst/cases/RHINO-HUNT/analysis/streams_rhino1/00000209.html": {
+      "resolved": "/home/analyst/cases/RHINO-HUNT/analysis/streams_rhino1/00000209.html",
+      "source": "verified",
+      "at": 1790703040.6674488
+    },
+    "/home/analyst/cases/RHINO-HUNT/analysis/streams_rhino1/00000210.html": {
+      "resolved": "/home/analyst/cases/RHINO-HUNT/analysis/streams_rhino1/00000210.html",
+      "source": "verified",
+      "at": 1790703041.385692
+    },
+    "/home/analyst/cases/RHINO-HUNT/analysis/streams_rhino1/00000219.html": {
+      "resolved": "/home/analyst/cases/RHINO-HUNT/analysis/streams_rhino1/00000219.html",
+      "source": "verified",
+      "at": 1790703042.1446028
+    },
+    "/home/analyst/cases/RHINO-HUNT/analysis/streams_rhino1/00000070.html": {
+      "resolved": "/home/analyst/cases/RHINO-HUNT/analysis/streams_rhino1/00000070.html",
+      "source": "verified",
+      "at": 1790703269.3483098
+    },
+    "/home/analyst/cases/RHINO-HUNT/analysis/streams_rhino1/00000071.html": {
+      "resolved": "/home/analyst/cases/RHINO-HUNT/analysis/streams_rhino1/00000071.html",
+      "source": "verified",
+      "at": 1790703270.4534483
+    },
+    "/home/analyst/cases/RHINO-HUNT/analysis/streams_rhino1/00000167.html": {
+      "resolved": "/home/analyst/cases/RHINO-HUNT/analysis/streams_rhino1/00000167.html",
+      "source": "verified",
+      "at": 1790703271.2229254
+    }
+  },
+  "failed_guesses": {
+    "analysis/http_rhino2.txt": {
+      "count": 1,
+      "last_at": 1790701050.4988484,
+      "hint": "Parent exists (analysis). Siblings: gumbo2.txt, agent_transcript_20260929T164622Z.jsonl, diary_strings.txt, gumbo1.txt, tool-output, dashboard.url, pcap_staging, run_stacks.log, carve_foremost, RHINO-HUNT_trace.jsonl, RHINO-HUNT_trace.json, evidence_index.db List the directory (misc.list_evidence_dir) before guessing canonical names like MFT.csv / USNJRNL.csv."
+    },
+    "analysis/http_rhino3.txt": {
+      "count": 1,
+      "last_at": 1790701050.662504,
+      "hint": "Parent exists (analysis). Siblings: gumbo2.txt, agent_transcript_20260929T164622Z.jsonl, diary_strings.txt, gumbo1.txt, tool-output, dashboard.url, pcap_staging, run_stacks.log, carve_foremost, RHINO-HUNT_trace.jsonl, RHINO-HUNT_trace.json, evidence_index.db List the directory (misc.list_evidence_dir) before guessing canonical names like MFT.csv / USNJRNL.csv."
+    }
+  },
+  "discovered_dirs": {}
+}

@@ -1,0 +1,81 @@
+{
+  "schema_version": "1.0",
+  "case_id": "RHINO-HUNT",
+  "updated_at": "2026-09-29T17:44:21Z",
+  "evidence_root": "/home/analyst/cases/RHINO-HUNT/evidence",
+  "file_count": 4,
+  "present_classes": [
+    "disk",
+    "file",
+    "pcap"
+  ],
+  "absent_classes": [
+    "memory",
+    "windows_eventlog",
+    "tabular",
+    "email",
+    "live"
+  ],
+  "counts": {
+    "pcap": 3,
+    "disk": 1
+  },
+  "samples": {
+    "pcap": [
+      "evidence/rhino2.log",
+      "evidence/rhino3.log",
+      "evidence/rhino.log"
+    ],
+    "disk": [
+      "evidence/RHINOUSB.dd"
+    ]
+  },
+  "files": [
+    {
+      "path": "evidence/rhino2.log",
+      "class": "pcap",
+      "size": 292604
+    },
+    {
+      "path": "evidence/rhino3.log",
+      "class": "pcap",
+      "size": 226094
+    },
+    {
+      "path": "evidence/RHINOUSB.dd",
+      "class": "disk",
+      "size": 259506176
+    },
+    {
+      "path": "evidence/rhino.log",
+      "class": "pcap",
+      "size": 3187907
+    }
+  ],
+  "derived_counts": {
+    "file": 386,
+    "pcap": 5
+  },
+  "derived_samples": {
+    "file": [
+      "analysis/gumbo2.txt",
+      "analysis/diary_strings.txt",
+      "analysis/gumbo1.txt",
+      "analysis/REPORT_LIMITATIONS_ACCEPTED.md",
+      "analysis/evidence_index.db"
+    ],
+    "pcap": [
+      "analysis/contraband_data2.pcap",
+      "analysis/contraband_data.pcap",
+      "analysis/pcap_staging/rhino2.log/606d1aab.pcap",
+      "analysis/pcap_staging/rhino3.log/af5043ea.pcap",
+      "analysis/pcap_staging/rhino.log/17d05d01.pcap"
+    ]
+  },
+  "derived_file_count": 391,
+  "notes": [
+    "Profile is factual inventory only — not an investigation plan.",
+    "Choose tools whose required evidence classes intersect present_classes.",
+    "Tools needing only absent classes are refused by the evidence-compat gate."
+  ]
+}

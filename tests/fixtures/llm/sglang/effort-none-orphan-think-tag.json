@@ -1,0 +1,50 @@
+{
+ "stack": "sglang",
+ "model": "example-model",
+ "scenario": "effort-none-orphan-think-tag",
+ "source": "hand-written from the documented sglang response shape",
+ "status": 200,
+ "request": {
+  "model": "example-model",
+  "messages": [
+   {
+    "role": "user",
+    "content": "Reply with the single word: ok"
+   }
+  ],
+  "reasoning_effort": "none"
+ },
+ "response": {
+  "id": "test0010",
+  "object": "chat.completion",
+  "created": 1924992000,
+  "model": "example-model",
+  "choices": [
+   {
+    "index": 0,
+    "message": {
+     "role": "assistant",
+     "content": "The user is asking for a one-word reply.</think>ok",
+     "reasoning_content": null,
+     "tool_calls": null
+    },
+    "finish_reason": "stop"
+   }
+  ],
+  "usage": {
+   "prompt_tokens": 10,
+   "completion_tokens": 20,
+   "prompt_tokens_details": null,
+   "reasoning_tokens": 0
+  }
+ },
+ "expect": {
+  "content": "ok",
+  "reasoning_prefix": "The user is asking",
+  "reasoning_tokens": 0,
+  "tool_calls": 0,
+  "finish_reason": "stop",
+  "starved": false,
+  "thinking_observed": true
+ }
+}

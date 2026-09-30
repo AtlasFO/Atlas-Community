@@ -1,0 +1,21 @@
+{
+  "behavior": {
+    "enabled": true,
+    "dedup_bucket_seconds": 600,
+    "spawn_burst": {"window_seconds": 60, "threshold": 8},
+    "conn_fanout": {"window_seconds": 60, "threshold": 12},
+    "first_seen_binary": {"enabled": true},
+    "rare_parent_child": {
+      "suspicious_parents": [
+        "winword.exe", "excel.exe", "powerpnt.exe", "outlook.exe",
+        "mshta.exe", "wscript.exe", "cscript.exe", "regsvr32.exe",
+        "w3wp.exe", "httpd", "nginx", "apache2", "sshd"
+      ]
+    },
+    "dns_anomaly": {
+      "window_seconds": 60, "burst_threshold": 50,
+      "entropy_threshold": 3.5, "min_label_length": 10
+    },
+    "auth_burst": {"window_seconds": 60, "threshold": 10}
+  }
+}

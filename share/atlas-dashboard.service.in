@@ -1,0 +1,37 @@
+[Unit]
+Description=Atlas dashboard
+Documentation=file://@ATLAS_DIR@/INSTALL_INSTRUCTIONS.md
+After=network-online.target
+Wants=network-online.target
+# 5 tries * 3s RestartSec = 15s, over the default 10s/5-try systemd start
+# limit window — a broken/incomplete venv would restart forever instead of
+# hitting start-limit-hit, and can "succeed" once dependencies finish
+# installing in the background, minutes into a silent crash loop, serving
+# on a stale environment. Widen the window so a genuinely broken venv fails
+# the unit visibly (systemctl status shows start-limit-hit) instead of
+# looping quietly: `sudo systemctl reset-failed atlas-dashboard` clears it
+# once the venv is actually fixed. Every start counts, a manual restart or a
+# killed process included. These are [Unit] options: under [Service]
+# systemd ignores StartLimitIntervalSec and the default window applies.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=@USER@
+Group=@GROUP@
+WorkingDirectory=@ATLAS_DIR@
+Environment=HOME=@HOME@
+Environment=ATLAS_DIR=@ATLAS_DIR@
+# Console scripts from the Python dependencies (capa, floss, olevba, usn.py …)
+# live in the venv's bin; a unit's PATH does not include it on its own.
+Environment=PATH=@VENV_BIN@:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+EnvironmentFile=-@ATLAS_DIR@/.env
+ExecStartPre=/usr/bin/test -x @VENV_PY@
+ExecStart=@VENV_PY@ -m dashboard.serve --strict-port
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target

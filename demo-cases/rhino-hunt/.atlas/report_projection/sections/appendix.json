@@ -1,0 +1,11 @@
+{
+  "id": "appendix",
+  "prose": "## 8. Appendix\n\n### Conflicts\n\nNo open Conflict Findings in Current Investigation State.\n\n### Method notes\n\nBeliefs and evidence resolve from Current Investigation State (.atlas/). Supporting Evidence is provenance-first (record_ref → call_id → artifact+locator); correlated matches are labeled.\n",
+  "format": "dfir_notes",
+  "generated_at": "2026-09-29T17:44:19Z",
+  "generator_version": "report-projection/2.1",
+  "context_claim_ids": [],
+  "context_conclusion_ids": [],
+  "context_conflict_ids": [],
+  "content_sha256": "d394d9eced10ed5f15872085420141b77ac8666ac760035d21429b835d2a59ee"
+}

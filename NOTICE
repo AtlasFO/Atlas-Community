@@ -1,0 +1,147 @@
+Atlas
+Copyright notices for third-party material distributed with this repository.
+
+This file lists what Atlas itself ships: code it was built from, code
+vendored into the tree, and data reproduced in it. Software that Atlas only
+installs on your machine and executes as a separate program is not covered
+here — it is not redistributed by this repository. That inventory, kept for
+transparency rather than obligation, is in THIRD-PARTY.md.
+
+
+── MaRa (MIT) ─────────────────────────────────────────────────────────────
+
+Atlas started from and has since substantially rewritten MaRa, an
+unpublished tool by another developer (GitHub: Lockelamoree), used with
+permission and under MaRa's MIT License, reproduced below as it appears
+in MaRa's own LICENSE file:
+
+    MIT License
+
+    Copyright (c) 2026 Trinity Harrison
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
+
+
+── Mulder, by way of MaRa (Apache License 2.0) ────────────────────────────
+
+Atlas inherits work from Mulder (https://github.com/calebevans/mulder,
+commit 1246de42), licensed under the Apache License, Version 2.0, by way of
+MaRa. What remains in each file below is described as precisely as we can
+state it; several of the originally ported parts have since been replaced and
+are named as such.
+
+- core/evidence_index.py: the ingestion shape — chunking a tool's full output
+  into windows and inserting them in batches (server/extract_helpers.py) —
+  and the decision to serialise every write to the per-case database rather
+  than let callers contend (db.py `_WriteQueue`; here a module lock, the same
+  guarantee without a thread). The FTS5 query sanitiser and the timestamp
+  reader that were ported from those files have been replaced: the sanitiser
+  now scans the query into typed pieces and handles unterminated quotes and
+  dangling operators, and the timestamp reader is a table of the three forms
+  the index reads, read by one loop.
+- tools/coverage_audit.py: the idea of auditing coverage before the report is
+  written, and the names of the two audits (server/tools/review.py:
+  audit_tool_coverage, audit_evidence_coverage). The computation behind both
+  has been replaced. Breadth is now measured against Atlas's versioned tool
+  capability manifest, selected by the evidence classes the case itself
+  declares, rather than by diffing an evidence-type-to-tool table; and the
+  second audit reports calls no finding was built from, using Atlas's exact
+  finding lineage rather than matching source names.
+- tools/export_tools.py: emitting an ATT&CK Navigator layer
+  (report/navigator.py) and a STIX 2.1 bundle with a flat IOC CSV
+  (report/ioc_export.py). Both output shapes are external specifications, so
+  the resemblance is largely the specifications'. What fills them is Atlas's:
+  gate-validated techniques, confidence-tier eligibility, its own indicator
+  extraction, and the STIX relationship direction corrected to
+  indicator --indicates--> attack-pattern.
+
+You may obtain a copy of the Apache License, Version 2.0 at
+    http://www.apache.org/licenses/LICENSE-2.0
+
+
+── MITRE ATT&CK® (MITRE Terms of Use) ─────────────────────────────────────
+
+These files reproduce content from the MITRE ATT&CK® Enterprise knowledge
+base, built from
+https://raw.githubusercontent.com/mitre-attack/attack-stix-data/master/enterprise-attack/enterprise-attack.json
+at version v19.2 (technique, group, software and mitigation identifiers,
+names, aliases, descriptions and their relationships):
+
+- share/.common/mitre_techniques.json
+- share/.common/mitre_groups.json
+- share/.common/mitre_software.json
+- share/.common/mitre_mitigations.json
+
+    © 2026 The MITRE Corporation. This work is reproduced and distributed
+    with the permission of The MITRE Corporation.
+
+ATT&CK® is a registered trademark of The MITRE Corporation. The MITRE
+Corporation does not endorse Atlas. Terms of use:
+    https://attack.mitre.org/resources/legal-and-branding/terms-of-use/
+
+
+── Cytoscape.js 3.28.1 (MIT) ──────────────────────────────────────────────
+
+dashboard/vendor/cytoscape.min.js — the graph rendering behind the claim
+graph, investigation chain and knowledge globe views. The file carries its
+own copyright header; it is repeated here so this notice is complete:
+
+    Copyright (c) 2016-2023, The Cytoscape Consortium.
+
+Licensed under the MIT License; https://js.cytoscape.org
+
+
+── dagre, graphlib and Lodash (MIT) ───────────────────────────────────────
+
+dashboard/vendor/dagre.min.js — layered graph layout. The file is a
+browser bundle and carries no header of its own, so the notices its three
+bundled works require are given here:
+
+    dagre    — Copyright (c) 2012-2014 Chris Pettitt
+               https://github.com/dagrejs/dagre
+    graphlib — Copyright (c) 2014 Chris Pettitt
+               https://github.com/dagrejs/graphlib
+    Lodash   — Copyright OpenJS Foundation and other contributors
+               <https://openjsf.org/>, based on Underscore.js, copyright
+               Jeremy Ashkenas, DocumentCloud and Investigative Reporters
+               & Editors <https://underscorejs.org/>
+               https://lodash.com
+
+All three are licensed under the MIT License. Permission is granted, free of
+charge, to any person obtaining a copy of this software and associated
+documentation files to deal in it without restriction, provided the above
+copyright notices and this permission notice are included in all copies or
+substantial portions of the software. The software is provided "as is",
+without warranty of any kind.
+
+
+── Detection rules ────────────────────────────────────────────────────────
+
+The YARA rules under rules/ are original to Atlas. Sigma rules are not
+shipped here: install.sh fetches SigmaHQ's rule set onto your machine at
+install time, under SigmaHQ's own licence.
+
+── IANA Root Zone Database (top-level domain list) ────────────────────────
+
+share/.common/tlds.txt reproduces the list of delegated top-level domains
+published by the Internet Assigned Numbers Authority at
+https://data.iana.org/TLD/tlds-alpha-by-domain.txt (the version line at
+the top of the file records the fetched version). The list is factual
+registry data used to tell a domain name from a dotted file name or a
+newsgroup, and is refreshed from that source.

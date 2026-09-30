@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Atlas · Response</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<link rel="stylesheet" href="assets/atlas.css" />
+<script src="assets/i18n.js"></script>
+<style>
+  /* View-specific layout only — tokens and components come from atlas.css. */
+  .rs-bar { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin-bottom: 14px; }
+  .rs-bar .small { color: var(--fg-2); }
+  .rs-note { color: var(--fg-2); font-size: var(--fs-label); margin: 0 0 18px; }
+  .rs-filters { display: flex; gap: 8px; flex-wrap: wrap; margin: 0 0 16px; }
+  .rs-filters button {
+    background: none; border: 1px solid var(--border); color: var(--fg-2);
+    border-radius: var(--radius-sm); font-size: var(--fs-label);
+    padding: 2px 9px; cursor: pointer; font-family: inherit;
+  }
+  .rs-filters button.on { color: var(--fg-0); border-color: var(--border-strong); background: var(--bg-3); }
+  .rs-group { margin: 0 0 22px; }
+  .rs-group h2 {
+    font-size: var(--fs-body); font-weight: 600; color: var(--fg-0);
+    margin: 0 0 6px; padding-bottom: 5px; border-bottom: 1px solid var(--border);
+  }
+  .rs-group h2 .n { color: var(--fg-2); font-weight: 400; margin-left: 7px; }
+  .rs-group.now h2 { color: var(--bad); border-bottom-color: var(--bad); }
+  details.rs-row { display: block; padding: 0; border-radius: var(--radius-sm); }
+  details.rs-row:hover { background: var(--bg-3); }
+  details.rs-row > summary {
+    display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+    padding: 6px 6px; cursor: pointer; list-style: none;
+  }
+  details.rs-row > summary::-webkit-details-marker { display: none; }
+  details.rs-row > summary::before {
+    content: "▸"; color: var(--fg-2); font-size: var(--fs-label); width: 10px; flex: none;
+  }
+  details.rs-row[open] > summary::before { content: "▾"; }
+  details.rs-row.done > summary .rs-action { color: var(--fg-2); text-decoration: line-through; }
+  .rs-action { color: var(--fg-0); flex: 1 1 50%; }
+  .rs-meta { color: var(--fg-2); font-size: var(--fs-label); white-space: nowrap; }
+  .rs-host { color: var(--fg-2); font-size: var(--fs-label); }
+  .pill.prior { color: var(--fg-2); border-style: dashed; }
+  .rs-ctx {
+    margin: 0 0 8px 24px; padding: 8px 10px; border-left: 2px solid var(--border);
+    font-size: var(--fs-small); color: var(--fg-1);
+  }
+  .rs-ctx b { color: var(--fg-2); font-weight: 600; margin-right: 6px; }
+  .rs-ctx div { margin: 0 0 6px; }
+  .rs-basis { list-style: none; margin: 0 0 6px; padding: 0; }
+  .rs-basis li { margin: 0 0 6px; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+  .rs-stmt { flex: 1 1 60%; color: var(--fg-0); }
+  .rs-link { font-size: var(--fs-label); white-space: nowrap; }
+  .rs-acts { margin-left: auto; display: flex; gap: 6px; flex: none; }
+  .rs-acts button {
+    background: none; border: 1px solid var(--border); color: var(--fg-2);
+    border-radius: var(--radius-sm); font-size: var(--fs-label);
+    padding: 1px 8px; cursor: pointer; font-family: inherit;
+  }
+  .rs-acts button:hover { color: var(--fg-0); border-color: var(--border-strong); }
+  .rs-disclaimer { color: var(--fg-2); font-size: var(--fs-label); margin: 24px 0 0; }
+</style>
+</head>
+<body>
+<div class="page" id="app">
+  <div class="state-loading">Loading</div>
+</div>
+
+<script src="assets/shell.js"></script>
+<script>
+'use strict';
+const $app = () => document.getElementById('app');
+const esc = AtlasShell.esc;
+let stopPoll = null;
+let lastPayload = '';
+let showDone = false;
+
+// A recommendation is never more certain than the beliefs it rests on, so
+// the pill shows the strongest basis tier — or PRIOR when it rests on what
+// the analyst told Atlas before any evidence was read.
+const CONF_CLASS = {
+  CONFIRMED: 'conf-confirmed', LIKELY: 'conf-likely',
+  SUSPECTED: 'conf-suspected', UNCONFIRMED: 'conf-unconfirmed', PRIOR: 'prior',
+};
+const PHASE_LABEL = { contain: 'Contain', eradicate: 'Eradicate', recover: 'Recover',
+                      harden: 'Harden', investigate: 'Next investigative steps', escalate: 'Escalate' };
+const SOURCE_LABEL = { prior_knowledge: 'from prior knowledge', derived: 'derived from the findings',
+                       recorded: 'recorded by the investigation', analyst: 'added by the analyst' };
+
+const claimHref = (caseDir, id) =>
+  `claim_view.html?case=${encodeURIComponent(caseDir)}&node=${encodeURIComponent(id)}`;
+const canAct = () => AtlasShell.roleAtLeast('analyst');
+
+function rowHtml(caseDir, r) {
+  const conf = String(r.basis_confidence || '').toUpperCase();
+  const hosts = (r.hosts || []).filter(Boolean);
+  const basis = (r.basis || []).map(b => `
+      <li>
+        <span class="pill ${CONF_CLASS[String(b.confidence || '').toUpperCase()] || ''}">${esc(String(b.confidence || '—'))}</span>
+        ${b.host ? `<span class="rs-host">${esc(b.host)}</span>` : ''}
+        <span class="rs-stmt">${esc(b.statement)}</span>
+        <a class="rs-link" href="${claimHref(caseDir, b.id)}" title="Open in Case Findings">${esc(b.finding_id || b.id)} →</a>
+      </li>`).join('');
+  const acts = canAct() ? `
+      <span class="rs-acts">
+        ${r.state === 'open'
+          ? `<button data-state="done" data-id="${esc(r.id)}" data-mandatory="${r.mandatory ? '1' : ''}">${r.mandatory ? 'Done, with a note' : 'Done'}</button>
+             ${r.mandatory ? '' : `<button data-state="dismissed" data-id="${esc(r.id)}" title="Not applicable to this case">Not applicable</button>`}`
+          : `<button data-state="open" data-id="${esc(r.id)}">Reopen</button>`}
+      </span>` : '';
+  const mandatoryPill = r.mandatory ? '<span class="pill warn" title="Owed whoever owns the device; closed only as done, with a note">mandatory escalation</span> ' : '';
+  const stateNote = r.state !== 'open'
+    ? `<div><b>${r.state === 'done' ? 'Done' : 'Dismissed'}</b> ${esc(r.state_changed_by || '')} ${esc((r.state_changed_at || '').replace('T', ' ').slice(0, 16))}${r.state_note ? ` — ${esc(r.state_note)}` : ''}</div>` : '';
+  return `<details class="rs-row ${esc(r.state)}">
+    <summary>
+      <span class="rs-action">${mandatoryPill}${esc(r.action)}</span>
+      <span class="rs-meta">${esc(r.scope)} · ${esc(r.urgency)}</span>
+      ${hosts.length ? `<span class="rs-host">${esc(hosts.join(', '))}</span>` : ''}
+      <span class="pill ${CONF_CLASS[conf] || ''}" title="${esc(SOURCE_LABEL[r.source] || r.source)}">${esc(conf || '—')}</span>
+      ${acts}
+    </summary>
+    <div class="rs-ctx">
+      ${r.rationale ? `<div><b>Why</b> ${esc(r.rationale)}</div>` : ''}
+      <div><b>Source</b> ${esc(SOURCE_LABEL[r.source] || r.source)}</div>
+      ${basis ? `<div><b>Rests on</b></div><ul class="rs-basis">${basis}</ul>`
+              : '<div><b>Rests on</b> what the analyst told Atlas before any evidence was read — a precaution, not a finding.</div>'}
+      ${(r.indicators || []).length ? `<div><b>Indicators</b> ${esc(r.indicators.join(', '))}</div>` : ''}
+      ${stateNote}
+    </div>
+  </details>`;
+}
+
+const HEAD = `<h1 class="page-title">Response</h1>
+  <p class="page-sub">What this case tells the responder to do, ordered by urgency and by how much evidence stands behind it.</p>`;
+
+function groupHtml(caseDir, title, rows, cls) {
+  return `<div class="rs-group ${cls || ''}">
+      <h2>${esc(title)}<span class="n">${rows.length}</span></h2>
+      ${rows.map(r => rowHtml(caseDir, r)).join('')}
+    </div>`;
+}
+
+function render(caseDir, data) {
+  const all = data.recommendations || [];
+  lastPayload = JSON.stringify([all, showDone]);
+  // The phase groups carry their own copies of the rows (each parsed from
+  // the JSON on its own), so they are filtered by the same rule, never
+  // by identity against `visible`.
+  const isVisible = r => showDone || r.state === 'open';
+  const visible = all.filter(isVisible);
+  const nowRows = visible.filter(r => r.state === 'open' && r.urgency === 'now');
+  const nowIds = new Set(nowRows.map(r => r.id));
+  const groups = (data.groups || []).map(g => ({
+    phase: g.phase,
+    rows: g.recommendations.filter(r => isVisible(r) && !nowIds.has(r.id)),
+  })).filter(g => g.rows.length);
+
+  const owner = data.system_owner || 'unknown';
+  const notes = [];
+  if (owner === 'suspect') {
+    notes.push('The device or image belongs to the person under investigation: no remediation '
+      + 'is recommended to its owner. Where a measure is warranted, it is an investigative '
+      + 'next step, a preservation or legal-process request, notification of an identified '
+      + 'third party, or an escalation of ongoing harm.');
+  } else {
+    if (data.engagement === 'examination') {
+      notes.push('This case is an examination after the fact. The owner\'s duties remain: each '
+        + 'measure applies to systems still in service, and only if the owner has not already '
+        + 'taken it. A measure derived from the ATT&CK mitigation table is a lesson for the '
+        + 'owner, not a first-hour step.');
+    }
+    if (owner === 'unknown') {
+      notes.push('The brief does not say whose system this is; the recommendations assume the '
+        + 'owner is the victim.');
+    }
+  }
+  const noteHtml = notes.map(n => `<div class="hint">${n}</div>`).join('');
+  if (!all.length) {
+    $app().innerHTML = `${HEAD}
+      <div class="state-empty">No recommendations yet.
+        ${noteHtml || '<div class="hint">Recommendations rest on recorded findings, or on what you told Atlas '
+          + 'under "What you already know". They appear here the moment either exists.</div>'}
+      </div>`;
+    return;
+  }
+  $app().innerHTML = `${HEAD}
+    ${noteHtml}
+    <div class="rs-bar">
+      <span class="pill">${data.open || 0} open</span>
+      ${data.open_now ? `<span class="pill conf-unconfirmed">${data.open_now} to do now</span>` : ''}
+      <span class="small">${data.evidence_backed || 0} of ${data.total || 0} rest on findings · ${data.done || 0} done</span>
+      <button class="btn" id="rs-copy">Copy as checklist</button>
+    </div>
+    <div class="rs-filters">
+      <button id="rs-toggle-done" class="${showDone ? 'on' : ''}">${showDone ? 'Hide done and dismissed' : 'Show done and dismissed'}</button>
+    </div>
+    <p class="rs-note">Open an item to see why it is recommended and which findings it rests on.
+      The tier is the strongest basis behind it — PRIOR means it rests on your intake, not on evidence.</p>
+    ${nowRows.length ? groupHtml(caseDir, 'Do now', nowRows, 'now') : ''}
+    ${groups.map(g => groupHtml(caseDir, PHASE_LABEL[g.phase] || g.phase, g.rows)).join('')}
+    <p class="rs-disclaimer">Recommendations are advice derived from this case's findings; acting on them is the operator's decision.</p>`;
+
+  $app().querySelectorAll('.rs-acts button').forEach(btn =>
+    btn.addEventListener('click', async (ev) => {
+      ev.preventDefault(); ev.stopPropagation();
+      let note = '';
+      if (btn.dataset.mandatory && btn.dataset.state === 'done') {
+        note = window.prompt('A mandatory escalation is closed with a note saying what was done:', '') || '';
+        if (!note.trim()) return;
+      }
+      try {
+        await AtlasShell.apiPost('case/recommendations/state',
+          { case: caseDir, id: btn.dataset.id, state: btn.dataset.state, note });
+        lastPayload = '';
+        await refresh();
+      } catch (e) { alert(e.message); }
+    }));
+  document.getElementById('rs-toggle-done').addEventListener('click', () => {
+    showDone = !showDone; lastPayload = ''; render(caseDir, data);
+  });
+  document.getElementById('rs-copy').addEventListener('click', function () {
+    const text = visible.map(r =>
+      `[${r.state === 'done' ? 'x' : ' '}] ${r.action} (${r.phase}, ${r.scope}, ${r.urgency}; ${r.basis_confidence})`).join('\n');
+    copy(text, this);
+  });
+}
+
+function copy(text, btn) {
+  const done = () => { const prev = btn.textContent; btn.textContent = 'copied'; setTimeout(() => { btn.textContent = prev; }, 1200); };
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(text).then(done, () => fallbackCopy(text, done));
+  } else { fallbackCopy(text, done); }
+}
+function fallbackCopy(text, done) {
+  const ta = document.createElement('textarea');
+  ta.value = text; ta.setAttribute('readonly', ''); ta.style.cssText = 'position:fixed;opacity:0';
+  document.body.appendChild(ta); ta.select();
+  try { document.execCommand('copy'); done(); } catch (_e) { /* nothing to do */ }
+  ta.remove();
+}
+
+async function refresh() {
+  const cd = AtlasShell.activeCase();
+  if (!cd) {
+    $app().innerHTML = `${HEAD}<div class="state-empty">Select a case to see its response plan.</div>`;
+    return;
+  }
+  try {
+    const data = await AtlasShell.api('case/recommendations', { case: cd });
+    if (AtlasShell.activeCase() !== cd) return;
+    if (data.error) throw new Error(data.error);
+    if (JSON.stringify([data.recommendations || [], showDone]) === lastPayload) return;
+    render(cd, data);
+  } catch (e) {
+    if (AtlasShell.activeCase() !== cd) return;
+    if (AtlasShell.isTransient(e)) return;
+    lastPayload = '';
+    $app().innerHTML = `${HEAD}<div class="state-error">Could not load the response plan.\n${esc(e.message)}</div>`;
+  }
+}
+
+AtlasShell.init({
+  page: 'response',
+  onCase: () => {
+    if (stopPoll) stopPoll();
+    lastPayload = '';
+    $app().innerHTML = '<div class="state-loading">Loading</div>';
+    stopPoll = AtlasShell.poll(refresh, 10000);
+  },
+});
+</script>
+</body>
+</html>

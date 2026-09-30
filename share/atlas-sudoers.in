@@ -1,0 +1,76 @@
+# Atlas — passwordless sudo for privileged forensic tools only.
+# Installed by install.sh as /etc/sudoers.d/atlas-<user> (mode 0440).
+#
+# Do NOT grant NOPASSWD: ALL. File-backed TSK (mmls/fls/fsstat/…) and
+# qemu-img convert run without sudo; only mount/loop/carve/network and
+# infra helpers below need elevation (see tools/{ewf,imaging,carving,network}.py,
+# core/{executor,paths,mounts}.py, tools/jobs*.py).
+#
+# @USER@ is replaced by install.sh with the installing username.
+# Paths are absolute; arguments are unrestricted except where noted below.
+#
+# READ THIS BEFORE TREATING THE WHITELIST AS A BOUND. Replacing NOPASSWD: ALL
+# with 23 named binaries is a real narrowing of the ATTACK SURFACE. It is not a
+# narrowing of the PRIVILEGE CEILING: with arguments unrestricted, several of
+# these are root-equivalent on their own.
+#   chown   — any arguments: take ownership of any file, which also means this
+#             grant can widen itself with no password
+#   mount   — any arguments: bind-mount over /etc, or mount an image without nosuid
+#   kill    — any arguments: terminate any root process, security tooling included
+#   the carvers (photorec, bulk_extractor, foremost, scalpel, tcpxtract) write
+#             attacker-chosen output paths as root
+# Argument patterns for those are deliberately NOT set here: sudoers globs match
+# across spaces, so a trailing `*` re-admits everything it appears to forbid, and
+# a wrong pattern breaks a forensic run instead of bounding it. That work needs a
+# Linux host to rehearse on — `visudo -cf`, then the real tools. Until then read
+# this file as "smaller than ALL", not as "cannot become root".
+#
+# tcpdump -z IS forbidden below. It runs an arbitrary program as root after each
+# rotated file (a documented GTFOBins vector), and Atlas never uses it: every call
+# site passes -r on a file or -w to an output path, never a live interface. The
+# codebase was grepped for this before forbidding it. sudoers takes the LAST
+# match, so the negation must stay after the alias.
+
+Cmnd_Alias ATLAS_FORENSICS = \
+    /usr/bin/true, /bin/true, \
+    /usr/bin/mkdir, /bin/mkdir, \
+    /usr/bin/chown, /bin/chown, \
+    /usr/bin/kill, /bin/kill, \
+    /usr/bin/mount, /bin/mount, \
+    /usr/bin/umount, /bin/umount, \
+    /usr/bin/fusermount, /bin/fusermount, \
+    /usr/bin/fusermount3, \
+    /usr/sbin/losetup, /usr/bin/losetup, /sbin/losetup, \
+    /usr/sbin/partprobe, /usr/bin/partprobe, /sbin/partprobe, \
+    /usr/bin/ewfmount, /usr/local/bin/ewfmount, \
+    /usr/bin/vshadowmount, /usr/local/bin/vshadowmount, \
+    /usr/bin/bdemount, /usr/local/bin/bdemount, \
+    /usr/bin/xmount, /usr/local/bin/xmount, \
+    /usr/bin/mmls, /usr/local/bin/mmls, \
+    /usr/bin/photorec, /usr/sbin/photorec, /usr/local/bin/photorec, \
+    /usr/bin/bulk_extractor, /usr/local/bin/bulk_extractor, \
+    /usr/bin/foremost, /usr/local/bin/foremost, \
+    /usr/bin/scalpel, /usr/local/bin/scalpel, \
+    /usr/bin/tcpxtract, /usr/local/bin/tcpxtract, \
+    /usr/bin/tcpdump, /usr/sbin/tcpdump, \
+    /usr/bin/ngrep, /usr/sbin/ngrep, \
+    /usr/bin/tshark, /usr/local/bin/tshark
+
+Cmnd_Alias ATLAS_FORBIDDEN = \
+    /usr/bin/tcpdump *-z*, /usr/sbin/tcpdump *-z*
+
+# SMB network share (bin/atlas-smb-share) — optional, only installed when the
+# user opts into the share feature. Every invocation below is a fully literal
+# command (no globs, no unrestricted arguments): @ATLAS_DIR@, @CASES_ROOT@ and
+# @USER@ are substituted with this install's real values before this file is
+# written, so sudoers matches on the exact command line, not a pattern. The
+# wrapper itself only touches /etc/samba/atlas-share.conf, one appended
+# `include=` line in smb.conf, smbd via systemctl, and this user's own Samba
+# (not Linux) password — see bin/atlas-smb-share's own header.
+Cmnd_Alias ATLAS_SMB_SHARE = \
+    @ATLAS_DIR@/bin/atlas-smb-share enable @CASES_ROOT@ @USER@, \
+    @ATLAS_DIR@/bin/atlas-smb-share disable, \
+    @ATLAS_DIR@/bin/atlas-smb-share status, \
+    @ATLAS_DIR@/bin/atlas-smb-share set-password @USER@
+
+@USER@ ALL=(root) NOPASSWD: ATLAS_FORENSICS, ATLAS_SMB_SHARE, !ATLAS_FORBIDDEN

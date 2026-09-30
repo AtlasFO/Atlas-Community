@@ -1,0 +1,31 @@
+{
+  "id": "gaps",
+  "prose": "## Evidence Gaps and Open Questions\n\n### 1. Steganographic Payload Extraction (F-008, F-015)\n\nThe two JPHide steganographic carriers among the carved rhino JPGs on RHINOUSB.dd remain unextracted. The installed toolset (jpseek 0.3) covers only the JPHide Linux 0.3 format and cannot read JPHide for Windows 0.5x, which is the format the carriers most likely use (C0013, C0020). Consequently:\n\n- The specific filenames of the two carrier images among the six unique carved JPGs (00104057, 00104249, 00105065, 00105873, 00106393, 00106409) plus network-recovered rhino4.jpg cannot be confirmed.\n- The steganographic payloads themselves — potentially containing additional rhino images or text — are not available for analysis.\n- A JPHS-compatible extraction tool (e.g., JPHide for Windows 0.5x or a compatible reader) is required to close this gap.\n\n### 2. Encrypted ZIP Integrity (F-010)\n\nThe contraband.zip uploaded via FTP (C0015) presents a size discrepancy: the local file header declares a compressed size of 230,416 bytes for the single entry rhino2.jpg, yet the extracted stream is only 1,393 bytes. This suggests the FTP transfer was truncated, the ZIP is corrupted, or the stream was not fully captured in the pcap. The actual content of rhino2.jpg within the archive has not been confirmed as recoverable. The three candidate passwords (monkey, gator, gumbo) are derivable from the diary and decoy files, but successful decryption and extraction of a complete rhino2.jpg has not been demonstrated.\n\n### 3. Telnet Session Payload (F-001)\n\nThe telnet session from 137.30.122.253 to 137.30.120.40:23 (C0003) is identified as the channel through which the interactive payload was exchanged. The claim notes that the payload is \"being extracted to identify who granted the FTP/telnet account.\" No finding yet records the extracted telnet conversation content or the specific commands/credentials observed within that session.\n\n### 4. Suspect Workstation Unavailable (F-005)\n\nThe carved diary (C0010) states the suspect \"zapped the hard drive and then threw it into the Mississippi River.\" No disk image of the suspect's primary workstation is available in this investigation. Any artifacts that resided solely on that drive (browsers, email clients, local file history, registry, prefetch) are unrecoverable. The USB key and network captures are the only available evidence sources.\n\n### 5. rhino.exe Purpose and Execution (F-007)\n\nThe file rhino.exe (~131 KB, Content-Type: application/octet-stream) was downloaded from the /~gnome/ web directory on 137.30.120.37 at 2004-04-28 21:16:23 UTC (C0012). No finding addresses:\n\n- The file's functionality or purpose (stego tool, image viewer, other).\n- Whether it was executed on any host.\n- Its relationship to the steganographic carriers on the USB key.\n\n### 6. Jeremy's Identity (F-013, F-005)\n\nThe diary names \"Jeremy\" as the person who originally provided the gnome account to the suspect (C0010, C0018). No finding establishes Jeremy's full name, email address, IP address, or any other identifying attribute. The chain of credential sharing (Jeremy → suspect → John/Georgia) is partially documented but the first link remains unattributed beyond a first name.\n\n### 7. Relationship Between 137.30.120.37 and 137.30.120.40\n\nThe FTP server (cook.cs.uno.edu) is identified at 137.30.120.40 (C0004, C0019). The HTTP web directory /~gnome/ is served from 137.30.120.37 (C0011, C0012). No finding explicitly confirms whether these are the same host (dual-homed or multi-NIC) or distinct machines. If they are the same host, the gnome account's home directory would be accessible via both services; if distinct, the web directory may be a separate copy or mirror.\n\n### 8. Carved File Metadata Loss (F-003, F-004)\n\nBecause the USB key was reformatted (C0008), all carved files lack original filesystem metadata: timestamps, directory paths, permissions, and file associations are not recoverable from the carving process. The temporal ordering of the rhino images relative to the diary entry and the network transfers must be inferred from the pcap timestamps and the diary narrative rather than from file system evidence.\n\n### 9. Georgia's Response to SSN Request (F-014)\n\nThe Hotmail exchange (C0019) records Georgia requesting John's social security number. No finding records John's reply or whether the SSN was provided. If a reply exists in the pcap, it has not been extracted or registered as a finding.\n\n### 10. Estate-Scope Observations\n\nAll findings in this investigation are scoped to a single host (RHINOUSB) or a single source IP (137.30.122.253). No findings reference additional hosts, network segments, or estate-wide indicators. If the gnome account or the rhino content was accessed from other sources, or if the cook.cs.uno.edu server hosted additional accounts or files relevant to the case, that scope is not addressed by the current findings.",
+  "format": "dfir_notes",
+  "generated_at": "2026-09-29T17:44:19Z",
+  "generator_version": "report-projection/2.1",
+  "context_claim_ids": [
+    "C0003",
+    "C0004",
+    "C0008",
+    "C0009",
+    "C0010",
+    "C0011",
+    "C0012",
+    "C0013",
+    "C0014",
+    "C0015",
+    "C0016",
+    "C0017",
+    "C0018",
+    "C0019",
+    "C0020",
+    "C0021",
+    "N0022"
+  ],
+  "context_conclusion_ids": [
+    "N0022"
+  ],
+  "context_conflict_ids": [],
+  "content_sha256": "3a654d052e3a07db3adfb2a6af0fc187698cc2b4e4e8285afd665fadfda11be3"
+}

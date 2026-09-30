@@ -1,0 +1,55 @@
+{
+  "schema_version": "1.0",
+  "case_id": "RHINO-HUNT",
+  "units": {
+    "ev_415b7f37d5342e0d": {
+      "evidence_id": "ev_415b7f37d5342e0d",
+      "path": "evidence/rhino2.log",
+      "status": "current",
+      "parser_outputs": [],
+      "content_sha256": "41939d5de0556b70279056572dee44b6fd84cd05b0788cfd0b6f52f37b161dde",
+      "size": 292604,
+      "mtime_ns": 1083192622000000000,
+      "inode": 31850537,
+      "fingerprint_mode": "full"
+    },
+    "ev_82d787513478995f": {
+      "evidence_id": "ev_82d787513478995f",
+      "path": "evidence/rhino3.log",
+      "status": "current",
+      "parser_outputs": [],
+      "content_sha256": "7b0304f5e88a30c305a99b5a1e2977bced5b9c94da6f458f887bb39966bbfc46",
+      "size": 226094,
+      "mtime_ns": 1083192625000000000,
+      "inode": 31850538,
+      "fingerprint_mode": "full"
+    },
+    "ev_40c2309e1b04b84f": {
+      "evidence_id": "ev_40c2309e1b04b84f",
+      "path": "evidence/RHINOUSB.dd",
+      "status": "current",
+      "parser_outputs": [],
+      "content_sha256": "ce550424200a997c61b413941c8ef4df9619a2f96579674952294a176a32be65",
+      "size": 259506176,
+      "mtime_ns": 1083374987000000000,
+      "inode": 31850528,
+      "fingerprint_mode": "full"
+    },
+    "ev_ce77321b4f22c119": {
+      "evidence_id": "ev_ce77321b4f22c119",
+      "path": "evidence/rhino.log",
+      "status": "current",
+      "parser_outputs": [],
+      "content_sha256": "64e6d55b76660eb3aaa41572c1d04e4452510a343bbf42e844424827dedfddb2",
+      "size": 3187907,
+      "mtime_ns": 1083022924000000000,
+      "inode": 31850536,
+      "fingerprint_mode": "full"
+    }
+  },
+  "meta": {
+    "bootstrap": true,
+    "unit_count": 4
+  },
+  "updated_at": "2026-09-29T16:46:20Z"
+}

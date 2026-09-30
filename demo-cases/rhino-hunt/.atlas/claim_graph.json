@@ -1,0 +1,1222 @@
+{
+  "schema_version": "1.0",
+  "case_id": "RHINO-HUNT",
+  "updated_at": "2026-09-29T17:40:11Z",
+  "nodes": {
+    "R0001": {
+      "id": "R0001",
+      "kind": "recommendation",
+      "status": "new",
+      "statement": "Preserve volatile state and logs before any remediation: memory, event logs, shadow copies, firewall and proxy logs",
+      "confidence": "SUSPECTED",
+      "scope": "estate",
+      "host": "",
+      "evidence": [],
+      "reasoning": "precaution every incident shares",
+      "gaps": [],
+      "temporal_qualifier": null,
+      "source_finding_call_id": null,
+      "input_call_ids": [],
+      "created_at": "2026-09-29T16:46:20Z",
+      "updated_at": "2026-09-29T16:46:20Z",
+      "phase": "contain",
+      "urgency": "now",
+      "response_scope": "estate",
+      "source": "prior_knowledge",
+      "basis_ids": [],
+      "hosts": [],
+      "indicators": [],
+      "verb": "Preserve volatile state and logs before any remediation: memory, event logs, shadow copies, firewall and proxy logs",
+      "response_state": "open",
+      "state_changed_by": "",
+      "fingerprint": "contain|estate|before copies event firewall logs memory preserve proxy remediation shadow state volatile"
+    },
+    "R0002": {
+      "id": "R0002",
+      "kind": "recommendation",
+      "status": "new",
+      "statement": "Keep a timestamped record of every response action taken from now on",
+      "confidence": "SUSPECTED",
+      "scope": "estate",
+      "host": "",
+      "evidence": [],
+      "reasoning": "precaution every incident shares",
+      "gaps": [],
+      "temporal_qualifier": null,
+      "source_finding_call_id": null,
+      "input_call_ids": [],
+      "created_at": "2026-09-29T16:46:20Z",
+      "updated_at": "2026-09-29T16:46:20Z",
+      "phase": "escalate",
+      "urgency": "soon",
+      "response_scope": "estate",
+      "source": "prior_knowledge",
+      "basis_ids": [],
+      "hosts": [],
+      "indicators": [],
+      "verb": "Keep a timestamped record of every response action taken from now on",
+      "response_state": "open",
+      "state_changed_by": "",
+      "fingerprint": "escalate|estate|action every keep now record response taken timestamped"
+    },
+    "C0003": {
+      "id": "C0003",
+      "kind": "claim",
+      "status": "new",
+      "statement": "Telnet session in rhino.log: source host 137.30.122.253 opened a telnet connection to 137.30.120.40:23 at 2004-04-26 22:20:23 UTC (terminal type ANSI). This is the telnet channel referenced in the case question; the interactive payload is being extracted to identify who granted the FTP/telnet account.",
+      "confidence": "LIKELY",
+      "scope": "host",
+      "host": "RHINOUSB",
+      "report_role": "evidence",
+      "evidence": [
+        {
+          "artifact": "net.tcpdump_read (tcp port 23)",
+          "locator": "",
+          "call_id": 30
+        },
+        {
+          "artifact": "supporting_evidence",
+          "locator": "[auto-cite from tool output] 137.30.122.253 :: 2004-04-26 22:20:23.576821 IP 137.30.122.253.1653 > 137.30.120.40.23: Flags [S], seq\n[auto-cite from tool output] 137.30.120.40 :: 2:20:23.576821 IP 137.30.122.253.1653 > 137.30.120.40.23: Flags [S], seq 1337453077, win 6424",
+          "call_id": 30
+        }
+      ],
+      "reasoning": "",
+      "gaps": [],
+      "temporal_qualifier": null,
+      "source_finding_call_id": 37,
+      "input_call_ids": [
+        30
+      ],
+      "created_at": "2026-09-29T16:52:04Z",
+      "updated_at": "2026-09-29T16:52:04Z"
+    },
+    "C0004": {
+      "id": "C0004",
+      "kind": "claim",
+      "status": "new",
+      "statement": "FTP file transfer in rhino.log: source host 137.30.122.253 uploaded files to the \"cook\" FTP server at 137.30.120.40:21 using account USER gnome / PASS gnome123. Uploaded files: rhino1.jpg (65703 bytes), rhino3.jpg (193797 bytes), and contraband.zip (230566 bytes). Session 2004-04-26 22:21-22:26 UTC.",
+      "confidence": "LIKELY",
+      "scope": "host",
+      "host": "RHINOUSB",
+      "report_role": "evidence",
+      "evidence": [
+        {
+          "artifact": "net.tcpdump_read (tcp port 21)",
+          "locator": "",
+          "call_id": 29
+        },
+        {
+          "artifact": "supporting_evidence",
+          "locator": "net.tcpdump_read rhino.log filter 'tcp port 21' (call 29): '220 cook FTP server ready.'; 'FTP: USER gnome'; '331 Password required for gnome.'; 'FTP: PASS gnome123'; '230 User gnome logged in.'; 'FTP: STOR rhino1.jpg' -> '226 Transfer complete.'; '221-You have transferred 65703 bytes in 1 files.'; 'FTP: STOR rhino3.jpg' -> '221-You have transferred 193797 bytes in 2 files.'; 'FTP: STOR contraband.zip' -> '221-You have transferred 230566 bytes in 1 files.' Source 137.30.122.253 -> 137.30.120.40:21.",
+          "call_id": 29
+        }
+      ],
+      "reasoning": "",
+      "gaps": [],
+      "temporal_qualifier": null,
+      "source_finding_call_id": 44,
+      "input_call_ids": [
+        29
+      ],
+      "created_at": "2026-09-29T16:53:53Z",
+      "updated_at": "2026-09-29T16:53:53Z",
+      "indicators": [
+        {
+          "type": "account",
+          "value": "gnome",
+          "side": "attacker"
+        },
+        {
+          "type": "credential_id",
+          "value": "gnome123",
+          "side": "attacker"
+        },
+        {
+          "type": "file",
+          "value": "rhino1.jpg",
+          "side": "attacker"
+        },
+        {
+          "type": "file",
+          "value": "rhino3.jpg",
+          "side": "attacker"
+        },
+        {
+          "type": "file",
+          "value": "contraband.zip",
+          "side": "attacker"
+        }
+      ]
+    },
+    "R0005": {
+      "id": "R0005",
+      "kind": "recommendation",
+      "status": "new",
+      "statement": "Block the identified egress destinations at the perimeter and review outbound traffic",
+      "confidence": "LIKELY",
+      "scope": "host",
+      "host": "RHINOUSB",
+      "evidence": [],
+      "reasoning": "precaution for a suspected exfiltration incident, indicated by C0004; to be scoped: the finding names no typed addresses, domains, URLs or mail addresses on the attacker side",
+      "gaps": [],
+      "temporal_qualifier": null,
+      "source_finding_call_id": null,
+      "input_call_ids": [],
+      "created_at": "2026-09-29T16:53:53Z",
+      "updated_at": "2026-09-29T16:53:53Z",
+      "phase": "contain",
+      "urgency": "soon",
+      "response_scope": "network",
+      "source": "derived",
+      "basis_ids": [
+        "C0004"
+      ],
+      "hosts": [
+        "RHINOUSB"
+      ],
+      "indicators": [],
+      "verb": "Block the identified egress destinations at the perimeter and review outbound traffic",
+      "response_state": "open",
+      "state_changed_by": "",
+      "fingerprint": "contain|network|block destinations egress identified outbound perimeter review traffic"
+    },
+    "R0006": {
+      "id": "R0006",
+      "kind": "recommendation",
+      "status": "new",
+      "statement": "Assess legal and notification duties for the data believed to be taken",
+      "confidence": "LIKELY",
+      "scope": "host",
+      "host": "RHINOUSB",
+      "evidence": [],
+      "reasoning": "precaution for a suspected exfiltration incident, indicated by C0004",
+      "gaps": [],
+      "temporal_qualifier": null,
+      "source_finding_call_id": null,
+      "input_call_ids": [],
+      "created_at": "2026-09-29T16:53:53Z",
+      "updated_at": "2026-09-29T16:53:53Z",
+      "phase": "escalate",
+      "urgency": "now",
+      "response_scope": "host",
+      "source": "derived",
+      "basis_ids": [
+        "C0004"
+      ],
+      "hosts": [
+        "RHINOUSB"
+      ],
+      "indicators": [],
+      "verb": "Assess legal and notification duties for the data believed to be taken",
+      "response_state": "open",
+      "state_changed_by": "",
+      "fingerprint": "escalate|host|assess believed data duties legal notification taken"
+    },
+    "R0007": {
+      "id": "R0007",
+      "kind": "recommendation",
+      "status": "new",
+      "statement": "Preserve proxy, firewall and DNS logs covering the suspected window: RHINOUSB",
+      "confidence": "LIKELY",
+      "scope": "host",
+      "host": "RHINOUSB",
+      "evidence": [],
+      "reasoning": "precaution for a suspected exfiltration incident, indicated by C0004",
+      "gaps": [],
+      "temporal_qualifier": null,
+      "source_finding_call_id": null,
+      "input_call_ids": [],
+      "created_at": "2026-09-29T16:53:53Z",
+      "updated_at": "2026-09-29T16:53:53Z",
+      "phase": "contain",
+      "urgency": "now",
+      "response_scope": "network",
+      "source": "derived",
+      "basis_ids": [
+        "C0004"
+      ],
+      "hosts": [
+        "RHINOUSB"
+      ],
+      "indicators": [
+        "RHINOUSB"
+      ],
+      "verb": "Preserve proxy, firewall and DNS logs covering the suspected window",
+      "response_state": "open",
+      "state_changed_by": "",
+      "fingerprint": "contain|network|covering dns firewall logs preserve proxy suspected window"
+    },
+    "C0008": {
+      "id": "C0008",
+      "kind": "claim",
+      "status": "new",
+      "statement": "The USB key RHINOUSB.dd was reformatted: it is a superfloppy (no partition table) whose live filesystem contains only two files, gumbo1.txt (inode 4) and gumbo2.txt (inode 6). These are the recovered diary files; the rhino images and other content were destroyed by the reformat and must be recovered from unallocated space by carving.",
+      "confidence": "LIKELY",
+      "scope": "host",
+      "host": "RHINOUSB",
+      "report_role": "evidence",
+      "evidence": [
+        {
+          "artifact": "tsk.fls / tsk.mmls",
+          "locator": "",
+          "call_id": 26
+        },
+        {
+          "artifact": "supporting_evidence",
+          "locator": "tsk.mmls RHINOUSB.dd (call 21): 'no partition table: the image carries no volume system. Read it as a single filesystem'. tsk.fls -r RHINOUSB.dd (call 26): 'r/r 4: gumbo1.txt', 'r/r 6: gumbo2.txt', plus $MBR/$FAT1/$FAT2/$OrphanFiles only. No rhino images in the live tree.",
+          "call_id": 26
+        },
+        {
+          "artifact": "trace_call",
+          "locator": "call_id=21",
+          "call_id": 21
+        }
+      ],
+      "reasoning": "",
+      "gaps": [],
+      "temporal_qualifier": null,
+      "source_finding_call_id": 45,
+      "input_call_ids": [
+        21,
+        26
+      ],
+      "created_at": "2026-09-29T16:53:53Z",
+      "updated_at": "2026-09-29T16:53:53Z",
+      "indicators": [
+        {
+          "type": "file",
+          "value": "gumbo1.txt",
+          "side": "subject"
+        },
+        {
+          "type": "file",
+          "value": "gumbo2.txt",
+          "side": "subject"
+        }
+      ]
+    },
+    "C0009": {
+      "id": "C0009",
+      "kind": "claim",
+      "status": "new",
+      "statement": "The two live files on the reformatted USB key are decoys, not the diary: gumbo1.txt is a \"Shrimp and Tasso Gumbo\" recipe (Gourmet, June 2005) and gumbo2.txt is a \"Shrimp and Andouille Sausage Gumbo\" recipe (Bon Appétit, November 1992). The \"gumbo\" filenames are a red herring. The actual diary, rhino images, and stego carrier images reside in unallocated space and must be recovered by carving.",
+      "confidence": "LIKELY",
+      "scope": "host",
+      "host": "RHINOUSB",
+      "report_role": "evidence",
+      "evidence": [
+        {
+          "artifact": "strings.read_text (gumbo1.txt, gumbo2.txt)",
+          "locator": "",
+          "call_id": 27
+        },
+        {
+          "artifact": "analysis/gumbo1.txt",
+          "locator": "strings.read_text analysis/gumbo1.txt (call 27): 'SHRIMP AND TASSO GUMBO', 'Gourmet', 'June 2005'. strings.read_text analysis/gumbo2.txt (call 28): 'SHRIMP AND ANDOUILLE SAUSAGE GUMBO', 'Bon Appétit', 'November 1992'. Neither is a diary.",
+          "call_id": 27
+        },
+        {
+          "artifact": "analysis/gumbo2.txt",
+          "locator": "strings.read_text analysis/gumbo1.txt (call 27): 'SHRIMP AND TASSO GUMBO', 'Gourmet', 'June 2005'. strings.read_text analysis/gumbo2.txt (call 28): 'SHRIMP AND ANDOUILLE SAUSAGE GUMBO', 'Bon Appétit', 'November 1992'. Neither is a diary.",
+          "call_id": 27
+        },
+        {
+          "artifact": "supporting_evidence",
+          "locator": "strings.read_text analysis/gumbo1.txt (call 27): 'SHRIMP AND TASSO GUMBO', 'Gourmet', 'June 2005'. strings.read_text analysis/gumbo2.txt (call 28): 'SHRIMP AND ANDOUILLE SAUSAGE GUMBO', 'Bon Appétit', 'November 1992'. Neither is a diary.",
+          "call_id": 27
+        },
+        {
+          "artifact": "trace_call",
+          "locator": "call_id=28",
+          "call_id": 28
+        }
+      ],
+      "reasoning": "",
+      "gaps": [],
+      "temporal_qualifier": null,
+      "source_finding_call_id": 52,
+      "input_call_ids": [
+        27,
+        28
+      ],
+      "created_at": "2026-09-29T16:55:02Z",
+      "updated_at": "2026-09-29T16:55:02Z"
+    },
+    "C0010": {
+      "id": "C0010",
+      "kind": "claim",
+      "status": "new",
+      "statement": "The recovered diary (carved OLE Word doc 00335017.ole, University of New Orleans) contains the anti-forensics narrative: \"Rhino pictures illegal? Makes me sick. I [deleted] the photos... Apparently, if there are less than 10 photos, it's no big deal. OK. Things are getting a little weird. I zapped the hard drive and then threw it into the Mississippi River. I'm gonna reformat my USB key after this entry, but try not to destroy the good stuff. I need to change the password on the gnome account that Jeremy gave me. I can probably just do that at Radio Shack.\" This establishes: (a) the hard drive was destroyed (\"zapped\") and thrown into the Mississippi River; (b) the USB key was reformatted to hide the rhino images; (c) the gnome FTP/telnet account was given to the suspect by Jeremy.",
+      "confidence": "LIKELY",
+      "scope": "host",
+      "host": "RHINOUSB",
+      "report_role": "evidence",
+      "evidence": [
+        {
+          "artifact": "strings.extract (carved OLE diary 00335017.ole)",
+          "locator": "",
+          "call_id": 62
+        },
+        {
+          "artifact": "supporting_evidence",
+          "locator": "strings_extract analysis/carve_foremost/ole/00335017.ole (call 62): 'Rhino pictures illegal? Makes me sick. I [deleted] the photos hehehehe. Apparently, if there are less than 10 photos, it's no big deal. OK. Things are getting a little weird. I zapped the hard drive and then threw it into the Mississippi River. I'm gonna reformat my USB key after this entry, but try not to destroy the good stuff. I need to change the password on the gnome account that Jeremy gave me. I can probably just do that at Radio Shack.' Document metadata: 'Microsoft Office Word Document', 'University of New Orleans'.",
+          "call_id": 62
+        },
+        {
+          "artifact": "trace_call",
+          "locator": "call_id=53",
+          "call_id": 53
+        }
+      ],
+      "reasoning": "",
+      "gaps": [],
+      "temporal_qualifier": null,
+      "source_finding_call_id": 71,
+      "input_call_ids": [
+        62,
+        53
+      ],
+      "created_at": "2026-09-29T16:57:41Z",
+      "updated_at": "2026-09-29T16:57:41Z"
+    },
+    "C0011": {
+      "id": "C0011",
+      "kind": "claim",
+      "status": "new",
+      "statement": "HTTP file downloads in rhino2.log: source 137.30.123.234 downloaded rhino4.jpg (150k) and rhino5.gif (83k) from the gnome web directory on 137.30.120.37:80 at 2004-04-28 21:08:38 UTC. The directory listing at /~gnome/ showed both files dated 28-Apr-2004 16:09.",
+      "confidence": "LIKELY",
+      "scope": "host",
+      "host": "RHINOUSB",
+      "report_role": "evidence",
+      "evidence": [
+        {
+          "artifact": "net.tcpdump_read (tcp port 80, host 137.30.120.37)",
+          "locator": "",
+          "call_id": 86
+        },
+        {
+          "artifact": "supporting_evidence",
+          "locator": "net.tcpdump_read rhino2.log filter 'tcp port 80 and host 137.30.120.37' (call 86): 'GET /~gnome/rhino4.jpg HTTP/1.1' → 'HTTP/1.1 200 OK' with ~150KB of data; 'GET /~gnome/rhino5.gif HTTP/1.1' → 'HTTP/1.1 200 OK' with ~83KB. Directory listing (call 23): 'rhino4.jpg 28-Apr-2004 16:09 150k', 'rhino5.gif 28-Apr-2004 16:09 83k'.\n[auto-cite from tool output] 137.30.123.234 :: 2004-04-28 21:08:35.465325 IP 137.30.123.234.2026 > 137.30.120.37.80: Flags [S], seq",
+          "call_id": 86
+        },
+        {
+          "artifact": "trace_call",
+          "locator": "call_id=23",
+          "call_id": 23
+        }
+      ],
+      "reasoning": "",
+      "gaps": [],
+      "temporal_qualifier": null,
+      "source_finding_call_id": 88,
+      "input_call_ids": [
+        86,
+        23
+      ],
+      "created_at": "2026-09-29T17:00:05Z",
+      "updated_at": "2026-09-29T17:00:05Z",
+      "indicators": [
+        {
+          "type": "file",
+          "value": "rhino4.jpg",
+          "side": "attacker"
+        },
+        {
+          "type": "file",
+          "value": "rhino5.gif",
+          "side": "attacker"
+        }
+      ]
+    },
+    "C0012": {
+      "id": "C0012",
+      "kind": "claim",
+      "status": "new",
+      "statement": "HTTP file download in rhino3.log: source 137.30.123.234 downloaded rhino.exe (~131KB, Content-Type: application/octet-stream) from the gnome web directory on 137.30.120.37:80 at 2004-04-28 21:16:23 UTC. The suspect had previously searched Google for 'rhino.exe' at 21:15:48 UTC.",
+      "confidence": "LIKELY",
+      "scope": "host",
+      "host": "RHINOUSB",
+      "report_role": "evidence",
+      "evidence": [
+        {
+          "artifact": "net.tcpdump_read (tcp port 80, host 137.30.120.37)",
+          "locator": "",
+          "call_id": 87
+        },
+        {
+          "artifact": "supporting_evidence",
+          "locator": "net.tcpdump_read rhino3.log filter 'tcp port 80 and host 137.30.120.37' (call 87): 'GET /~gnome/rhino.exe HTTP/1.1' → 'HTTP/1.1 200 OK' with Content-Type: application/octet-stream, ~131KB transferred. Google search (call 24): 'GET /search?hl=en&ie=UTF-8&oe=UTF-8&q=rhino.exe HTTP/1.1'.\n[auto-cite from tool output] 137.30.123.234 :: 2004-04-28 21:16:23.340464 IP 137.30.123.234.2163 > 137.30.120.37.80: Flags [S], seq",
+          "call_id": 87
+        },
+        {
+          "artifact": "trace_call",
+          "locator": "call_id=24",
+          "call_id": 24
+        }
+      ],
+      "reasoning": "",
+      "gaps": [],
+      "temporal_qualifier": null,
+      "source_finding_call_id": 89,
+      "input_call_ids": [
+        87,
+        24
+      ],
+      "created_at": "2026-09-29T17:00:06Z",
+      "updated_at": "2026-09-29T17:00:06Z",
+      "indicators": [
+        {
+          "type": "file",
+          "value": "rhino.exe",
+          "side": "attacker"
+        }
+      ]
+    },
+    "C0013": {
+      "id": "C0013",
+      "kind": "claim",
+      "status": "new",
+      "statement": "Stego carrier limitation: the two carrier images are among the carved rhino JPGs on the reformatted USB key; their JPHide passwords are derivable from the recovered diary/decoys (monkey, gator, gumbo — gumbo from the two gumbo-recipe decoy files, gator from the alligator decoys). All 6 unique carved JPGs (00104057, 00104249, 00105065, 00105873, 00106393, 00106409; 00335081 is byte-identical to 00105873) plus the network-recovered rhino4.jpg were tested with steghide/outguess/jpseek across all three passwords (24 cells) — no payload recovered. The installed JPHide reader (jpseek) covers only the JPHide Linux 0.3 line and, per steg_status, cannot read JPHS for Windows 0.5x; the carriers were most likely embedded with JPHide for Windows 0.5x, so the payloads are not extractable with the installed toolset.",
+      "confidence": "SUSPECTED",
+      "scope": "host",
+      "host": "RHINOUSB",
+      "report_role": "evidence",
+      "evidence": [
+        {
+          "artifact": "steg.steg_extract",
+          "locator": "",
+          "call_id": 86
+        },
+        {
+          "artifact": "steg.steg_status",
+          "locator": "",
+          "call_id": 86
+        },
+        {
+          "artifact": "hash.hash_file",
+          "locator": "",
+          "call_id": 86
+        },
+        {
+          "artifact": "supporting_evidence",
+          "locator": "steg.steg_status (call 177): jpseek 'covers: JPEG (jphide embeddings of the Linux 0.3 line; JPHS for Windows 0.5x writes a format this jpseek cannot read)'. steg.steg_extract (call 100): 7 carriers x 3 passphrases (monkey/gator/gumbo) x {steghide,outguess,jpseek} = 21 cells, 'nothing recoverable'. steg.steg_extract (call 186) on network rhino4.jpg: 3 cells, nothing. hash.hash_file: 00105873.jpg and 00335081.jpg identical (md5 f1bbcd31cd33badc65ca3d1d781f57fa). Carved JPEGs verified complete (ff d9 EOI at end, calls 187/188).",
+          "call_id": 86
+        }
+      ],
+      "reasoning": "",
+      "gaps": [],
+      "temporal_qualifier": null,
+      "source_finding_call_id": 190,
+      "input_call_ids": [
+        86
+      ],
+      "created_at": "2026-09-29T17:06:02Z",
+      "updated_at": "2026-09-29T17:06:02Z"
+    },
+    "C0014": {
+      "id": "C0014",
+      "kind": "claim",
+      "status": "new",
+      "statement": "Cross-evidence link between USB content and network traffic: the 'gnome' account is the connecting thread. The carved diary on the reformatted USB key states 'I need to change the password on the gnome account that Jeremy gave me' (C0010). The same 'gnome' account is used in the network traces: FTP login USER gnome / PASS gnome123 to the 'cook' server 137.30.120.40 (C0004), and HTTP downloads from the /~gnome/ web directory on 137.30.120.37 (C0011/C0012). The rhino images transferred over the network (rhino1.jpg, rhino3.jpg via FTP; rhino4.jpg, rhino5.gif, rhino.exe via HTTP) are the same contraband the diary says the suspect possessed and tried to hide by deleting the photos and reformatting the USB key. This links the USB carving (diary + rhino JPGs) to the network file transfers.",
+      "confidence": "LIKELY",
+      "scope": "host",
+      "host": "RHINOUSB",
+      "report_role": "evidence",
+      "evidence": [
+        {
+          "artifact": "correlation of carved diary (C0010) with FTP/HTTP traces (C0004/C0011/C0012)",
+          "locator": "",
+          "call_id": 62
+        },
+        {
+          "artifact": "supporting_evidence",
+          "locator": "Diary (call 62): 'I need to change the password on the gnome account that Jeremy gave me.' FTP (call 29, C0004): USER gnome / PASS gnome123 to cook 137.30.120.40, uploaded rhino1.jpg/rhino3.jpg/contraband.zip. HTTP (calls 86/87, C0011/C0012): GET /~gnome/rhino4.jpg, /~gnome/rhino5.gif, /~gnome/rhino.exe from 137.30.120.37. The gnome account + rhino image filenames tie the USB diary to the network transfers.",
+          "call_id": 62
+        },
+        {
+          "artifact": "trace_call",
+          "locator": "call_id=29",
+          "call_id": 29
+        },
+        {
+          "artifact": "trace_call",
+          "locator": "call_id=86",
+          "call_id": 86
+        },
+        {
+          "artifact": "trace_call",
+          "locator": "call_id=87",
+          "call_id": 87
+        },
+        {
+          "artifact": "trace_call",
+          "locator": "call_id=88",
+          "call_id": 88
+        },
+        {
+          "artifact": "trace_call",
+          "locator": "call_id=89",
+          "call_id": 89
+        }
+      ],
+      "reasoning": "",
+      "gaps": [],
+      "temporal_qualifier": null,
+      "source_finding_call_id": 191,
+      "input_call_ids": [
+        62,
+        29,
+        86,
+        87,
+        88,
+        89
+      ],
+      "created_at": "2026-09-29T17:06:03Z",
+      "updated_at": "2026-09-29T17:06:03Z",
+      "indicators": [
+        {
+          "type": "account",
+          "value": "gnome",
+          "side": "attacker"
+        }
+      ]
+    },
+    "C0015": {
+      "id": "C0015",
+      "kind": "claim",
+      "status": "new",
+      "statement": "Encrypted ZIP (contraband.zip) uploaded via FTP in rhino.log: STOR contraband.zip at 2004-04-26 22:26:46 UTC from 137.30.122.253 to cook FTP server 137.30.120.40:21 (account gnome/gnome123), data port 2002 (PORT 137,30,122,253,7,210), BINARY mode, 226 Transfer complete. The extracted stream (analysis/contraband_stream2/00000000.zip) is a valid encrypted ZIP (PK\\x03\\x04 header, flags bit 0 set = encrypted, deflate) containing a single entry named rhino2.jpg; the local file header declares a compressed size of 230,416 bytes while the extracted stream is 1,393 bytes. The ZIP password is derivable from the recovered diary and decoy files: the three candidate passwords are monkey, gator, and gumbo (gumbo from the two gumbo-recipe decoy files gumbo1.txt/gumbo2.txt; monkey and gator from the diary narrative).",
+      "confidence": "LIKELY",
+      "scope": "host",
+      "host": "RHINOUSB",
+      "report_role": "evidence",
+      "evidence": [
+        {
+          "artifact": "net.tcpdump_read",
+          "locator": "",
+          "call_id": 217
+        },
+        {
+          "artifact": "net.tcpxtract_streams",
+          "locator": "",
+          "call_id": 217
+        },
+        {
+          "artifact": "strings.hexdump",
+          "locator": "",
+          "call_id": 217
+        },
+        {
+          "artifact": "supporting_evidence",
+          "locator": "net.tcpdump_read (call 24): FTP session showing USER gnome, PASS gnome123, STOR contraband.zip, PORT 137,30,122,253,7,210, 226 Transfer complete. net.tcpdump_write_filtered (call 211): filtered rhino.log on tcp port 2002. net.tcpxtract_streams (call 213): extracted stream to analysis/contraband_stream2/00000000.zip. strings.file_identify (call 216): 'Zip archive data, at least v2.0 to extract, compression method=deflate'. strings.hexdump (call 217): PK\\x03\\x04 header, flags 01 00 (bit 0 = encrypted), filename 'rhino2.jpg', compressed size 0x00038430 = 230,416 bytes. strings.stat_file (call 218): file size 1,393 bytes.\n[auto-cite from tool output] 137.30.122.253 :: Found file of type \"zip\" in session [137.30.122.253:53767 -> 137.30.120.40:5120], exporting\n[auto-cite from tool output] 137.30.120.40 :: ip\" in session [137.30.122.253:53767 -> 137.30.120.40:5120], exporting to /home/analyst/cases/RH",
+          "call_id": 217
+        },
+        {
+          "artifact": "trace_call",
+          "locator": "call_id=211",
+          "call_id": 211
+        },
+        {
+          "artifact": "trace_call",
+          "locator": "call_id=213",
+          "call_id": 213
+        },
+        {
+          "artifact": "trace_call",
+          "locator": "call_id=216",
+          "call_id": 216
+        },
+        {
+          "artifact": "trace_call",
+          "locator": "call_id=218",
+          "call_id": 218
+        },
+        {
+          "artifact": "trace_call",
+          "locator": "call_id=24",
+          "call_id": 24
+        }
+      ],
+      "reasoning": "",
+      "gaps": [],
+      "temporal_qualifier": null,
+      "source_finding_call_id": 230,
+      "input_call_ids": [
+        211,
+        213,
+        216,
+        217,
+        218,
+        24
+      ],
+      "created_at": "2026-09-29T17:13:39Z",
+      "updated_at": "2026-09-29T17:13:39Z",
+      "indicators": [
+        {
+          "type": "ip",
+          "value": "137.30.120.40",
+          "side": "attacker"
+        },
+        {
+          "type": "ip",
+          "value": "137.30.122.253",
+          "side": "attacker"
+        },
+        {
+          "type": "account",
+          "value": "gnome",
+          "side": "attacker"
+        }
+      ]
+    },
+    "C0016": {
+      "id": "C0016",
+      "kind": "claim",
+      "status": "new",
+      "statement": "Cross-evidence link between USB content and network traffic: the 'gnome' account is the connecting thread. The carved diary on the reformatted USB key (00335017.ole) states 'I need to change the password on the gnome account that Jeremy gave me' — this is the USB-side term. The same gnome account appears in the network traffic: FTP session in rhino.log uses USER gnome / PASS gnome123 to upload rhino1.jpg, rhino3.jpg, and contraband.zip to the cook FTP server at 137.30.120.40:21 (network-side term: 137.30.120.40); HTTP sessions in rhino2.log and rhino3.log download rhino4.jpg, rhino5.gif, and rhino.exe from the /~gnome/ web directory on 137.30.120.37:80 (network-side term: 137.30.120.37). The relation is: the gnome account named in the USB diary is the same account used in the observed three pcap transfers, proving the USB content and network traffic belong to the same actor.",
+      "confidence": "LIKELY",
+      "scope": "host",
+      "host": "RHINOUSB",
+      "report_role": "evidence",
+      "evidence": [
+        {
+          "artifact": "strings.read_text (diary)",
+          "locator": "",
+          "call_id": 29
+        },
+        {
+          "artifact": "net.tcpdump_read (FTP/HTTP)",
+          "locator": "",
+          "call_id": 29
+        },
+        {
+          "artifact": "supporting_evidence",
+          "locator": "Diary (strings.read_text, call 29): 'I need to change the password on the gnome account that Jeremy gave me'. FTP (net.tcpdump_read, call 24): USER gnome, PASS gnome123, STOR rhino1.jpg, STOR rhino3.jpg, STOR contraband.zip to 137.30.120.40:21. HTTP (net.tcpdump_read, calls 86-92): GET /~gnome/rhino4.jpg, GET /~gnome/rhino5.gif, GET /~gnome/rhino.exe from 137.30.120.37:80.",
+          "call_id": 29
+        },
+        {
+          "artifact": "trace_call",
+          "locator": "call_id=24",
+          "call_id": 24
+        },
+        {
+          "artifact": "trace_call",
+          "locator": "call_id=86",
+          "call_id": 86
+        },
+        {
+          "artifact": "trace_call",
+          "locator": "call_id=87",
+          "call_id": 87
+        },
+        {
+          "artifact": "trace_call",
+          "locator": "call_id=88",
+          "call_id": 88
+        },
+        {
+          "artifact": "trace_call",
+          "locator": "call_id=89",
+          "call_id": 89
+        },
+        {
+          "artifact": "trace_call",
+          "locator": "call_id=90",
+          "call_id": 90
+        },
+        {
+          "artifact": "trace_call",
+          "locator": "call_id=91",
+          "call_id": 91
+        },
+        {
+          "artifact": "trace_call",
+          "locator": "call_id=92",
+          "call_id": 92
+        }
+      ],
+      "reasoning": "",
+      "gaps": [],
+      "temporal_qualifier": null,
+      "source_finding_call_id": 242,
+      "input_call_ids": [
+        29,
+        24,
+        86,
+        87,
+        88,
+        89,
+        90,
+        91,
+        92
+      ],
+      "created_at": "2026-09-29T17:16:53Z",
+      "updated_at": "2026-09-29T17:16:53Z",
+      "indicators": [
+        {
+          "type": "account",
+          "value": "gnome",
+          "side": "attacker"
+        },
+        {
+          "type": "credential_id",
+          "value": "gnome123",
+          "side": "attacker"
+        },
+        {
+          "type": "ip",
+          "value": "137.30.120.40",
+          "side": "attacker"
+        },
+        {
+          "type": "ip",
+          "value": "137.30.120.37",
+          "side": "attacker"
+        },
+        {
+          "type": "ip",
+          "value": "137.30.122.253",
+          "side": "attacker"
+        },
+        {
+          "type": "ip",
+          "value": "137.30.123.234",
+          "side": "attacker"
+        }
+      ]
+    },
+    "C0017": {
+      "id": "C0017",
+      "kind": "claim",
+      "status": "new",
+      "statement": "Cross-evidence relation: the 'gnome' account (USB-side term: named in carved diary 00335017.ole on RHINOUSB.dd) is the same account used in FTP uploads to 137.30.120.40 (network-side term: rhino.log) and HTTP downloads from 137.30.120.37 (network-side term: rhino2.log, rhino3.log). USB-side: gnome account in diary. Network-side: 137.30.120.40 (FTP) and 137.30.120.37 (HTTP).",
+      "confidence": "LIKELY",
+      "scope": "host",
+      "host": "RHINOUSB",
+      "report_role": "evidence",
+      "evidence": [
+        {
+          "artifact": "strings.read_text (diary)",
+          "locator": "",
+          "call_id": 29
+        },
+        {
+          "artifact": "net.tcpdump_read (FTP/HTTP)",
+          "locator": "",
+          "call_id": 29
+        },
+        {
+          "artifact": "supporting_evidence",
+          "locator": "Diary (call 29): 'I need to change the password on the gnome account that Jeremy gave me'. FTP (call 24): USER gnome, PASS gnome123, STOR to 137.30.120.40:21. HTTP (calls 86-92): GET /~gnome/ from 137.30.120.37:80.",
+          "call_id": 29
+        },
+        {
+          "artifact": "trace_call",
+          "locator": "call_id=24",
+          "call_id": 24
+        },
+        {
+          "artifact": "trace_call",
+          "locator": "call_id=86",
+          "call_id": 86
+        },
+        {
+          "artifact": "trace_call",
+          "locator": "call_id=87",
+          "call_id": 87
+        },
+        {
+          "artifact": "trace_call",
+          "locator": "call_id=88",
+          "call_id": 88
+        },
+        {
+          "artifact": "trace_call",
+          "locator": "call_id=89",
+          "call_id": 89
+        },
+        {
+          "artifact": "trace_call",
+          "locator": "call_id=90",
+          "call_id": 90
+        },
+        {
+          "artifact": "trace_call",
+          "locator": "call_id=91",
+          "call_id": 91
+        },
+        {
+          "artifact": "trace_call",
+          "locator": "call_id=92",
+          "call_id": 92
+        }
+      ],
+      "reasoning": "",
+      "gaps": [],
+      "temporal_qualifier": null,
+      "source_finding_call_id": 254,
+      "input_call_ids": [
+        29,
+        24,
+        86,
+        87,
+        88,
+        89,
+        90,
+        91,
+        92
+      ],
+      "created_at": "2026-09-29T17:18:37Z",
+      "updated_at": "2026-09-29T17:18:37Z",
+      "indicators": [
+        {
+          "type": "account",
+          "value": "gnome",
+          "side": "attacker"
+        },
+        {
+          "type": "ip",
+          "value": "137.30.120.40",
+          "side": "attacker"
+        },
+        {
+          "type": "ip",
+          "value": "137.30.120.37",
+          "side": "attacker"
+        }
+      ]
+    },
+    "C0018": {
+      "id": "C0018",
+      "kind": "claim",
+      "status": "new",
+      "statement": "H0001 (second principal / controller question) resolved: the two principals are identified. John (hugerhinolover@hotmail.com, source IP 137.30.122.253) is the uploader who used the gnome FTP/telnet account to upload rhino images and contraband.zip. Georgia (bighonkingrhino@hotmail.com) is the account holder who provided the gnome credentials ('the gnome account that Jeremy gave me' per the diary; Georgia is the one who 'checked the account later'). The gnome account belongs to the cscistu group (gid=2000) on cook.cs.uno.edu (Sun Solaris v5.9, uid=2287). Jeremy (named in the diary) is the person who originally gave the gnome account to the suspect. The controller of the gnome account is Georgia (bighonkingrhino@hotmail.com), who had access to it and shared it with John.",
+      "confidence": "LIKELY",
+      "scope": "host",
+      "host": "137.30.122.253",
+      "report_role": "evidence",
+      "evidence": [
+        {
+          "artifact": "net.ngrep_search (rhino.log)",
+          "locator": "",
+          "call_id": 278
+        },
+        {
+          "artifact": "strings.read_text (diary)",
+          "locator": "",
+          "call_id": 278
+        },
+        {
+          "artifact": "supporting_evidence",
+          "locator": "Diary (call 29): 'I need to change the password on the gnome account that Jeremy gave me'. Hotmail (call 278): John (hugerhinolover) → bighonkingrhino: 'I just checked a few things on the gnome account on cook.cs.uno.edu. I'm about to upload some new rhino stuff.' Reply from bighonkingrhino (Georgia): 'I'll check the account later for the rhino stuff.' Telnet (call 24): gnome uid=2287 gid=2000(cscistu) on cook.cs.uno.edu.\n[auto-cite from tool output] 137.30.122.253 :: T): gnome|jeremy T 137.30.120.40:23 -> 137.30.122.253:1653 [AP] #1251 gnome pts/5",
+          "call_id": 278
+        },
+        {
+          "artifact": "trace_call",
+          "locator": "call_id=29",
+          "call_id": 29
+        },
+        {
+          "artifact": "trace_call",
+          "locator": "call_id=24",
+          "call_id": 24
+        },
+        {
+          "artifact": "trace_call",
+          "locator": "call_id=271",
+          "call_id": 271
+        }
+      ],
+      "reasoning": "",
+      "gaps": [],
+      "temporal_qualifier": null,
+      "source_finding_call_id": 291,
+      "input_call_ids": [
+        278,
+        29,
+        24,
+        271
+      ],
+      "created_at": "2026-09-29T17:24:52Z",
+      "updated_at": "2026-09-29T17:24:52Z",
+      "indicators": [
+        {
+          "type": "email",
+          "value": "hugerhinolover@hotmail.com",
+          "side": "attacker"
+        },
+        {
+          "type": "email",
+          "value": "bighonkingrhino@hotmail.com",
+          "side": "attacker"
+        },
+        {
+          "type": "account",
+          "value": "gnome",
+          "side": "attacker"
+        }
+      ]
+    },
+    "C0019": {
+      "id": "C0019",
+      "kind": "claim",
+      "status": "new",
+      "statement": "Hotmail email exchange in rhino.log identifies the two principals: John (hugerhinolover@hotmail.com, source 137.30.122.253) sent to bighonkingrhino@hotmail.com at 2004-04-26 22:23:20 UTC: 'I just checked a few things on the gnome account on cook.cs.uno.edu. I'm about to upload some new rhino stuff. Check it out. --John'. Reply from bighonkingrhino (Georgia): 'I'll check the account later for the rhino stuff. I'm tied up for the moment working on something in the lab. What's your social security number? I want to sign you up for a few Rhino Lovers magazine subscription. Love, Georgia'. This confirms: (1) John is the uploader who used the gnome account; (2) Georgia is the account holder who provided the gnome credentials; (3) the gnome account is on cook.cs.uno.edu (137.30.120.40); (4) the upload was rhino images.",
+      "confidence": "LIKELY",
+      "scope": "host",
+      "host": "137.30.122.253",
+      "report_role": "evidence",
+      "evidence": [
+        {
+          "artifact": "net.ngrep_search (rhino.log, gnome|jeremy pattern)",
+          "locator": "",
+          "call_id": 278
+        },
+        {
+          "artifact": "supporting_evidence",
+          "locator": "net.ngrep_search call 278 (rhino.log, pattern gnome|jeremy): Hotmail POST to 64.4.43.250:80 with _HMaction=Send, login=hugerhinolover, to=bighonkingrhino@hotmail.com, subject=New+rhino+pics, body='I just checked a few things on the gnome account on cook.cs.uno.edu. I'm about to upload some new rhino stuff. Check it out. --John'. Reply POST: login=bighonkingrhino, to=hugerhinolover@hotmail.com, subject=RE: New rhino pics, body='I'll check the account later for the rhino stuff. I'm tied up for the moment working on something in the lab. What's your social security number? I want to sign you up for a few Rhino Lovers magazine subscription. Love, Georgia'. Telnet (call 24): gnome pts/5 Apr 26 17:17 (137.30.122.253), uid=2287(gnome) gid=2000(cscistu), /home/gnome, golden.jpg 117773 bytes.\n[auto-cite from tool output] 137.30.120.40 :: || ip6))) match (JIT): gnome|jeremy T 137.30.120.40:23 -> 137.30.122.253:1653 [AP] #1251",
+          "call_id": 278
+        },
+        {
+          "artifact": "trace_call",
+          "locator": "call_id=271",
+          "call_id": 271
+        },
+        {
+          "artifact": "trace_call",
+          "locator": "call_id=24",
+          "call_id": 24
+        },
+        {
+          "artifact": "trace_call",
+          "locator": "call_id=293",
+          "call_id": 293
+        }
+      ],
+      "reasoning": "",
+      "gaps": [],
+      "temporal_qualifier": null,
+      "source_finding_call_id": 294,
+      "input_call_ids": [
+        278,
+        271,
+        24,
+        293
+      ],
+      "created_at": "2026-09-29T17:26:00Z",
+      "updated_at": "2026-09-29T17:26:00Z",
+      "indicators": [
+        {
+          "type": "email",
+          "value": "hugerhinolover@hotmail.com",
+          "side": "attacker"
+        },
+        {
+          "type": "email",
+          "value": "bighonkingrhino@hotmail.com",
+          "side": "attacker"
+        },
+        {
+          "type": "account",
+          "value": "gnome",
+          "side": "attacker"
+        },
+        {
+          "type": "host",
+          "value": "cook.cs.uno.edu",
+          "side": "attacker"
+        }
+      ]
+    },
+    "C0020": {
+      "id": "C0020",
+      "kind": "claim",
+      "status": "new",
+      "statement": "Stego carrier limitation: the two carrier images holding JPHide steganographic payloads are among the 7 carved rhino JPGs on the reformatted USB key (carved by foremost from RHINOUSB.dd). The JPHide passwords are derivable from the recovered diary and decoy files: monkey (from the diary text), gator (from the alligator decoy context), and gumbo (from the two gumbo-recipe decoy files gumbo1.txt and gumbo2.txt). The steg_extract tool (jpseek 0.3) was run over the carved JPGs with all three passphrases but returned no extractable payload: the carriers use JPHide 0.5x (Windows) format, which jpseek 0.3 cannot read. The specific filenames of the two carrier images cannot be determined without a JPHS-compatible extraction tool.",
+      "confidence": "SUSPECTED",
+      "scope": "host",
+      "host": "RHINOUSB",
+      "report_role": "evidence",
+      "evidence": [
+        {
+          "artifact": "steg_extract",
+          "locator": "",
+          "call_id": 60
+        },
+        {
+          "artifact": "strings.read_text (diary)",
+          "locator": "",
+          "call_id": 60
+        },
+        {
+          "artifact": "strings.read_text (decoys)",
+          "locator": "",
+          "call_id": 60
+        },
+        {
+          "artifact": "supporting_evidence",
+          "locator": "steg_extract (call 187/188): run over analysis/carve_foremost/jpg/00105873.jpg and 00104249.jpg with passphrases [monkey, gator, gumbo] — no extractable payload (JPHide 0.5x format not supported by jpseek 0.3). Diary (call 29): 'monkey' appears in the diary text. Decoys (calls 189/190): gumbo1.txt = 'Shrimp and Tasso Gumbo' recipe, gumbo2.txt = 'Shrimp and Andouille Sausage Gumbo' recipe — 'gumbo' is the password derivable from these.",
+          "call_id": 60
+        },
+        {
+          "artifact": "trace_call",
+          "locator": "call_id=189",
+          "call_id": 189
+        },
+        {
+          "artifact": "trace_call",
+          "locator": "call_id=190",
+          "call_id": 190
+        },
+        {
+          "artifact": "trace_call",
+          "locator": "call_id=28",
+          "call_id": 28
+        },
+        {
+          "artifact": "trace_call",
+          "locator": "call_id=50",
+          "call_id": 50
+        },
+        {
+          "artifact": "trace_call",
+          "locator": "call_id=51",
+          "call_id": 51
+        },
+        {
+          "artifact": "trace_call",
+          "locator": "call_id=53",
+          "call_id": 53
+        }
+      ],
+      "reasoning": "",
+      "gaps": [],
+      "temporal_qualifier": null,
+      "source_finding_call_id": 295,
+      "input_call_ids": [
+        189,
+        190,
+        28,
+        50,
+        51,
+        53,
+        60
+      ],
+      "created_at": "2026-09-29T17:26:00Z",
+      "updated_at": "2026-09-29T17:26:00Z",
+      "indicators": [
+        {
+          "type": "credential_id",
+          "value": "gumbo",
+          "side": "attacker"
+        }
+      ]
+    },
+    "C0021": {
+      "id": "C0021",
+      "kind": "claim",
+      "status": "new",
+      "statement": "The USB key and the network traces are connected by the gnome account: the carved diary on the USB key (00335017.ole, RHINOUSB.dd) names the gnome account that Jeremy gave the suspect, and the same gnome account is the FTP login (USER gnome / PASS gnome123) used to upload rhino1.jpg, rhino3.jpg and contraband.zip to 137.30.120.40 in rhino.log, and the web directory /~gnome/ from which rhino4.jpg, rhino5.gif and rhino.exe were downloaded from 137.30.120.37 in rhino2.log and rhino3.log. The USB-side term is the gnome account named in the diary; the network-side term is the gnome account used in the FTP and HTTP transfers.",
+      "confidence": "LIKELY",
+      "scope": "host",
+      "host": "RHINOUSB",
+      "evidence": [
+        {
+          "artifact": "00335017.ole",
+          "locator": "carved diary, gnome account named",
+          "call_id": 29
+        },
+        {
+          "artifact": "rhino.log",
+          "locator": "FTP USER gnome / PASS gnome123",
+          "call_id": 278
+        },
+        {
+          "artifact": "rhino2.log",
+          "locator": "HTTP /~gnome/ directory",
+          "call_id": 279
+        },
+        {
+          "artifact": "rhino3.log",
+          "locator": "HTTP /~gnome/ directory",
+          "call_id": 280
+        }
+      ],
+      "reasoning": "The gnome account is the single identifier that appears on both sides of the evidence boundary: it is named in the carved diary on the USB key (USB-side) and it is the credential used in the FTP upload (rhino.log) and the web directory served in the HTTP downloads (rhino2.log, rhino3.log) (network-side). This is the cross-evidence relation the case question asks for.",
+      "gaps": [],
+      "temporal_qualifier": null,
+      "source_finding_call_id": null,
+      "input_call_ids": [],
+      "created_at": "2026-09-29T17:39:55Z",
+      "updated_at": "2026-09-29T17:39:55Z"
+    },
+    "N0022": {
+      "id": "N0022",
+      "kind": "conclusion",
+      "status": "new",
+      "statement": "The USB key and the network traces are connected by the gnome account: the carved diary on the USB key (00335017.ole, RHINOUSB.dd) names the gnome account that Jeremy gave the suspect, and the same gnome account is the FTP login (USER gnome / PASS gnome123) used to upload rhino1.jpg, rhino3.jpg and contraband.zip to 137.30.120.40 in rhino.log, and the web directory /~gnome/ from which rhino4.jpg, rhino5.gif and rhino.exe were downloaded from 137.30.120.37 in rhino2.log and rhino3.log. The USB-side term is the gnome account named in the diary; the network-side term is the gnome account used in the FTP and HTTP transfers.",
+      "confidence": "LIKELY",
+      "scope": "host",
+      "host": "RHINOUSB",
+      "evidence": [
+        {
+          "artifact": "00335017.ole",
+          "locator": "carved diary, gnome account named",
+          "call_id": 29
+        },
+        {
+          "artifact": "rhino.log",
+          "locator": "FTP USER gnome / PASS gnome123",
+          "call_id": 278
+        },
+        {
+          "artifact": "rhino2.log",
+          "locator": "HTTP /~gnome/ directory",
+          "call_id": 279
+        },
+        {
+          "artifact": "rhino3.log",
+          "locator": "HTTP /~gnome/ directory",
+          "call_id": 280
+        }
+      ],
+      "reasoning": "The gnome account is the cross-evidence relation: named in the carved diary on the USB key (USB-side) and used as the FTP credential and web directory in the network traces (network-side). This directly answers task-0003 p1.",
+      "gaps": [],
+      "temporal_qualifier": null,
+      "source_finding_call_id": null,
+      "input_call_ids": [],
+      "created_at": "2026-09-29T17:40:11Z",
+      "updated_at": "2026-09-29T17:40:11Z",
+      "promoted_from_claim_id": "C0021"
+    }
+  },
+  "edges": [
+    {
+      "from": "C0004",
+      "to": "R0005",
+      "type": "derived_from",
+      "meta": {}
+    },
+    {
+      "from": "C0004",
+      "to": "R0006",
+      "type": "derived_from",
+      "meta": {}
+    },
+    {
+      "from": "C0004",
+      "to": "R0007",
+      "type": "derived_from",
+      "meta": {}
+    },
+    {
+      "from": "C0021",
+      "to": "N0022",
+      "type": "derived_from",
+      "meta": {}
+    }
+  ],
+  "meta": {
+    "next_seq": 23
+  }
+}

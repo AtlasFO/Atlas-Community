@@ -1,0 +1,49 @@
+{
+ "stack": "openai",
+ "model": "example-model",
+ "scenario": "ok",
+ "source": "hand-written from the documented OpenAI response shape",
+ "status": 200,
+ "request": {
+  "model": "example-model",
+  "messages": [
+   {
+    "role": "user",
+    "content": "Reply with the single word: ok"
+   }
+  ],
+  "max_completion_tokens": 512
+ },
+ "response": {
+  "id": "chatcmpl-test0008",
+  "object": "chat.completion",
+  "created": 1924992000,
+  "model": "example-model",
+  "choices": [
+   {
+    "index": 0,
+    "message": {
+     "role": "assistant",
+     "content": "ok"
+    },
+    "finish_reason": "stop"
+   }
+  ],
+  "usage": {
+   "prompt_tokens": 10,
+   "completion_tokens": 5,
+   "completion_tokens_details": {
+    "reasoning_tokens": 0
+   }
+  }
+ },
+ "expect": {
+  "content": "ok",
+  "reasoning_empty": true,
+  "reasoning_tokens": 0,
+  "tool_calls": 0,
+  "finish_reason": "stop",
+  "starved": false,
+  "thinking_observed": false
+ }
+}

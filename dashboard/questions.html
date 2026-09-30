@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Atlas · Questions</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<link rel="stylesheet" href="assets/atlas.css" />
+<script src="assets/i18n.js"></script>
+<style>
+  .q-card {
+    background: var(--bg-2); border: 1px solid var(--border);
+    border-radius: var(--radius); margin-bottom: 10px; overflow: hidden;
+  }
+  .q-card.derived { opacity: .82; }
+  .q-head {
+    display: flex; align-items: baseline; gap: 12px;
+    padding: 13px 16px; cursor: pointer; user-select: none;
+  }
+  .q-head:hover { background: var(--bg-3); }
+  .q-head .glyph { font-size: 17px; width: 20px; text-align: center; flex: none; }
+  .q-head .glyph.answered { color: var(--ok); }
+  .q-head .glyph.partial { color: var(--partial); }
+  .q-head .glyph.open { color: var(--accent); }
+  .q-head .qtext { font-size: var(--fs-body); color: var(--fg-0); min-width: 0; }
+  .q-head .trail { margin-left: auto; flex: none; display: flex; gap: 6px; align-items: center; }
+  .q-head .chev { color: var(--fg-2); font-size: var(--fs-label); transition: transform .12s; }
+  .q-card.expanded .q-head .chev { transform: rotate(90deg); }
+  .q-sub {
+    padding: 0 16px 10px 48px; margin-top: -6px;
+    font-size: var(--fs-small); color: var(--fg-2);
+  }
+  .q-body {
+    display: none; border-top: 1px solid var(--border);
+    padding: 14px 16px 16px 48px;
+  }
+  .q-card.expanded .q-body { display: block; }
+  .q-body h4 {
+    margin: 14px 0 6px; font-size: var(--fs-label); font-weight: 650;
+    text-transform: uppercase; letter-spacing: 0.07em; color: var(--fg-2);
+  }
+  .q-body h4:first-child { margin-top: 0; }
+  .q-answer { font-size: var(--fs-body); color: var(--fg-0); line-height: 1.6; }
+  .q-answer.none { color: var(--fg-2); font-style: italic; }
+  .support {
+    display: flex; gap: 10px; align-items: baseline;
+    padding: 6px 0; border-bottom: 1px solid var(--border); font-size: var(--fs-small);
+  }
+  .support:last-child { border-bottom: 0; }
+  .support .cid {
+    font-family: var(--mono); font-size: var(--fs-label); color: var(--accent);
+    flex: none; cursor: pointer;
+  }
+  .support .cid:hover { text-decoration: underline; }
+  .support .host { color: var(--fg-2); font-size: var(--fs-label); flex: none; }
+  .conflict-note {
+    margin-top: 10px; padding: 9px 12px;
+    border: 1px solid rgba(242,109,109,.35); border-radius: var(--radius-sm);
+    background: rgba(242,109,109,.06); font-size: var(--fs-small);
+  }
+  .conflict-note .cid { color: var(--bad); font-family: var(--mono); font-size: var(--fs-label); }
+  details.tech { margin-top: 14px; }
+  details.tech summary {
+    cursor: pointer; color: var(--fg-2); font-size: var(--fs-small); user-select: none;
+  }
+  details.tech .kv { margin-top: 8px; }
+  .withdrawn-note { margin-top: 18px; }
+</style>
+</head>
+<body>
+<div class="page" id="app">
+  <div class="state-loading">Loading</div>
+</div>
+
+<script src="assets/shell.js"></script>
+<script>
+'use strict';
+const esc = AtlasShell.esc;
+const $app = () => document.getElementById('app');
+let stopPoll = null;
+let lastPayload = '';           // skip re-render when nothing changed
+const expanded = new Set();     // persist card expansion across polls
+
+function confPill(conf) {
+  return conf ? `<span class="pill conf-${esc(conf.toLowerCase())}">${esc(conf)}</span>` : '';
+}
+
+function processLink(callId) {
+  const cd = AtlasShell.activeCase();
+  const info = AtlasShell.caseInfo();
+  const trace = info && info.traces && info.traces.length ? info.traces[0].path : null;
+  if (!trace) return null;
+  return `dashboard.html?case=${encodeURIComponent(cd)}&trace=${encodeURIComponent(trace)}&call=${encodeURIComponent(callId)}`;
+}
+
+function supportRow(s) {
+  const link = s.evidence_call_ids && s.evidence_call_ids.length
+    ? processLink(s.evidence_call_ids[0]) : null;
+  const cid = link
+    ? `<a class="cid" href="${link}" title="Open the evidence trail in Process view">${esc(s.id)}</a>`
+    : `<span class="cid" title="Claim id">${esc(s.id)}</span>`;
+  return `
+    <div class="support">
+      ${cid}
+      ${confPill(s.confidence)}
+      <span>${esc(s.statement || '(no statement)')}</span>
+      ${s.host ? `<span class="host">${esc(s.host)}</span>` : ''}
+    </div>`;
+}
+
+function card(q) {
+  const bucket = (q.bucket === 'dropped' || q.bucket === 'withdrawn') ? 'open' : q.bucket;
+  const a = q.answer || {};
+  const isOpen = expanded.has(q.id);
+  const statusPill = `<span class="pill ${bucket === 'answered' ? 'ok' : bucket === 'partial' ? 'partial' : q.status === 'blocked_missing_evidence' ? 'warn' : 'info'}">${esc(q.status_label)}</span>`;
+  const disputed = a.conflicts && a.conflicts.length
+    ? '<span class="pill bad">disputed</span>' : '';
+
+  // Collapsed subtitle: one-line answer teaser when we have one.
+  const teaser = a.has_answer
+    ? `<div class="q-sub">${esc(a.summary.length > 180 ? a.summary.slice(0, 177) + '…' : a.summary)}</div>`
+    : '';
+
+  const answerHtml = a.has_answer
+    ? `<div class="q-answer">${esc(a.summary)}</div>`
+    : `<div class="q-answer none">No supporting finding is linked to this question yet.</div>`;
+
+  // The findings the answer rests on, by report id — the same ids the
+  // report's "Answers to the Investigation Questions" section cites.
+  const fids = (a.supporting || []).map(s => s.finding_id).filter(Boolean);
+  const supportedBy = fids.length
+    ? `<div class="small" style="margin-top:6px;color:var(--fg-2);">Supported by ${fids.map(esc).join(' · ')}</div>`
+    : '';
+
+  const supportHtml = (a.supporting || []).length
+    ? `<h4>Supporting claims &amp; evidence</h4>${a.supporting.map(supportRow).join('')}`
+    : '';
+
+  const conflictsHtml = (a.conflicts || []).length
+    ? a.conflicts.map(c => `
+        <div class="conflict-note">
+          <strong>Conflicting evidence</strong> —
+          <span class="cid">${esc(c.id)}</span> ${esc(c.statement || '')}
+        </div>`).join('')
+    : '';
+
+  const claimsLink = (a.supporting || []).length
+    ? `<div class="small" style="margin-top:12px;">
+         <a href="claim_view.html?case=${encodeURIComponent(AtlasShell.activeCase())}&node=${encodeURIComponent(a.supporting[0].id)}">Open in Case Findings →</a>
+       </div>`
+    : '';
+
+  return `
+  <div class="q-card ${isOpen ? 'expanded' : ''} ${q.derived ? 'derived' : ''}" data-qid="${esc(q.id)}" id="${esc(q.id)}">
+    <div class="q-head">
+      <span class="glyph ${esc(bucket)}">${esc(q.glyph)}</span>
+      <span class="qtext">${esc(q.text)}</span>
+      <span class="trail">
+        ${q.derived ? '<span class="pill neutral" title="Follow-up Atlas raised itself while investigating">Atlas follow-up</span>' : ''}
+        ${disputed}
+        ${a.has_answer ? confPill(a.confidence) : ''}
+        ${statusPill}
+        <span class="chev">▶</span>
+      </span>
+    </div>
+    ${teaser}
+    <div class="q-body">
+      <h4>Answer</h4>
+      ${answerHtml}
+      ${supportedBy}
+      ${conflictsHtml}
+      ${supportHtml}
+      ${claimsLink}
+      <details class="tech">
+        <summary>Technical details</summary>
+        <div class="kv">
+          <span class="k">Task id</span><span class="v mono">${esc(q.id)}</span>
+          <span class="k">Internal status</span><span class="v mono">${esc(q.status)}</span>
+          <span class="k">Created</span><span class="v">${esc(q.created_at || '—')}</span>
+          <span class="k">Updated</span><span class="v">${esc(q.updated_at || '—')}</span>
+          ${(a.missing_claim_ids || []).length
+            ? `<span class="k">Unresolved claim ids</span><span class="v mono">${esc(a.missing_claim_ids.join(', '))}</span>` : ''}
+        </div>
+      </details>
+    </div>
+  </div>`;
+}
+
+function render(data) {
+  const questions = data.questions || [];
+  const progress = data.progress || {};
+  // data.busy is this case only; the shell's chip covers every case and
+  // owns itself (refreshBusy in assets/shell.js). Writing it from here
+  // overwrote a live run in another case with "idle".
+
+  const investigator = questions.filter(q => !q.derived);
+  const derived = questions.filter(q => q.derived);
+
+  const listHtml = questions.length
+    ? investigator.map(card).join('')
+      + (derived.length
+        ? `<div class="card-h" style="margin:22px 0 10px;">Atlas follow-ups
+             <span class="h-trail">questions Atlas raised itself</span></div>`
+          + derived.map(card).join('')
+        : '')
+    : `<div class="state-empty">No investigation questions.
+        <div class="hint">Add your questions as bullets under
+        <code>## Investigation Requests</code> in this case's
+        <code>CASE.md</code>, then run <code>atlas run</code> or
+        <code>atlas rerun</code>.</div></div>`;
+
+  const dropped = data.dropped || data.withdrawn || [];
+
+  $app().innerHTML = `
+    <h1 class="page-title">Questions</h1>
+    <p class="page-sub">What you asked Atlas — and what it answered.
+      ${progress.answered || 0} answered · ${progress.partial || 0} partially answered · ${progress.open || 0} open</p>
+    <div id="qlist">${listHtml}</div>
+    ${dropped.length ? `
+      <details class="withdrawn-note">
+        <summary class="dim small" style="cursor:pointer;">${dropped.length} dropped question${dropped.length > 1 ? 's' : ''} (removed from CASE.md)</summary>
+        <div style="margin-top:8px;">${dropped.map(card).join('')}</div>
+      </details>` : ''}`;
+
+  $app().querySelectorAll('.q-head').forEach(h =>
+    h.addEventListener('click', (ev) => {
+      if (ev.target.closest('a')) return;
+      const cardEl = h.closest('.q-card');
+      const qid = cardEl.dataset.qid;
+      cardEl.classList.toggle('expanded');
+      if (cardEl.classList.contains('expanded')) expanded.add(qid);
+      else expanded.delete(qid);
+    }));
+
+  // Deep link: #task-0002 expands + scrolls to that question (once).
+  const hash = decodeURIComponent(location.hash.replace(/^#/, ''));
+  if (hash && !render._hashDone) {
+    const el = document.getElementById(hash);
+    if (el) {
+      render._hashDone = true;
+      expanded.add(hash);
+      el.classList.add('expanded');
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+  }
+}
+
+async function refresh() {
+  const cd = AtlasShell.activeCase();
+  if (!cd) {
+    $app().innerHTML = `<h1 class="page-title">Questions</h1>
+      <div class="state-empty">Select a case to see its investigation questions.</div>`;
+    return;
+  }
+  try {
+    const data = await AtlasShell.api('questions', { case: cd });
+    if (AtlasShell.activeCase() !== cd) return;
+    const payload = JSON.stringify(data);
+    if (payload === lastPayload) return;   // shell owns the activity chip
+    lastPayload = payload;
+    render(data);
+  } catch (e) {
+    if (AtlasShell.activeCase() !== cd) return;
+    if (AtlasShell.isTransient(e)) return;   // keep the page; the next poll retries
+    lastPayload = '';   // the error box replaced the render, so unchanged data must draw again
+    $app().innerHTML = `<div class="state-error">Could not load questions.\n${esc(e.message)}</div>`;
+  }
+}
+
+AtlasShell.init({
+  page: 'questions',
+  onCase: () => {
+    if (stopPoll) stopPoll();
+    lastPayload = '';
+    expanded.clear();
+    render._hashDone = false;
+    $app().innerHTML = '<div class="state-loading">Loading</div>';
+    stopPoll = AtlasShell.poll(refresh, 3000);
+  },
+});
+</script>
+</body>
+</html>

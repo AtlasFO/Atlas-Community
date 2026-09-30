@@ -1,0 +1,2861 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Atlas · Settings</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<link rel="stylesheet" href="assets/atlas.css" />
+<script src="assets/i18n.js"></script>
+<style>
+  /* View-specific layout only; tokens and shared components come from
+     atlas.css. The page is a sidebar of sections in four groups beside one
+     section at a time. A section is built from groups: a group holds setting
+     rows (name and help on the left, the control on the right), a form or a
+     table, and ends in a footer with its own save and save state. */
+  .set-shell {
+    max-width: 1240px; margin: 0 auto; padding: 22px 20px 72px;
+    display: grid; grid-template-columns: 232px minmax(0, 1fr); gap: 40px;
+    align-items: start;
+  }
+  .set-main { min-width: 0; }
+
+  /* ── Sidebar ──────────────────────────────────────────────────────── */
+  .set-side {
+    position: sticky; top: calc(var(--shell-h, 92px) + 18px);
+    max-height: calc(100vh - var(--shell-h, 92px) - 36px); overflow-y: auto;
+    padding: 2px 8px 12px 10px; margin-left: -10px; scrollbar-width: thin;
+  }
+  .side-title { font-size: var(--fs-title); font-weight: 650; letter-spacing: -.01em; line-height: 1.2; margin: 0 0 14px 10px; }
+  .side-search { position: relative; margin: 0 0 6px; }
+  .side-search svg { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); color: var(--fg-2); pointer-events: none; }
+  .side-search input { width: 100%; padding-left: 32px; padding-right: 34px; background: var(--bg-2); }
+  .side-search kbd {
+    position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
+    font: 11px/16px var(--mono); color: var(--fg-2); padding: 0 5px;
+    border: 1px solid var(--border); border-radius: 4px; background: var(--bg-3);
+  }
+  .nav-label {
+    font-size: var(--fs-label); font-weight: 650; letter-spacing: .07em; text-transform: uppercase;
+    color: var(--fg-2); padding: 16px 10px 5px;
+  }
+  .nav-item {
+    position: relative; display: flex; align-items: center; gap: 10px;
+    padding: 6px 10px; margin: 1px 0; border-radius: var(--radius-sm);
+    color: var(--fg-1); text-decoration: none; font-size: var(--fs-body);
+    transition: background .12s var(--ease), color .12s var(--ease);
+  }
+  .nav-item svg { flex: none; color: var(--fg-2); transition: color .12s var(--ease); }
+  .nav-item:hover { background: var(--bg-2); color: var(--fg-0); text-decoration: none; }
+  .nav-item[aria-current="page"] { background: var(--bg-3); color: var(--fg-0); font-weight: 600; }
+  .nav-item[aria-current="page"] svg { color: var(--accent); }
+  .nav-item[aria-current="page"]::before {
+    content: ""; position: absolute; left: -9px; top: 7px; bottom: 7px; width: 3px;
+    border-radius: 999px; background: var(--accent);
+  }
+  /* A count or a state beside a section's name, in the system's micro type. */
+  .side-badge {
+    margin-left: auto; min-width: 18px; text-align: center; font-size: 10px; font-weight: 700;
+    line-height: 16px; padding: 0 5px; border-radius: 999px; color: var(--fg-2);
+    font-variant-numeric: tabular-nums;
+  }
+  .side-badge:empty { display: none; }
+  .side-badge.bad { color: var(--bad); background: var(--bad-soft); }
+  .side-badge.warn { color: var(--warn); background: var(--warn-soft); }
+  .nav-empty { font-size: var(--fs-small); color: var(--fg-2); padding: 12px 10px; }
+  .menu-btn { display: none; }
+
+  /* ── Section ──────────────────────────────────────────────────────── */
+  .set-sec[hidden] { display: none; }
+  .sec-head {
+    display: flex; align-items: flex-end; justify-content: space-between;
+    gap: 12px 20px; flex-wrap: wrap; margin-bottom: 22px;
+  }
+  .sec-head > div:first-child { min-width: 0; }
+  .sec-crumb { font-size: var(--fs-small); color: var(--fg-2); margin: 0 0 6px; }
+  /* The page has one title, Settings; a section's name is the subheading
+     level below it (17px), and a group's name is a card label. */
+  .sec-title { font-size: 17px; line-height: 1.3; letter-spacing: -.01em; margin: 0; font-weight: 600; text-wrap: balance; }
+  .sec-lede { margin: 6px 0 0; color: var(--fg-1); font-size: var(--fs-body); max-width: 70ch; text-wrap: pretty; }
+  .sec-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+  /* A group: rows, a form or a table, and a footer that saves it. */
+  .set-group {
+    background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius);
+    margin-bottom: 20px; box-shadow: var(--shadow-sm);
+  }
+  .set-group[hidden] { display: none; }
+  .group-head {
+    display: flex; align-items: flex-start; justify-content: space-between; gap: 12px 16px;
+    flex-wrap: wrap; padding: 14px 18px 12px; border-bottom: 1px solid var(--border);
+  }
+  .group-head > div:first-child { min-width: 0; }
+  .group-head h3 {
+    margin: 0; font-size: var(--fs-label); font-weight: 650; text-transform: uppercase;
+    letter-spacing: .08em; color: var(--fg-2); display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  }
+  .group-head h3 .pill { text-transform: none; letter-spacing: 0; }
+  .group-head p { margin: 5px 0 0; color: var(--fg-1); font-size: var(--fs-small); max-width: 72ch; text-wrap: pretty; }
+  .group-head .tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .set-row {
+    display: grid; grid-template-columns: minmax(0, 1fr) minmax(220px, 320px);
+    gap: 10px 28px; align-items: center; padding: 14px 18px; border-top: 1px solid var(--border);
+  }
+  .set-group > .set-row:first-child, .group-head + .set-row { border-top: 0; }
+  .row-label { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-weight: 600; font-size: var(--fs-body); }
+  .row-label label { cursor: pointer; }
+  .row-help { color: var(--fg-1); font-size: var(--fs-small); margin: 2px 0 0; max-width: 64ch; text-wrap: pretty; }
+  .row-ctl { display: flex; align-items: center; justify-content: flex-end; gap: 8px; min-width: 0; flex-wrap: wrap; }
+  /* :where() keeps this rule weaker than a sized control's own class. */
+  .row-ctl > :where(input:not([type=checkbox]), select) { width: 100%; }
+  .row-ctl .short { width: 110px; flex: none; }
+  .row-ctl .unit { font-size: var(--fs-small); color: var(--fg-2); }
+  .row-ctl.stack { flex-direction: column; align-items: stretch; }
+  .group-foot {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px 16px; flex-wrap: wrap;
+    padding: 10px 18px; border-top: 1px solid var(--border); background: var(--bg-1);
+    border-radius: 0 0 var(--radius) var(--radius); font-size: var(--fs-small); color: var(--fg-2);
+  }
+  .group-foot .acts { display: flex; gap: 8px; margin-left: auto; flex-wrap: wrap; align-items: center; }
+  .note { font-size: var(--fs-small); color: var(--fg-2); margin: 0; }
+  .fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; padding: 16px 18px; }
+  .field { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+  .field.full { grid-column: 1 / -1; }
+  .field > label:not(.check-line) { font-size: var(--fs-small); font-weight: 600; color: var(--fg-0); }
+  .field input:not([type=checkbox]), .field select { width: 100%; }
+  .field-hint { font-size: var(--fs-small); color: var(--fg-2); margin: 0; }
+  .check-line { display: inline-flex; align-items: center; gap: 9px; font-size: var(--fs-small); cursor: pointer; }
+
+  /* A message a save or a check leaves, in a footer or under a table. */
+  .say { display: inline-flex; align-items: center; gap: 6px; min-height: 18px; }
+  /* An empty message line keeps its place in the accessibility tree, so
+     the first message is announced; it just takes no room. */
+  .say:empty { min-height: 0; }
+  .say[data-state="ok"] { color: var(--ok); }
+  .say[data-state="err"] { color: var(--bad); }
+  .say[data-state="dirty"] { color: var(--warn); }
+  .say[data-state="dirty"]::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--warn); }
+  p.say { display: block; margin: 0; padding: 0 18px 12px; font-size: var(--fs-small); }
+  p.say:empty { padding: 0; }
+
+  .say.block { display: block; margin: 0 0 14px; font-size: var(--fs-small); }
+  .say.block:empty { margin: 0; }
+  .group-note { margin: 0; padding: 12px 18px 0; font-size: var(--fs-small); color: var(--fg-0); }
+  .group-note[hidden] { display: none; }
+  #osint-fields > .set-row:first-child { border-top: 0; }
+  .i { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor;
+       stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+  .i.sm { width: 14px; height: 14px; }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+  /* ── Controls ─────────────────────────────────────────────────────── */
+  a.btn {
+    display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; border-radius: var(--radius-sm);
+    padding: 6px 14px; border: 1px solid var(--border); background: var(--bg-3); color: var(--fg-0);
+    text-decoration: none; white-space: nowrap; transition: background .15s var(--ease);
+  }
+  a.btn:hover { background: var(--bg-hl); text-decoration: none; }
+  button.btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; white-space: nowrap; }
+  button.btn.ghost { background: transparent; border-color: transparent; color: var(--fg-1); }
+  button.btn.ghost:hover { background: var(--bg-3); color: var(--fg-0); }
+  button.btn.ghost.bad { color: var(--bad); }
+  button.btn.sm { padding: 4px 9px; font-size: var(--fs-small); }
+  button.btn.icon { padding: 6px; }
+  .btn:focus-visible { outline: none; border-color: var(--accent); box-shadow: var(--shadow-glow); }
+
+  /* On or off, announced as a switch. */
+  .switch {
+    appearance: none; -webkit-appearance: none; margin: 0; flex: none;
+    width: 34px; height: 20px; border-radius: 999px; position: relative; cursor: pointer;
+    background: var(--bg-hl); border: 1px solid var(--border-strong);
+    transition: background .15s var(--ease), border-color .15s var(--ease);
+  }
+  .switch::after {
+    content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px;
+    border-radius: 50%; background: var(--fg-1); transition: transform .18s var(--ease), background .15s;
+  }
+  .switch:checked { background: var(--accent); border-color: var(--accent); }
+  .switch:checked::after { transform: translateX(14px); background: var(--bg-2); }
+  .switch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .switch:disabled { opacity: .45; cursor: default; }
+
+  /* Hint card: shown on hover and on keyboard focus of what it explains,
+     not on the focus a mouse click leaves. display, not visibility: a hidden
+     card that keeps its box can widen a narrow screen into sideways scroll.
+     The pointer can move onto it across the gap its ::before bridges, and
+     Escape hides it (the tip-off class). */
+  .cfg-check { position: relative; }
+  .set-row.cfg-check .hint-card { left: 18px; top: calc(100% - 4px); }
+  .hint-icon { color: var(--fg-2); flex: none; }
+  .hint-card {
+    position: absolute; top: calc(100% + 6px); left: 0; z-index: 20;
+    width: max-content; max-width: min(340px, calc(100vw - 64px));
+    padding: 9px 11px; border-radius: var(--radius);
+    background: var(--bg-2); border: 1px solid var(--border-strong);
+    box-shadow: var(--shadow-md); color: var(--fg-0); font-weight: 400;
+    font-size: var(--fs-small); line-height: 1.45; display: none;
+  }
+  .hint-card::before { content: ""; position: absolute; left: 0; right: 0; top: -8px; height: 8px; }
+  /* Separate rules: a browser without :has() drops only its own rule. */
+  .cfg-check:hover .hint-card { display: block; }
+  .cfg-check:has(:focus-visible) .hint-card { display: block; }
+  .cfg-check.tip-off .hint-card { display: none; }
+  .cfg-check:hover .hint-icon { color: var(--accent); }
+  .cfg-check:has(:focus-visible) .hint-icon { color: var(--accent); }
+
+  /* Segmented control; it sets the select beside it, which the loaders read. */
+  .seg { display: inline-flex; padding: 2px; background: var(--bg-3); border: 1px solid var(--border); border-radius: var(--radius-sm); flex-wrap: wrap; }
+  .seg button {
+    font: inherit; font-size: var(--fs-small); border: 0; background: transparent; color: var(--fg-1);
+    padding: 4px 11px; border-radius: 4px; cursor: pointer;
+  }
+  .seg button:hover { color: var(--fg-0); }
+  .seg button[aria-pressed="true"] { background: var(--bg-2); color: var(--fg-0); box-shadow: var(--shadow-sm); font-weight: 600; }
+  .seg button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 10px 22px; margin-bottom: 14px; }
+  .toolbar .lbl { font-size: var(--fs-small); color: var(--fg-2); margin-right: 8px; }
+
+  /* Figures in a row of tiles with hairline dividers. */
+  /* Hairlines between tiles are the tiles' own borders, pushed 1px past
+     the edge so the frame clips the outer ones; an empty last slot then
+     shows the card surface, not a block of divider colour. */
+  .stats {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
+    background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius);
+    overflow: hidden; margin-bottom: 20px;
+  }
+  /* The tiles carry atlas.css's stat type (.v the number, .l its label). */
+  .stats .stat {
+    background: var(--bg-2); padding: 12px 16px; min-width: 0;
+    border-right: 1px solid var(--border); border-bottom: 1px solid var(--border); margin: 0 -1px -1px 0;
+  }
+  .stats .stat .v { overflow-wrap: anywhere; line-height: 1.2; }
+  .stat-s { font-size: var(--fs-small); color: var(--fg-1); margin-top: 2px; }
+
+  /* ── Tables ───────────────────────────────────────────────────────── */
+  .tbl-wrap { overflow-x: auto; position: relative; }
+  table.cfg-table { width: 100%; border-collapse: collapse; font-size: var(--fs-small); }
+  table.cfg-table th {
+    text-align: left; font-size: var(--fs-label); font-weight: 600; color: var(--fg-2); white-space: nowrap;
+    padding: 10px 14px; border-bottom: 1px solid var(--border);
+  }
+  table.cfg-table td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+  /* A URL, a model id or an address may break anywhere, so a cell holding
+     one does not push a table's actions off a phone's screen. */
+  table.cfg-table td:not(.r):not(.nowrap) { overflow-wrap: anywhere; }
+  table.cfg-table tbody tr:last-child td { border-bottom: 0; }
+  table.cfg-table tbody tr:hover td { background: var(--bg-3); }
+  table.cfg-table td.r, table.cfg-table th.r { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  table.cfg-table td.acts { text-align: right; white-space: nowrap; }
+  /* A cost with its unpriced count: the count may wrap under the figure. */
+  table.cfg-table td.r.wrap { white-space: normal; min-width: 7.5em; }
+  table.cfg-table td.r.wrap .pill { margin: 2px 0 0 4px; }
+  /* A figure's second line may wrap; the runs tables sit beside the
+     sidebar, so their cells are a little tighter. */
+  table.cfg-table td.r .cell-sub { white-space: normal; }
+  #usage-periods table.cfg-table th, #usage-periods table.cfg-table td { padding-left: 10px; padding-right: 10px; }
+  table.cfg-table input[type=number] { width: 7.5em; padding: 5px 8px; }
+  table.cfg-table select { padding: 5px 8px; max-width: 100%; }
+  .cell-sub { display: block; color: var(--fg-2); font-size: var(--fs-small); }
+  .nowrap { white-space: nowrap; }
+  .placeholder { color: var(--fg-2); font-size: var(--fs-small); padding: 18px 14px; text-align: center; }
+  .role-chip-sm {
+    display: inline-block; font: var(--fs-label)/18px var(--mono); padding: 0 7px; margin: 2px 4px 2px 0;
+    border-radius: 5px; background: var(--bg-3); color: var(--fg-0); border: 1px solid var(--border);
+  }
+  /* Token spend: one table per period, all in one scroll area. */
+  #usage-periods h4 { margin: 0; padding: 10px 14px; font-size: 12.5px; background: var(--bg-1); border-bottom: 1px solid var(--border); }
+  #usage-periods h4:not(:first-child) { border-top: 1px solid var(--border); }
+  #usage-periods .field-hint { display: inline; margin-left: 6px; }
+
+  /* Pager under a long list: which rows are shown, the pages, the size. */
+  .pager {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px;
+    padding: 10px 14px; border-top: 1px solid var(--border); font-size: var(--fs-small); color: var(--fg-1);
+  }
+  .pager[hidden] { display: none; }
+  .pager-nav { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+  .pager-nav button.btn {
+    min-width: 32px; min-height: 30px; padding: 4px 9px; display: inline-flex;
+    align-items: center; justify-content: center;
+  }
+  .pager-nav button.btn[aria-current="page"] { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+  .pager-gap { padding: 0 3px; color: var(--fg-2); }
+  .pager-size { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+  .pager-size select { padding: 4px 8px; }
+
+  /* ── Disclosures, danger zones, inline confirmation ───────────────── */
+  details.more { margin: -6px 0 20px; }
+  details.more > summary {
+    display: inline-flex; align-items: center; gap: 6px; cursor: pointer; list-style: none;
+    font-size: var(--fs-small); color: var(--fg-1); padding: 4px 2px;
+  }
+  details.more > summary::-webkit-details-marker { display: none; }
+  details.more > summary:hover { color: var(--fg-0); }
+  details.more > summary svg { transition: transform .15s var(--ease); }
+  details.more[open] > summary svg { transform: rotate(90deg); }
+  .more-body { color: var(--fg-1); font-size: var(--fs-small); max-width: 76ch; padding: 4px 0 0 22px; }
+  .more-body p { margin: 0 0 8px; }
+  .more-body pre {
+    background: var(--bg-3); border: 1px solid var(--border); border-radius: var(--radius-sm);
+    padding: 10px 12px; overflow-x: auto; margin: 8px 0; color: var(--fg-0);
+  }
+  .more-body ol, .more-body ul { margin: 6px 0; padding-left: 20px; }
+  .set-group.danger { border-color: var(--bad-line); box-shadow: none; }
+  .set-group.danger .group-head h3 { color: var(--bad); }
+  .confirm { display: inline-flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; }
+  .confirm-text { font-size: var(--fs-small); color: var(--fg-0); }
+  .banner {
+    margin: 0 0 20px; padding: 10px 14px; border-radius: var(--radius);
+    border: 1px solid var(--warn-line); background: var(--warn-soft); color: var(--fg-0); font-size: var(--fs-small);
+  }
+  .banner.bad { border-color: var(--bad-line); background: var(--bad-soft); }
+  .banner[hidden] { display: none; }
+
+  /* ── Overview ─────────────────────────────────────────────────────── */
+  .h-sub { font-size: var(--fs-label); font-weight: 650; letter-spacing: .08em; text-transform: uppercase; color: var(--fg-2); margin: 0 0 10px; }
+  .attn { display: grid; gap: 1px; background: var(--border); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; margin-bottom: 26px; }
+  .attn-row {
+    display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 12px;
+    padding: 12px 16px; background: var(--bg-2); color: var(--fg-1); text-decoration: none; font-size: var(--fs-small);
+  }
+  a.attn-row:hover { background: var(--bg-3); text-decoration: none; }
+  .attn-row strong { color: var(--fg-0); font-weight: 600; }
+  .attn-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); }
+  .attn-dot.bad { background: var(--bad); }
+  .attn-dot.warn { background: var(--warn); }
+  .attn-dot.wait { background: var(--fg-2); }
+  .attn-go { display: inline-flex; align-items: center; gap: 3px; color: var(--accent); font-size: var(--fs-small); white-space: nowrap; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(236px, 1fr)); gap: 16px; }
+  .tile {
+    display: flex; flex-direction: column; gap: 3px; padding: 14px 16px; min-width: 0;
+    background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius);
+    color: var(--fg-1); text-decoration: none; font-size: var(--fs-small);
+    transition: border-color .15s var(--ease), background .15s var(--ease);
+  }
+  a.tile:hover { border-color: var(--border-strong); background: var(--bg-3); text-decoration: none; }
+  .tile-k { display: flex; align-items: center; gap: 8px; color: var(--fg-2); font-size: var(--fs-small); }
+  .tile-k .pill { margin-left: auto; }
+  .tile-v { color: var(--fg-0); font-size: var(--fs-body); font-weight: 600; overflow-wrap: anywhere; }
+
+  /* Keyboard focus shows the accent glow on links and summaries too. */
+  .nav-item:focus-visible, a.tile:focus-visible, a.attn-row:focus-visible,
+  details.more > summary:focus-visible, .sec-title:focus-visible {
+    outline: none; box-shadow: var(--shadow-glow); border-radius: var(--radius-sm);
+  }
+  .sec-title:focus:not(:focus-visible) { outline: none; }
+  .sprite { position: absolute; width: 0; height: 0; }
+  .filter-input { width: 260px; max-width: 100%; }
+  .lead-note { margin: -8px 0 16px; }
+  .say.pad { padding-top: 10px; }
+  .log-wrap { margin: 0; padding: 0 18px 14px; }
+  .log-wrap pre { white-space: pre-wrap; }
+  .ask-input { width: 15em; max-width: 100%; }
+
+  /* ── Narrow screens ───────────────────────────────────────────────── */
+  @media (max-width: 980px) {
+    .set-shell { grid-template-columns: minmax(0, 1fr); gap: 16px; padding: 16px 16px 56px; }
+    /* The page title stays in the accessibility tree while the menu is
+       closed; only the rest of the sidebar folds away. */
+    .side-title { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; margin: 0; }
+    .set-side {
+      position: static; max-height: none; margin: 0; padding: 10px 12px 12px;
+      background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius);
+    }
+    .set-side:not(.open) { padding: 0; border: 0; background: none; margin-top: -16px; }
+    .set-side:not(.open) > :not(.side-title) { display: none; }
+    .hide-narrow { display: none; }
+    /* atlas.css keeps a config table's cells on one line on phones and lets
+       the table scroll; this page hides its secondary columns instead, so
+       its text cells wrap and the row actions stay on screen. Figures stay
+       on one line. */
+    table.cfg-table td:not(.r):not(.nowrap) { white-space: normal; }
+    .menu-btn {
+      display: flex; align-items: center; gap: 10px; width: 100%; padding: 10px 14px; text-align: left;
+      background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius);
+      color: var(--fg-0); font: inherit; font-size: 14px; font-weight: 600; cursor: pointer;
+    }
+    .menu-btn small { display: block; color: var(--fg-2); font-weight: 500; font-size: var(--fs-small); }
+    .menu-btn svg:last-child { margin-left: auto; transition: transform .15s var(--ease); }
+    .menu-btn[aria-expanded="true"] svg:last-child { transform: rotate(180deg); }
+    .nav-item[aria-current="page"]::before { display: none; }
+    .set-row { grid-template-columns: minmax(0, 1fr); }
+    .row-ctl { justify-content: flex-start; }
+    .fields { grid-template-columns: minmax(0, 1fr); }
+  }
+  @media (max-width: 560px) {
+    .group-head, .set-row, .group-foot { padding-left: 16px; padding-right: 16px; }
+    .fields { padding: 14px 16px; }
+    p.say { padding-left: 16px; padding-right: 16px; }
+    .pager-size { margin-left: 0; }
+    .hide-small { display: none; }
+    table.cfg-table td.acts { white-space: normal; }
+    table.cfg-table input[type=number] { width: 5.5em; }
+    table.cfg-table th, table.cfg-table td { padding-left: 10px; padding-right: 10px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .switch, .switch::after, .nav-item, .tile, details.more > summary svg { transition: none; }
+  }
+</style>
+</head>
+<body>
+<svg class="sprite" aria-hidden="true">
+  <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="7" height="7" rx="1.6"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.6"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.6"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.6"/></symbol>
+  <symbol id="i-chip" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/><rect x="9.5" y="9.5" width="5" height="5" rx=".8"/><path d="M9 2.8V6M15 2.8V6M9 18v3.2M15 18v3.2M2.8 9H6M2.8 15H6M18 9h3.2M18 15h3.2"/></symbol>
+  <symbol id="i-bars" viewBox="0 0 24 24"><path d="M4 20h16"/><rect x="5.5" y="11" width="3" height="6.5" rx=".8"/><rect x="10.5" y="6" width="3" height="11.5" rx=".8"/><rect x="15.5" y="13" width="3" height="4.5" rx=".8"/></symbol>
+  <symbol id="i-tag" viewBox="0 0 24 24"><path d="M3.5 12.2V4.8a1.3 1.3 0 0 1 1.3-1.3h7.4l8.3 8.3a1.3 1.3 0 0 1 0 1.8l-7.4 7.4a1.3 1.3 0 0 1-1.8 0z"/><circle cx="8.2" cy="8.2" r="1.4"/></symbol>
+  <symbol id="i-users" viewBox="0 0 24 24"><circle cx="9" cy="8.5" r="3.2"/><path d="M3.5 19.5c.6-3.2 2.9-5 5.5-5s4.9 1.8 5.5 5"/><path d="M15.5 5.6a3.2 3.2 0 0 1 0 6"/><path d="M17.5 14.8c1.6.6 2.7 2.2 3 4.7"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></symbol>
+  <symbol id="i-pulse" viewBox="0 0 24 24"><path d="M3 12h4l2.5-6 5 12 2.5-6H21"/></symbol>
+  <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3.5 7.2a1.7 1.7 0 0 1 1.7-1.7h4.1l2 2.2h7.5a1.7 1.7 0 0 1 1.7 1.7v8.4a1.7 1.7 0 0 1-1.7 1.7H5.2a1.7 1.7 0 0 1-1.7-1.7z"/></symbol>
+  <symbol id="i-key" viewBox="0 0 24 24"><circle cx="8" cy="15.5" r="3.8"/><path d="M10.8 12.8 19.5 4.1M16.5 7.1l2.3 2.3M14.3 9.3l1.8 1.8"/></symbol>
+  <symbol id="i-matrix" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="1.8"/><path d="M3.5 9.5h17M9.2 4.5v15M14.8 4.5v15"/></symbol>
+  <symbol id="i-wrench" viewBox="0 0 24 24"><path d="M14.7 6.3a4 4 0 0 0-5.1 5.1l-5.4 5.4a1.6 1.6 0 0 0 2.3 2.3l5.4-5.4a4 4 0 0 0 5.1-5.1l-2.4 2.4-2.3-.3-.3-2.3z"/></symbol>
+  <symbol id="i-plug" viewBox="0 0 24 24"><path d="M9 3.5v4M15 3.5v4"/><path d="M6.5 7.5h11v3.2a5.5 5.5 0 0 1-11 0z"/><path d="M12 16.2v4.3"/></symbol>
+  <symbol id="i-server" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="6" rx="1.5"/><rect x="3.5" y="13.5" width="17" height="6" rx="1.5"/><path d="M7 7.5h.01M7 16.5h.01"/></symbol>
+  <symbol id="i-mail" viewBox="0 0 24 24"><rect x="3.5" y="5.5" width="17" height="13" rx="1.8"/><path d="m4 6.8 8 6 8-6"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="m20 20-4.4-4.4"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 11v5.2"/><path d="M12 7.8h.01"/></symbol>
+  <symbol id="i-chev-r" viewBox="0 0 24 24"><path d="m9.5 6 6 6-6 6"/></symbol>
+  <symbol id="i-chev-l" viewBox="0 0 24 24"><path d="m14.5 6-6 6 6 6"/></symbol>
+  <symbol id="i-chev-d" viewBox="0 0 24 24"><path d="m6 9.5 6 6 6-6"/></symbol>
+  <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v11M7.5 10.5 12 15l4.5-4.5M4.5 19.5h15"/></symbol>
+  <symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 15V4M7.5 8.5 12 4l4.5 4.5M4.5 19.5h15"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3"/><path d="M19.5 4.5v4h-4"/></symbol>
+  <symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></symbol>
+  <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
+</svg>
+<div class="page wide" id="app">
+<div class="set-shell">
+  <button class="menu-btn" id="menu-btn" type="button" aria-expanded="false" aria-controls="set-side">
+    <svg class="i" aria-hidden="true"><use href="#i-menu"/></svg>
+    <span><small>Settings</small><span id="menu-current">Overview</span></span>
+    <svg class="i" aria-hidden="true"><use href="#i-chev-d"/></svg>
+  </button>
+
+  <aside class="set-side" id="set-side" aria-label="Settings sections">
+    <h1 class="side-title">Settings</h1>
+    <div class="side-search">
+      <svg class="i" aria-hidden="true"><use href="#i-search"/></svg>
+      <input id="nav-search" type="search" placeholder="Search settings" aria-label="Search settings" autocomplete="off" />
+      <kbd aria-hidden="true">/</kbd>
+    </div>
+    <nav id="set-nav">
+      <a class="nav-item" href="#overview" data-tab="overview" data-name="Overview"
+         data-kw="status attention summary health home glance">
+        <svg class="i" aria-hidden="true"><use href="#i-grid"/></svg>Overview</a>
+      <div class="nav-group">
+        <div class="nav-label">AI models</div>
+        <a class="nav-item" href="#llm" data-tab="llm" data-name="Providers"
+           data-kw="llm model endpoint base url api key keyring preset role analyst reason dair report reviewer thinking effort level test connection override">
+          <svg class="i" aria-hidden="true"><use href="#i-chip"/></svg>Providers<span class="side-badge" id="badge-llm"></span></a>
+        <a class="nav-item" href="#usage" data-tab="usage" data-name="Token spend"
+           data-kw="usage tokens cost ledger runs calls cached reasoning export csv delete entries month week">
+          <svg class="i" aria-hidden="true"><use href="#i-bars"/></svg>Token spend</a>
+        <a class="nav-item" href="#prices" data-tab="prices" data-name="Prices"
+           data-kw="price per million currency eur autoremove unpriced cost model">
+          <svg class="i" aria-hidden="true"><use href="#i-tag"/></svg>Prices<span class="side-badge" id="badge-prices"></span></a>
+      </div>
+      <div class="nav-group">
+        <div class="nav-label">People</div>
+        <a class="nav-item" href="#users" data-tab="users" data-name="Users"
+           data-kw="account user username email role admin analyst viewer password add create disable enable reset delete">
+          <svg class="i" aria-hidden="true"><use href="#i-users"/></svg>Users<span class="side-badge" id="badge-users"></span></a>
+        <a class="nav-item" href="#sessions" data-tab="sessions" data-name="Sign-in and sessions"
+           data-kw="session idle timeout absolute limit logout sign in viewer chat access">
+          <svg class="i" aria-hidden="true"><use href="#i-clock"/></svg>Sign-in and sessions</a>
+        <a class="nav-item" href="#activity" data-tab="activity" data-name="Activity log"
+           data-kw="audit log activity sign in out run started stopped retention export csv address">
+          <svg class="i" aria-hidden="true"><use href="#i-pulse"/></svg>Activity log</a>
+      </div>
+      <div class="nav-group">
+        <div class="nav-label">Investigation</div>
+        <a class="nav-item" href="#cases" data-tab="cases" data-name="Cases"
+           data-kw="case folder rename delete deleted mounted traced runs activity">
+          <svg class="i" aria-hidden="true"><use href="#i-folder"/></svg>Cases<span class="side-badge" id="badge-cases"></span></a>
+        <a class="nav-item" href="#osint" data-tab="osint" data-name="Enrichment keys"
+           data-kw="osint enrichment virustotal abuseipdb otx alienvault urlscan misp api key keyring">
+          <svg class="i" aria-hidden="true"><use href="#i-key"/></svg>Enrichment keys<span class="side-badge" id="badge-osint"></span></a>
+        <a class="nav-item" href="#mitre" data-tab="mitre" data-name="MITRE ATT&amp;CK"
+           data-kw="mitre attack att&amp;ck techniques groups software mitigations refresh tables">
+          <svg class="i" aria-hidden="true"><use href="#i-matrix"/></svg>MITRE ATT&amp;CK</a>
+      </div>
+      <div class="nav-group">
+        <div class="nav-label">System</div>
+        <a class="nav-item" href="#tools" data-tab="tools" data-name="Tool health"
+           data-kw="tools programs problems missing installed install.sh health binaries path">
+          <svg class="i" aria-hidden="true"><use href="#i-wrench"/></svg>Tool health<span class="side-badge" id="badge-tools"></span></a>
+        <a class="nav-item" href="#plugins" data-tab="plugins" data-name="Plugins"
+           data-kw="plugin plugins addon extension upload zip enable disable version author">
+          <svg class="i" aria-hidden="true"><use href="#i-plug"/></svg>Plugins<span class="side-badge" id="badge-plugins"></span></a>
+        <a class="nav-item" href="#share" data-tab="share" data-name="Network share"
+           data-kw="smb samba windows share network cases folder password mount">
+          <svg class="i" aria-hidden="true"><use href="#i-server"/></svg>Network share<span class="side-badge" id="badge-share"></span></a>
+        <a class="nav-item" href="#mail" data-tab="mail" data-name="Mail"
+           data-kw="smtp mail email host server password reset starttls tls port from address">
+          <svg class="i" aria-hidden="true"><use href="#i-mail"/></svg>Mail<span class="side-badge" id="badge-mail"></span></a>
+      </div>
+      <p class="nav-empty" id="nav-empty" hidden>No setting matches.</p>
+    </nav>
+  </aside>
+
+  <main class="set-main" id="set-main" tabindex="-1">
+    <!-- ═══ Overview ═══════════════════════════════════════════════════ -->
+    <section class="set-sec" id="panel-overview" aria-labelledby="h-overview">
+      <header class="sec-head">
+        <div>
+          <p class="sec-crumb">Settings</p>
+          <h2 class="sec-title" id="h-overview" tabindex="-1">Overview</h2>
+          <p class="sec-lede">What needs attention on this host, and a way into every setting.</p>
+        </div>
+      </header>
+      <h3 class="h-sub">Needs attention</h3>
+      <div class="attn" id="ov-attn">
+        <div class="attn-row"><span class="attn-dot"></span><span>Checking the settings…</span><span></span></div>
+      </div>
+      <h3 class="h-sub">At a glance</h3>
+      <div class="tiles" id="ov-tiles"></div>
+    </section>
+
+    <!-- ═══ Providers ══════════════════════════════════════════════════ -->
+    <section class="set-sec" id="panel-llm" aria-labelledby="h-llm" hidden>
+      <header class="sec-head">
+        <div>
+          <p class="sec-crumb">AI models</p>
+          <h2 class="sec-title" id="h-llm" tabindex="-1">Providers</h2>
+          <p class="sec-lede">The model endpoints Atlas calls, which of them serves each role in a run, and how hard each role is asked to think.</p>
+        </div>
+        <div class="sec-actions">
+          <button class="btn" id="llm-add-btn" type="button"><svg class="i sm" aria-hidden="true"><use href="#i-plus"/></svg>Add provider</button>
+        </div>
+      </header>
+      <p class="banner bad" id="llm-override-banner" hidden></p>
+
+      <div class="set-group" id="llm-form" data-form hidden>
+        <div class="group-head">
+          <div><h3 id="llm-form-title">Add a provider</h3>
+            <p>An OpenAI-compatible endpoint. Test the connection to fill the model list and to learn what the model can do.</p></div>
+          <button class="btn ghost icon" type="button" id="llm-form-close" aria-label="Close the provider form"><svg class="i" aria-hidden="true"><use href="#i-close"/></svg></button>
+        </div>
+        <div class="fields">
+          <div class="field">
+            <label for="llm-preset">Preset</label>
+            <select id="llm-preset"></select>
+          </div>
+          <div class="field">
+            <label for="llm-name">Provider name</label>
+            <input type="text" id="llm-name" name="atlas-llm-provider-name"
+              placeholder="e.g. openai, openrouter, my-vllm" autocomplete="off" />
+            <p class="field-hint">Atlas's own name for it, for ATLAS_PROVIDERS. Not a username.</p>
+          </div>
+          <div class="field">
+            <label for="llm-base-url">Base URL</label>
+            <input type="text" id="llm-base-url" name="atlas-llm-base-url"
+              placeholder="https://api.example.com/v1" autocomplete="off" />
+          </div>
+          <div class="field">
+            <label for="llm-model">Model id</label>
+            <input type="text" id="llm-model" name="atlas-llm-model-id"
+              placeholder="e.g. openai/gpt-4o-mini or GLM-5.2"
+              autocomplete="off" list="llm-model-list" />
+            <datalist id="llm-model-list"></datalist>
+            <p class="field-hint">The provider's catalogue id, not a dashboard role (admin/analyst/viewer). Test connection fills the list.</p>
+          </div>
+          <div class="field">
+            <label for="llm-api-key">API key</label>
+            <input type="password" id="llm-api-key" name="atlas-llm-api-key"
+              placeholder="Leave empty to keep the stored key" autocomplete="off" />
+          </div>
+          <div class="field">
+            <label for="llm-store-key-in">Store the key in</label>
+            <select id="llm-store-key-in">
+              <option value="env">.env file</option>
+              <option value="keyring">OS keyring (recommended)</option>
+            </select>
+          </div>
+          <div class="field full">
+            <label for="llm-thinking">Thinking</label>
+            <select id="llm-thinking">
+              <option value="auto">Auto, learn from replies</option>
+              <option value="low">low</option>
+              <option value="medium">medium</option>
+              <option value="high">high</option>
+            </select>
+            <p class="field-hint">How hard this provider's models are asked to think. Auto sends nothing and steps the level down only when a reply comes back empty; what worked is remembered. Thinking levels below override it per role.</p>
+          </div>
+        </div>
+        <p class="say" id="llm-msg"></p>
+        <div class="group-foot">
+          <label class="check-line"><input type="checkbox" class="switch" role="switch" id="llm-skip-probe" /> Save without testing</label>
+          <div class="acts">
+            <button class="btn" id="llm-test-btn" type="button">Test connection</button>
+            <button class="btn ok" id="llm-save-btn" type="button">Save provider</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="set-group">
+        <div class="tbl-wrap">
+          <table class="cfg-table" id="llm-providers-table">
+            <thead><tr><th>Provider</th><th>Model</th><th class="hide-small">Key</th><th class="hide-small">Thinking</th><th class="hide-small">Roles</th><th><span class="sr">Actions</span></th></tr></thead>
+            <tbody><tr><td colspan="6" class="placeholder">Loading…</td></tr></tbody>
+          </table>
+        </div>
+        <p class="say pad" id="llm-list-msg"></p>
+      </div>
+
+      <div class="set-group" id="roles-group" data-form>
+        <div class="group-head">
+          <div><h3>Roles in a run</h3>
+            <p>Which provider serves each role. A role without a provider is off, except report, which falls back to the analyst's provider; analyst is the one role Atlas cannot run without.</p></div>
+        </div>
+        <div class="tbl-wrap">
+          <table class="cfg-table" id="roles-table">
+            <thead><tr><th>Role</th><th class="hide-small">Job in a run</th><th class="hide-narrow">What to pick</th><th>Provider</th></tr></thead>
+            <tbody><tr><td colspan="4" class="placeholder">Loading…</td></tr></tbody>
+          </table>
+        </div>
+        <div class="group-foot">
+          <span class="say" id="roles-msg"></span>
+          <div class="acts"><button class="btn ok" id="roles-save-btn" type="button">Save roles</button></div>
+        </div>
+      </div>
+
+      <div class="set-group" id="effort-card" data-form>
+        <div class="group-head">
+          <div><h3>Thinking levels</h3>
+            <p>How hard each role is asked to think before it answers. Not set leaves the provider's Thinking setting in charge, unless a role has a default level of its own, which its list names; Endpoint default sends nothing and lets the endpoint decide.</p></div>
+        </div>
+        <p class="group-note" id="effort-pin-note" hidden></p>
+        <div class="tbl-wrap">
+          <table class="cfg-table" id="effort-table">
+            <thead><tr><th>Role</th><th>What it does</th><th>Level</th></tr></thead>
+            <tbody><tr><td colspan="3" class="placeholder">Loading…</td></tr></tbody>
+          </table>
+        </div>
+        <div class="group-foot">
+          <span class="say" id="effort-msg"></span>
+          <div class="acts"><button class="btn ok" id="effort-save-btn" type="button">Save levels</button></div>
+        </div>
+      </div>
+
+      <details class="more">
+        <summary><svg class="i sm" aria-hidden="true"><use href="#i-chev-r"/></svg>How thinking levels and overrides work</summary>
+        <div class="more-body">
+          <p>A reasoning model pays for its thinking out of the same budget as its reply. Set a level too high and a role can spend a turn's whole budget thinking and return no tool call; set it too low and it answers a question it has not considered. A model's name does not predict the workable value, so Atlas asks rather than guesses.</p>
+          <p>Providers differ in whether they take the option at all. One that refuses it says so on the first call, and Atlas drops it for that model and sends the request again, so an unsupported level costs one extra round-trip and never fails a call. Where an endpoint requires a reasoning model to stop reasoning while Atlas's tools are on the request, that requirement wins for the analyst, and the note above the table says so.</p>
+          <p>Reason and DAIR backend overrides in the environment (REASON_BACKEND, DAIR_BACKEND and their _URL, _API_KEY and _MODEL variables) are read once at server start and need a restart. Role assignments here take effect on the next call.</p>
+        </div>
+      </details>
+    </section>
+
+    <!-- ═══ Token spend ════════════════════════════════════════════════ -->
+    <section class="set-sec" id="panel-usage" aria-labelledby="h-usage" hidden>
+      <header class="sec-head">
+        <div>
+          <p class="sec-crumb">AI models</p>
+          <h2 class="sec-title" id="h-usage" tabindex="-1">Token spend</h2>
+          <p class="sec-lede">Every model request made for a case, grouped by period and run. Periods are UTC; costs use today's prices.</p>
+        </div>
+        <div class="sec-actions">
+          <a class="btn" id="usage-export" href="/_dashboard/api/config/usage/export?period=month&amp;months=12" download><svg class="i sm" aria-hidden="true"><use href="#i-download"/></svg>Export CSV</a>
+        </div>
+      </header>
+      <div class="toolbar">
+        <div><span class="lbl" id="usage-period-lbl">Group by</span>
+          <span class="seg" role="group" aria-labelledby="usage-period-lbl" data-select="usage-period">
+            <button type="button" data-v="month">Month</button><button type="button" data-v="week">Week</button></span>
+          <select id="usage-period" hidden autocomplete="off"><option value="month">Month</option><option value="week">Week</option></select></div>
+        <div><span class="lbl" id="usage-months-lbl">Window</span>
+          <span class="seg" role="group" aria-labelledby="usage-months-lbl" data-select="usage-months">
+            <button type="button" data-v="3">3 months</button><button type="button" data-v="6">6 months</button><button type="button" data-v="12">12 months</button><button type="button" data-v="24">24 months</button></span>
+          <select id="usage-months" hidden autocomplete="off"><option value="3">3 months</option><option value="6">6 months</option><option value="12" selected>12 months</option><option value="24">24 months</option></select></div>
+      </div>
+      <p class="say block" id="usage-msg"></p>
+      <div class="stats" id="usage-stats"></div>
+      <div class="set-group">
+        <div class="group-head"><div><h3>Runs</h3><p>The newest first. Each period's line carries its totals.</p></div></div>
+        <div class="tbl-wrap"><div id="usage-periods"></div></div>
+        <div class="pager" id="usage-pager" hidden>
+          <span id="usage-pager-status" role="status"
+                title="A run whose calls fall in two periods is listed under each."></span>
+          <nav class="pager-nav" id="usage-pager-nav" aria-label="Run pages"></nav>
+          <label class="pager-size">Per page
+            <select id="usage-page-size">
+              <option value="10">10</option><option value="25">25</option>
+              <option value="50">50</option><option value="100">100</option>
+            </select>
+          </label>
+        </div>
+      </div>
+      <div class="set-group">
+        <div class="group-head"><div><h3>Per case</h3></div></div>
+        <div class="tbl-wrap">
+          <table class="cfg-table" id="usage-cases">
+            <thead><tr><th>Case</th><th class="r">Runs</th><th class="r">Calls</th><th class="r">Input</th><th class="r">Output</th><th class="r">Cached</th><th class="r">Cost</th></tr></thead>
+            <tbody><tr><td colspan="7" class="placeholder">Loading…</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+      <details class="more">
+        <summary><svg class="i sm" aria-hidden="true"><use href="#i-chev-r"/></svg>What is counted</summary>
+        <div class="more-body">
+          <p>Every model request made for a case: analyst, director, reasoning, report, reviewer, chat, brief autofill and learner. Requests outside a case, such as connection tests and capability probes, are not recorded. A request whose reply carried no usage block is counted but not priced.</p>
+          <p>"By" is the dashboard user who started the run, or the host user for a run started from the command line; the ledger is kept per host user (ATLAS_USAGE_DB).</p>
+          <p>A run made before this host kept the ledger is added once from its case folder when this page loads, with the analyst's turns and the reasoning and director calls made while it ran. Report and reviewer calls and a chat's own turns were not kept, and "By" is empty. Deleted entries are never added again.</p>
+        </div>
+      </details>
+      <div class="set-group danger">
+        <div class="group-head"><div><h3>Danger zone</h3><p>Deleted entries are gone for good, and are not added back from the case folders.</p></div></div>
+        <div class="set-row">
+          <div><div class="row-label"><label for="usage-before">Delete entries before a date</label></div>
+            <p class="row-help">Keeps everything from that day on.</p></div>
+          <div class="row-ctl"><input id="usage-before" type="date" />
+            <button class="btn bad" id="usage-clear-before-btn" type="button">Delete</button></div>
+        </div>
+        <div class="set-row">
+          <div><div class="row-label">Delete all entries</div>
+            <p class="row-help">Empties the ledger. Prices stay.</p></div>
+          <div class="row-ctl"><button class="btn bad" id="usage-clear-all-btn" type="button">Delete all entries</button></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ═══ Prices ═════════════════════════════════════════════════════ -->
+    <section class="set-sec" id="panel-prices" aria-labelledby="h-prices" hidden>
+      <header class="sec-head">
+        <div>
+          <p class="sec-crumb">AI models</p>
+          <h2 class="sec-title" id="h-prices" tabindex="-1">Prices</h2>
+          <p class="sec-lede">Prices per million tokens, used to cost the token spend. A model without a price is counted, not costed.</p>
+        </div>
+      </header>
+      <div class="set-group" data-form>
+        <div class="set-row">
+          <div><div class="row-label"><label for="usage-currency">Currency</label></div>
+            <p class="row-help">Shown next to every cost.</p></div>
+          <div class="row-ctl"><input id="usage-currency" class="short" type="text" maxlength="12" data-keep="currency" /></div>
+        </div>
+        <div class="set-row cfg-check">
+          <div><div class="row-label"><label for="usage-autoremove">Autoremove</label>
+              <svg class="i sm hint-icon" aria-hidden="true"><use href="#i-info"/></svg></div>
+            <p class="row-help">Follows the Providers section when a model is removed there. Applies as soon as you switch it.</p></div>
+          <div class="row-ctl"><input id="usage-autoremove" class="switch" type="checkbox" role="switch"
+                                      aria-describedby="usage-autoremove-tip" /></div>
+          <span class="hint-card" role="tooltip" id="usage-autoremove-tip">When a model is removed under Providers, its row here is removed too. The row's prices go with it, and past runs of that model then count as unpriced. Switched off, a row stays until you remove it.</span>
+        </div>
+        <div class="group-foot">
+          <span class="say" id="usage-currency-msg"></span>
+          <div class="acts"><button class="btn ok" id="usage-currency-btn" type="button">Save currency</button></div>
+        </div>
+      </div>
+      <div class="set-group" data-form>
+        <div class="group-head">
+          <div><h3>Price list</h3>
+            <p>One row per model set up under Providers and per model the ledger has recorded; a model added under Providers appears here on its own. Leave cached empty to bill cached input at the input price.</p></div>
+        </div>
+        <div class="tbl-wrap">
+          <table class="cfg-table" id="usage-prices">
+            <thead><tr><th>Model</th><th class="r">Input</th><th class="r hide-small">Cached input</th><th class="r">Output</th><th><span class="sr">Actions</span></th></tr></thead>
+            <tbody><tr><td colspan="5" class="placeholder">Loading…</td></tr></tbody>
+          </table>
+        </div>
+        <div class="group-foot">
+          <span class="say" id="usage-prices-msg"></span>
+          <span class="note">Input and output are both needed for a price.</span>
+          <div class="acts"><button class="btn ok" id="usage-prices-btn" type="button">Save prices</button></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ═══ Users ══════════════════════════════════════════════════════ -->
+    <section class="set-sec" id="panel-users" aria-labelledby="h-users" hidden>
+      <header class="sec-head">
+        <div>
+          <p class="sec-crumb">People</p>
+          <h2 class="sec-title" id="h-users" tabindex="-1">Users</h2>
+          <p class="sec-lede">Who can sign in, and what each account may do. Admins manage these settings, analysts run cases, viewers read.</p>
+        </div>
+        <div class="sec-actions">
+          <button class="btn" id="u-add-btn" type="button"><svg class="i sm" aria-hidden="true"><use href="#i-plus"/></svg>Add user</button>
+        </div>
+      </header>
+      <div class="set-group" id="u-form" data-form hidden>
+        <div class="group-head">
+          <div><h3>Add a user</h3><p>The account can sign in at once.</p></div>
+          <button class="btn ghost icon" type="button" id="u-form-close" aria-label="Close the user form"><svg class="i" aria-hidden="true"><use href="#i-close"/></svg></button>
+        </div>
+        <div class="fields">
+          <div class="field"><label for="u-username">Username</label><input type="text" id="u-username" autocomplete="off" /></div>
+          <div class="field"><label for="u-email">Email</label><input type="email" id="u-email" autocomplete="off" /></div>
+          <div class="field"><label for="u-password">Password</label><input type="password" id="u-password" autocomplete="new-password" /></div>
+          <div class="field"><label for="u-role">Role</label>
+            <select id="u-role"><option value="viewer">viewer</option><option value="analyst">analyst</option><option value="admin">admin</option></select></div>
+        </div>
+        <div class="group-foot">
+          <span class="say" id="u-create-msg"></span>
+          <div class="acts"><button class="btn ok" id="u-create-btn" type="button">Create user</button></div>
+        </div>
+      </div>
+      <p class="say block" id="users-msg"></p>
+      <div class="set-group">
+        <div class="tbl-wrap">
+          <table class="cfg-table" id="users-table">
+            <thead><tr><th>User</th><th>Role</th><th class="hide-small">Status</th><th><span class="sr">Actions</span></th></tr></thead>
+            <tbody><tr><td colspan="4" class="placeholder">Loading…</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- ═══ Sign-in and sessions ═══════════════════════════════════════ -->
+    <section class="set-sec" id="panel-sessions" aria-labelledby="h-sessions" hidden>
+      <header class="sec-head">
+        <div>
+          <p class="sec-crumb">People</p>
+          <h2 class="sec-title" id="h-sessions" tabindex="-1">Sign-in and sessions</h2>
+          <p class="sec-lede">How long a session lasts, and what a viewer may use.</p>
+        </div>
+      </header>
+      <div class="set-group" data-form>
+        <div class="set-row">
+          <div><div class="row-label"><label for="session-idle">Idle timeout</label></div>
+            <p class="row-help">A user without a request for this long is signed out. Every request moves the deadline, so a session in use does not end mid-shift.</p></div>
+          <div class="row-ctl"><input id="session-idle" class="short" type="number" min="0.25" step="0.25" /><span class="unit">hours</span></div>
+        </div>
+        <div class="set-row">
+          <div><div class="row-label"><label for="session-max">Absolute limit</label></div>
+            <p class="row-help">Signs a user out this long after sign-in, whatever they are doing.</p></div>
+          <div class="row-ctl"><input id="session-max" class="short" type="number" min="0.25" step="1" /><span class="unit">hours</span></div>
+        </div>
+        <div class="set-row">
+          <div><div class="row-label"><label for="tool-viewer-chat">Viewers can chat</label></div>
+            <p class="row-help">Lets a viewer ask Atlas about a case, as an analyst can. Off by default: viewers see the analysis, progress and reports.</p></div>
+          <div class="row-ctl"><input id="tool-viewer-chat" class="switch" type="checkbox" role="switch" /></div>
+        </div>
+        <div class="group-foot">
+          <span class="say" id="session-msg"></span>
+          <span class="note">Applies from the next request on.</span>
+          <div class="acts"><button class="btn ok" id="session-save-btn" type="button">Save</button></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ═══ Activity log ═══════════════════════════════════════════════ -->
+    <section class="set-sec" id="panel-activity" aria-labelledby="h-activity" hidden>
+      <header class="sec-head">
+        <div>
+          <p class="sec-crumb">People</p>
+          <h2 class="sec-title" id="h-activity" tabindex="-1">Activity log</h2>
+          <p class="sec-lede">Who signed in or out, who started or stopped a run, and who changed an account.</p>
+        </div>
+        <div class="sec-actions">
+          <a class="btn" id="activity-export" href="/_dashboard/api/config/activity/export" download><svg class="i sm" aria-hidden="true"><use href="#i-download"/></svg>Export CSV</a>
+        </div>
+      </header>
+      <p class="say block" id="activity-msg"></p>
+      <div class="set-group">
+        <div class="group-head">
+          <div><h3>Entries</h3><p id="activity-count">The newest 500 entries; the filter searches only those, and the export carries every entry.</p></div>
+          <div class="tools">
+            <input id="activity-filter" class="filter-input" type="search" placeholder="Filter by user, event, case or detail"
+                   aria-label="Filter the activity log" />
+          </div>
+        </div>
+        <div class="tbl-wrap">
+          <table class="cfg-table" id="activity-table">
+            <thead><tr><th>Time</th><th>User</th><th>Role</th><th>Event</th><th>Case</th><th>Detail</th><th>Address</th></tr></thead>
+            <tbody><tr><td colspan="7" class="placeholder">Loading…</td></tr></tbody>
+          </table>
+        </div>
+        <div class="pager" id="activity-pager" hidden>
+          <span id="activity-pager-status" role="status"></span>
+          <nav class="pager-nav" id="activity-pager-nav" aria-label="Activity pages"></nav>
+          <label class="pager-size">Per page
+            <select id="activity-page-size">
+              <option value="10">10</option><option value="25">25</option>
+              <option value="50">50</option><option value="100">100</option>
+            </select>
+          </label>
+        </div>
+      </div>
+      <div class="set-group" data-form>
+        <div class="set-row">
+          <div><div class="row-label"><label for="activity-retention">Keep entries for</label></div>
+            <p class="row-help">Older entries are removed when a new one is written or this page opens. Default 90 days. Lowering it removes entries at once, and is itself recorded.</p></div>
+          <div class="row-ctl"><input id="activity-retention" class="short" type="number" min="1" max="3650" step="1" /><span class="unit">days</span></div>
+        </div>
+        <div class="group-foot">
+          <span class="say" id="activity-retention-msg"></span>
+          <div class="acts"><button class="btn ok" id="activity-retention-btn" type="button">Save</button></div>
+        </div>
+      </div>
+      <details class="more">
+        <summary><svg class="i sm" aria-hidden="true"><use href="#i-chev-r"/></svg>About the address column</summary>
+        <div class="more-body">
+          <p>The address is the client's as the server saw it. Behind a reverse proxy it is the proxy's, unless the proxy is trusted through FORWARDED_ALLOW_IPS. A clear made here leaves a marker; the database file itself is only as safe as shell access to the host.</p>
+        </div>
+      </details>
+      <div class="set-group danger">
+        <div class="group-head"><div><h3>Danger zone</h3></div></div>
+        <div class="set-row">
+          <div><div class="row-label">Delete all entries</div>
+            <p class="row-help">Leaves one entry that records the deletion.</p></div>
+          <div class="row-ctl"><button class="btn bad" id="activity-clear-btn" type="button">Delete all entries</button></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ═══ Cases ══════════════════════════════════════════════════════ -->
+    <section class="set-sec" id="panel-cases" aria-labelledby="h-cases" hidden>
+      <header class="sec-head">
+        <div>
+          <p class="sec-crumb">Investigation</p>
+          <h2 class="sec-title" id="h-cases" tabindex="-1">Cases</h2>
+          <p class="sec-lede">Every case folder on this host. Deleting moves a folder into <code>.deleted/</code>, where it can be recovered. It unmounts the case's evidence first, and is refused if a mount stays or a run is in progress.</p>
+        </div>
+      </header>
+      <p class="say block" id="cases-msg"></p>
+      <div class="set-group">
+        <div class="tbl-wrap">
+          <table class="cfg-table" id="cases-table">
+            <thead><tr><th>Case</th><th class="r hide-small">Traced runs</th><th class="hide-small">Last activity</th><th><span class="sr">Actions</span></th></tr></thead>
+            <tbody><tr><td colspan="4" class="placeholder">Loading…</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- ═══ Enrichment keys ════════════════════════════════════════════ -->
+    <section class="set-sec" id="panel-osint" aria-labelledby="h-osint" hidden>
+      <header class="sec-head">
+        <div>
+          <p class="sec-crumb">Investigation</p>
+          <h2 class="sec-title" id="h-osint" tabindex="-1">Enrichment keys</h2>
+          <p class="sec-lede">API keys for the enrichment lookups. All optional: a lookup without a key reports itself unavailable and the investigation goes on.</p>
+        </div>
+      </header>
+      <div class="set-group" data-form>
+        <div id="osint-fields"></div>
+        <div class="set-row">
+          <div><div class="row-label"><label for="osint-store-key-in">Store new keys in</label></div></div>
+          <div class="row-ctl">
+            <select id="osint-store-key-in">
+              <option value="env">.env file</option>
+              <option value="keyring">OS keyring (recommended)</option>
+            </select>
+          </div>
+        </div>
+        <div class="group-foot">
+          <span class="say" id="osint-msg"></span>
+          <span class="note">An empty field keeps the stored key.</span>
+          <div class="acts"><button class="btn ok" id="osint-save-btn" type="button">Save keys</button></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ═══ MITRE ATT&CK ═══════════════════════════════════════════════ -->
+    <section class="set-sec" id="panel-mitre" aria-labelledby="h-mitre" hidden>
+      <header class="sec-head">
+        <div>
+          <p class="sec-crumb">Investigation</p>
+          <h2 class="sec-title" id="h-mitre" tabindex="-1">MITRE ATT&amp;CK</h2>
+          <p class="sec-lede">The technique, group, software and mitigation tables that technique validation, attribution and the Response view read.</p>
+        </div>
+      </header>
+      <div class="stats" id="mitre-stats"></div>
+      <div class="set-group">
+        <div class="set-row">
+          <div><div class="row-label">Refresh from MITRE <span class="pill" id="mitre-state">idle</span></div>
+            <p class="row-help">Downloads MITRE's current release and rebuilds this host's tables. The copy bundled with Atlas is rebuilt from a checkout and committed.</p>
+            <p class="row-help" id="mitre-summary">Loading…</p>
+            <p class="row-help" id="mitre-message"></p></div>
+          <div class="row-ctl"><button class="btn" id="mitre-refresh-btn" type="button"><svg class="i sm" aria-hidden="true"><use href="#i-refresh"/></svg>Refresh from MITRE</button></div>
+        </div>
+        <details class="more log-wrap" id="mitre-log-wrap" hidden>
+          <summary><svg class="i sm" aria-hidden="true"><use href="#i-chev-r"/></svg>Builder output</summary>
+          <div class="more-body"><pre id="mitre-log"></pre></div>
+        </details>
+      </div>
+    </section>
+
+    <!-- ═══ Tool health ════════════════════════════════════════════════ -->
+    <section class="set-sec" id="panel-tools" aria-labelledby="h-tools" hidden>
+      <header class="sec-head">
+        <div>
+          <p class="sec-crumb">System</p>
+          <h2 class="sec-title" id="h-tools" tabindex="-1">Tool health</h2>
+          <p class="sec-lede">Every external program a tool needs, and whether this host has it. A tool whose program is missing is marked in the model's manifest, so a run never spends a call finding out; this is where you see why, and what should have installed it.</p>
+        </div>
+        <div class="sec-actions"><button class="btn" id="tools-refresh-btn" type="button"><svg class="i sm" aria-hidden="true"><use href="#i-refresh"/></svg>Check again</button></div>
+      </header>
+      <div class="stats" id="tools-stats"></div>
+      <p class="note lead-note" id="tools-summary"></p>
+      <div class="set-group">
+        <div class="group-head">
+          <div><h3>Programs</h3></div>
+          <div class="tools"><label class="check-line"><input class="switch" type="checkbox" role="switch" id="tools-only-problems" checked /> Only problems</label></div>
+        </div>
+        <div class="tbl-wrap">
+          <table class="cfg-table" id="tools-table">
+            <thead><tr><th>Status</th><th>Program</th><th>Used by</th><th>Detail</th><th>Installed by</th></tr></thead>
+            <tbody><tr><td colspan="5" class="placeholder">Loading…</td></tr></tbody>
+          </table>
+        </div>
+        <p class="say pad" id="tools-msg"></p>
+      </div>
+    </section>
+
+    <!-- ═══ Plugins ════════════════════════════════════════════════════ -->
+    <section class="set-sec" id="panel-plugins" aria-labelledby="h-plugins" hidden>
+      <header class="sec-head">
+        <div>
+          <p class="sec-crumb">System</p>
+          <h2 class="sec-title" id="h-plugins" tabindex="-1">Plugins</h2>
+          <p class="sec-lede">Optional extensions for this install: a bespoke parser, an integration hook, an experimental tool namespace. Every forensic capability Atlas ships permanently is core, not a plugin.</p>
+        </div>
+        <div class="sec-actions"><button class="btn" id="plugin-add-btn" type="button"><svg class="i sm" aria-hidden="true"><use href="#i-upload"/></svg>Add plugin</button></div>
+      </header>
+      <p class="banner bad" id="plugins-global-banner" hidden></p>
+      <div class="set-group" id="plugin-form" data-form hidden>
+        <div class="group-head">
+          <div><h3>Add a plugin</h3>
+            <p>A <code>.zip</code> of the plugin folder's contents (its <code>__init__.py</code>, <code>plugin.py</code> and so on), not the folder itself. It is extracted to <code>plugins/&lt;name&gt;/</code> and runs as trusted, unsandboxed Python from the next run on, so add only what you trust.</p></div>
+          <button class="btn ghost icon" type="button" id="plugin-form-close" aria-label="Close the plugin form"><svg class="i" aria-hidden="true"><use href="#i-close"/></svg></button>
+        </div>
+        <div class="fields">
+          <div class="field"><label for="plugin-upload-name">Plugin name</label>
+            <input type="text" id="plugin-upload-name" placeholder="my_addon" autocomplete="off" />
+            <p class="field-hint">Lowercase letters, digits and underscores, starting with a letter.</p></div>
+          <div class="field"><label for="plugin-upload-file">Zip file</label>
+            <input type="file" id="plugin-upload-file" accept=".zip" /></div>
+        </div>
+        <div class="group-foot">
+          <span class="say" id="plugin-upload-msg"></span>
+          <div class="acts"><button class="btn ok" id="plugin-upload-btn" type="button">Add plugin</button></div>
+        </div>
+      </div>
+      <div class="set-group">
+        <div class="tbl-wrap">
+          <table class="cfg-table" id="plugins-table">
+            <thead><tr><th>Plugin</th><th>Version</th><th>Author</th><th>Status</th><th>On</th></tr></thead>
+            <tbody><tr><td colspan="5" class="placeholder">Loading…</td></tr></tbody>
+          </table>
+        </div>
+        <p class="say pad" id="plugins-msg"></p>
+      </div>
+      <p class="note lead-note">Turning a plugin on or off writes <code>ATLAS_PLUGINS_DISABLED</code> to <code>.env</code>. Plugins register once, when a run's process starts, so the change applies to the next run, not to one under way.</p>
+      <details class="more">
+        <summary><svg class="i sm" aria-hidden="true"><use href="#i-chev-r"/></svg>How to write a plugin</summary>
+        <div class="more-body">
+          <p>A plugin is a Python package under <code>plugins/&lt;name&gt;/</code>, the one supported way to extend Atlas without touching core. The full guide is <code>docs/addons.md</code>. The minimum shape:</p>
+          <pre>plugins/my_addon/
+  __init__.py   # from plugins.my_addon.plugin import register
+  plugin.py     # the Addon subclass below
+  addon.yaml    # optional: name, version, description, author</pre>
+          <pre>from core.addons import Addon, tool, hook
+
+class MyAddon(Addon):
+    name = "my_addon"
+
+    @tool()
+    def hello(self, name: str) -> dict:
+        """Docstring becomes the tool's description."""
+        return {"greeting": f"Hello {name}"}
+
+    @hook()
+    def after_every_call(self, tool_name, args, result) -> None:
+        """Runs after every tool call, fail-open."""
+        ...
+
+def register(mcp) -> None:
+    MyAddon().register(mcp)</pre>
+          <ol>
+            <li><code>@tool()</code> exposes a new forensic tool, callable as <code>my_addon.hello</code>.</li>
+            <li><code>@hook(event="after_tool_call")</code> observes every tool call. Its return value is ignored and its exceptions are caught, so a hook can never break an investigation.</li>
+            <li>A plugin must fail open: if it wraps an external program that might be missing, it checks for it and returns <code>{"success": false, "error": "..."}</code> instead of raising.</li>
+          </ol>
+          <p>From the command line, <code>atlas addon create my_addon</code> scaffolds this, and <code>atlas addon list</code> shows what is discovered. If a customer might reasonably want to turn something off, it is a plugin; otherwise it belongs in core.</p>
+        </div>
+      </details>
+    </section>
+
+    <!-- ═══ Network share ══════════════════════════════════════════════ -->
+    <section class="set-sec" id="panel-share" aria-labelledby="h-share" hidden>
+      <header class="sec-head">
+        <div>
+          <p class="sec-crumb">System</p>
+          <h2 class="sec-title" id="h-share" tabindex="-1">Network share</h2>
+          <p class="sec-lede">Lets a Windows machine mount this host's cases folder to copy evidence in or edit <code>CASE.md</code> without SSH. It signs in with this Atlas account's username and a separate share password, not your Linux password.</p>
+        </div>
+      </header>
+      <div class="set-group">
+        <div class="set-row">
+          <div><div class="row-label">SMB share <span class="pill" id="share-pill">…</span></div>
+            <p class="row-help" id="share-status">Loading…</p></div>
+          <div class="row-ctl">
+            <button class="btn ok" id="share-enable-btn" type="button">Turn on</button>
+            <button class="btn" id="share-disable-btn" type="button">Turn off</button>
+          </div>
+        </div>
+        <p class="say" id="share-enable-msg"></p>
+      </div>
+      <div class="set-group" id="share-password-card" data-form>
+        <div class="group-head"><div><h3>Share password</h3><p>Samba keeps its own password for this account.</p></div></div>
+        <div class="fields">
+          <div class="field"><label for="share-password">New password</label><input type="password" id="share-password" autocomplete="off" /></div>
+          <div class="field"><label for="share-password-confirm">Confirm</label><input type="password" id="share-password-confirm" autocomplete="off" /></div>
+        </div>
+        <div class="group-foot">
+          <span class="say" id="share-password-msg"></span>
+          <div class="acts"><button class="btn ok" id="share-password-btn" type="button">Set password</button></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ═══ Mail ═══════════════════════════════════════════════════════ -->
+    <section class="set-sec" id="panel-mail" aria-labelledby="h-mail" hidden>
+      <header class="sec-head">
+        <div>
+          <p class="sec-crumb">System</p>
+          <h2 class="sec-title" id="h-mail" tabindex="-1">Mail</h2>
+          <p class="sec-lede">The SMTP server Atlas sends password reset mail through.</p>
+        </div>
+      </header>
+      <div class="set-group" data-form>
+        <div class="group-head"><div><h3>SMTP server <span class="pill" id="mail-state">…</span></h3></div></div>
+        <div class="fields">
+          <div class="field"><label for="m-host">Host</label><input type="text" id="m-host" placeholder="smtp.example.org" /></div>
+          <div class="field"><label for="m-port">Port</label><input type="text" id="m-port" placeholder="587" /></div>
+          <div class="field"><label for="m-user">Username</label><input type="text" id="m-user" autocomplete="off" /></div>
+          <div class="field"><label for="m-password">Password</label><input type="password" id="m-password" placeholder="Leave empty to keep the stored password" autocomplete="off" /></div>
+          <div class="field"><label for="m-from">From address</label><input type="text" id="m-from" placeholder="atlas@example.org" /></div>
+          <div class="field"><label for="m-starttls">STARTTLS</label>
+            <label class="check-line"><input type="checkbox" class="switch" role="switch" id="m-starttls" checked />
+              <span class="field-hint">Port 465 always connects with TLS from the start; other ports follow this switch.</span></label></div>
+        </div>
+        <div class="group-foot">
+          <span class="say" id="mail-msg"></span>
+          <div class="acts">
+            <button class="btn" id="m-test-btn" type="button">Test connection</button>
+            <button class="btn ok" id="m-save-btn" type="button">Save</button>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+</div>
+
+<script src="assets/shell.js"></script>
+<script src="assets/paging.js"></script>
+<script>
+(function () {
+  const esc = AtlasShell.esc;
+  const $ = (id) => document.getElementById(id);
+  let PRESETS = [];
+  let ROLES = [];
+  let IDENTITY_MODEL_IDS = new Set();
+
+  // ── Messages ────────────────────────────────────────────────────────
+  // A save, a check or a load leaves its message beside what it is about:
+  // in the group's footer, under its table, or above the section's list.
+  function say(id, text, state) {
+    const el = $(id);
+    if (!el) return;
+    el.textContent = text || '';
+    if (state) el.dataset.state = state; else delete el.dataset.state;
+  }
+  function msgFor(id) { return (text, ok) => say(id, text, ok ? 'ok' : 'err'); }
+  // Each message line is announced when it changes, like the pagers'.
+  document.querySelectorAll('.say').forEach(el => el.setAttribute('role', 'status'));
+
+  // A save runs once: its button is off while the request is out.
+  async function whileBusy(btn, work) {
+    btn.disabled = true;
+    try { return await work(); } finally { btn.disabled = false; }
+  }
+
+  function fmtN(n) { return Number(n || 0).toLocaleString(AtlasShell.lang()); }
+
+  // ── Sections and the address ────────────────────────────────────────
+  // Each section has its own address (config.html#usage), so a reload, the
+  // back button and a shared link open the same section.
+  const NAV = Array.from(document.querySelectorAll('#set-nav .nav-item'));
+  const SECTIONS = NAV.map(a => a.dataset.tab);
+  const side = $('set-side');
+  const menuBtn = $('menu-btn');
+
+  function openMenu(open) {
+    side.classList.toggle('open', open);
+    menuBtn.setAttribute('aria-expanded', String(open));
+  }
+  function showSection(name) {
+    if (!SECTIONS.includes(name)) name = 'overview';
+    document.querySelectorAll('.set-sec').forEach(s => { s.hidden = s.id !== `panel-${name}`; });
+    NAV.forEach(a => {
+      if (a.dataset.tab === name) a.setAttribute('aria-current', 'page');
+      else a.removeAttribute('aria-current');
+    });
+    const cur = NAV.find(a => a.dataset.tab === name);
+    $('menu-current').textContent = cur ? cur.dataset.name : '';
+    openMenu(false);
+  }
+  window.addEventListener('hashchange', () => {
+    showSection(location.hash.slice(1));
+    window.scrollTo(0, 0);
+    // A section the user opened takes focus at its name, so the keyboard
+    // and a screen reader start there rather than at the top of the page.
+    const title = document.querySelector('.set-sec:not([hidden]) .sec-title');
+    if (title) title.focus({ preventScroll: true });
+  });
+  menuBtn.addEventListener('click', () => openMenu(!side.classList.contains('open')));
+  showSection(location.hash.slice(1));
+
+  // The sidebar sticks below the shell header, whose height changes with
+  // the width of the screen.
+  function syncShellHeight() {
+    const shell = document.querySelector('.atlas-shell');
+    document.documentElement.style.setProperty('--shell-h', `${shell ? shell.offsetHeight : 0}px`);
+  }
+  window.addEventListener('resize', syncShellHeight);
+
+  // A page change that leaves a list's top under the sticky header scrolls
+  // it back to just below the header.
+  function keepInView(el) {
+    const shell = document.querySelector('.atlas-shell');
+    const below = shell ? shell.getBoundingClientRect().bottom : 0;
+    const top = el.getBoundingClientRect().top;
+    if (top < below) window.scrollBy(0, top - below - 12);
+  }
+
+  // ── Search ──────────────────────────────────────────────────────────
+  // Finds a section by its name or by a setting inside it (data-kw), so
+  // "smtp" finds Mail and "keyring" finds Providers and Enrichment keys.
+  const search = $('nav-search');
+  function filterNav() {
+    const terms = search.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    let first = null;
+    NAV.forEach(a => {
+      const hay = `${a.dataset.name} ${a.dataset.kw || ''}`.toLowerCase();
+      const hit = terms.every(t => hay.includes(t));
+      a.hidden = !hit;
+      if (hit && !first) first = a;
+    });
+    document.querySelectorAll('#set-nav .nav-group').forEach(g => {
+      g.hidden = !g.querySelector('.nav-item:not([hidden])');
+    });
+    $('nav-empty').hidden = !!first;
+    return first;
+  }
+  search.addEventListener('input', filterNav);
+  search.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter') {
+      const first = filterNav();
+      if (first) {
+        search.value = ''; filterNav();
+        location.hash = first.dataset.tab;
+      }
+    } else if (ev.key === 'Escape') {
+      search.value = ''; filterNav(); search.blur(); openMenu(false);
+    }
+  });
+  document.addEventListener('keydown', (ev) => {
+    if (!document.body.contains(search)) return;   // the page was replaced
+    const typing = /^(INPUT|SELECT|TEXTAREA)$/.test((document.activeElement || {}).tagName || '');
+    const slash = ev.key === '/' && !typing && !ev.ctrlKey && !ev.altKey && !ev.metaKey;
+    if (slash || ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 'k')) {
+      ev.preventDefault();
+      if (getComputedStyle(menuBtn).display !== 'none') openMenu(true);
+      search.focus(); search.select();
+    }
+  });
+
+  // ── Save state ──────────────────────────────────────────────────────
+  // A group that saves says so in its footer once something in it changed.
+  // A control that applies at once is marked data-no-dirty.
+  // The line a group reports on: its footer's, or its only message line.
+  function saveLine(group) {
+    return group.querySelector('.group-foot .say') || group.querySelector('.say');
+  }
+  document.querySelectorAll('.set-group[data-form]').forEach(group => {
+    const mark = (ev) => {
+      if (ev.target.closest('[data-no-dirty]')) return;
+      const el = saveLine(group);
+      if (el) say(el.id, 'Unsaved changes', 'dirty');
+    };
+    group.addEventListener('input', mark);
+    group.addEventListener('change', mark);
+  });
+
+  // A group's "Unsaved changes" goes once what it described is gone.
+  function clearDirty(group) {
+    const el = group && saveLine(group);
+    if (el && el.dataset.state === 'dirty') say(el.id, '');
+  }
+  // A control differs from what was last loaded into it: a select from its
+  // selected option as rendered, an input from its default value (a loader
+  // that sets .value sets .defaultValue with it).
+  function edited(el) {
+    if (el.tagName === 'SELECT') {
+      const loaded = Array.from(el.options).find(o => o.defaultSelected) || el.options[0];
+      return !!loaded && el.value !== loaded.value;
+    }
+    return el.value !== el.defaultValue;
+  }
+  // Re-rendering a group keeps what the user edited and has not saved: the
+  // controls marked data-keep get their edited values back when they still
+  // exist, and the group says it holds unsaved changes. Edits are read from
+  // the controls themselves, since a message may have replaced the
+  // "Unsaved changes" line.
+  function keepEdits(group, render) {
+    const kept = Array.from(group.querySelectorAll('[data-keep]')).filter(edited)
+      .map(el => [el.dataset.keep, el.value]);
+    render();
+    let restored = 0;
+    for (const [key, value] of kept) {
+      const el = Array.from(group.querySelectorAll('[data-keep]')).find(x => x.dataset.keep === key);
+      if (!el || el.value === value) continue;
+      if (el.tagName === 'SELECT' && !Array.from(el.options).some(o => o.value === value)) continue;
+      el.value = value; restored += 1;
+    }
+    const line = saveLine(group);
+    if (restored && line && line.dataset.state !== 'dirty') say(line.id, 'Unsaved changes', 'dirty');
+    else if (!restored) clearDirty(group);
+  }
+
+  // ── Confirm and ask in place ────────────────────────────────────────
+  // A destructive or consequential action asks beside the button that
+  // started it rather than in a browser dialog; Cancel or Escape puts the
+  // button back.
+  // One question at a time: opening another answers the open one with
+  // Cancel, so no confirmation is left behind for a later action.
+  let openBox = null;
+  function inlineBox(btn, parts, cancel) {
+    if (openBox) openBox();
+    const box = document.createElement('span');
+    box.className = 'confirm';
+    box.append(...parts);
+    btn.hidden = true;
+    btn.after(box);
+    openBox = cancel;
+    return box;
+  }
+  function closeInline() { if (openBox) openBox(); }
+  function makeBtn(label, cls) {
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = cls; b.textContent = label;
+    return b;
+  }
+  function confirmInline(btn, text, yes = 'Delete') {
+    return new Promise(resolve => {
+      const t = document.createElement('span');
+      t.className = 'confirm-text'; t.textContent = text;
+      const ok = makeBtn(yes, 'btn bad sm');
+      const no = makeBtn('Cancel', 'btn ghost sm');
+      let settled = false;
+      const done = (v) => {
+        if (settled) return;
+        settled = true; openBox = null;
+        box.remove(); btn.hidden = false; if (!v) btn.focus(); resolve(v);
+      };
+      const box = inlineBox(btn, [t, ok, no], () => done(false));
+      ok.addEventListener('click', () => done(true));
+      // A key held down on the button that opened this must not confirm it.
+      ok.addEventListener('keydown', (ev) => { if (ev.repeat) ev.preventDefault(); });
+      no.addEventListener('click', () => done(false));
+      box.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Escape') { ev.stopPropagation(); done(false); }
+      });
+      no.focus();
+    });
+  }
+  function askInline(btn, label, type = 'text', value = '') {
+    return new Promise(resolve => {
+      const input = document.createElement('input');
+      input.type = type; input.value = value; input.placeholder = label;
+      input.setAttribute('aria-label', label);
+      input.autocomplete = type === 'password' ? 'new-password' : 'off';
+      input.spellcheck = false;
+      input.className = 'ask-input';
+      const ok = makeBtn('Save', 'btn ok sm');
+      const no = makeBtn('Cancel', 'btn ghost sm');
+      let settled = false;
+      const done = (v) => {
+        if (settled) return;
+        settled = true; openBox = null;
+        box.remove(); btn.hidden = false; if (v === null) btn.focus(); resolve(v);
+      };
+      const box = inlineBox(btn, [input, ok, no], () => done(null));
+      ok.addEventListener('click', () => done(input.value ? input.value : null));
+      no.addEventListener('click', () => done(null));
+      input.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter') { ev.preventDefault(); ok.click(); }
+        if (ev.key === 'Escape') { ev.stopPropagation(); done(null); }
+      });
+      input.focus(); input.select();
+    });
+  }
+
+  // ── Hint cards ──────────────────────────────────────────────────────
+  // Escape hides a hint card without moving focus or the pointer. It shows
+  // again when hover or focus starts anew; resetting when it ends could
+  // leave the card dismissed for the next visit.
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key !== 'Escape') return;
+    closeInline();   // an open question is answered with Cancel
+    document.querySelectorAll('.cfg-check:hover, .cfg-check:focus-within')
+      .forEach(el => el.classList.add('tip-off'));
+  });
+  document.querySelectorAll('.cfg-check').forEach(el => {
+    const reset = () => el.classList.remove('tip-off');
+    el.addEventListener('focusin', reset);
+    el.addEventListener('mouseenter', reset);
+  });
+
+  // ── Open panels ─────────────────────────────────────────────────────
+  function openPanel(id, focusId) {
+    const panel = $(id);
+    panel.hidden = false;
+    panel.scrollIntoView({ block: 'nearest' });
+    const target = focusId ? $(focusId) : panel.querySelector('input, select');
+    if (target) target.focus();
+  }
+
+  // ── Pagers ──────────────────────────────────────────────────────────
+  // The status line, the page buttons' container and the size select are
+  // the page's own markup; only the buttons are redrawn. Redrawing drops
+  // the button that has focus, so focus moves to the one that takes its
+  // place, and the keyboard can keep paging.
+  const CHEVRON = (d) => `<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${d}" /></svg>`;
+
+  function makePager(prefix, storageKey, onChange) {
+    const select = $(`${prefix}-page-size`);
+    const sizes = Array.from(select.options, o => Number(o.value));
+    let size = 25;
+    try {
+      const saved = Number(localStorage.getItem(storageKey));
+      if (sizes.includes(saved)) size = saved;
+    } catch (_e) { /* storage blocked: the default stands */ }
+    const nav = $(`${prefix}-pager-nav`);
+    const state = { page: 0, size: () => size };
+    nav.addEventListener('click', (ev) => {
+      const btn = ev.target.closest('button[data-page]');
+      if (!btn || btn.disabled) return;
+      state.page = Number(btn.dataset.page);
+      onChange(true);
+    });
+    select.addEventListener('change', () => {
+      const next = Number(select.value);
+      state.page = AtlasPaging.resized(state.page, size, next);
+      size = next;
+      try { localStorage.setItem(storageKey, String(size)); }
+      catch (_e) { /* storage blocked: the size holds until the page reloads */ }
+      onChange(false);
+    });
+    state.view = (counts) => {
+      const view = AtlasPaging.slice(counts, state.page, size);
+      state.page = view.page;
+      return view;
+    };
+    state.draw = (view, noun) => {
+      $(`${prefix}-pager`).hidden = view.total === 0;
+      if (!view.total) return;
+      const text = `${noun} ${fmtN(view.from + 1)}–${fmtN(view.to)} of ${fmtN(view.total)}`;
+      const status = $(`${prefix}-pager-status`);
+      if (status.textContent !== text) status.textContent = text;
+      select.value = String(size);
+      const held = nav.contains(document.activeElement)
+        ? document.activeElement.getAttribute('aria-label') : null;
+      nav.innerHTML = `
+        <button class="btn" type="button" data-page="${view.page - 1}" aria-label="Previous page" ${view.page === 0 ? 'disabled' : ''}>${CHEVRON('M10 3.5 5.5 8l4.5 4.5')}</button>
+        ${AtlasPaging.pageList(view.page, view.pages).map(i => i === null
+          ? '<span class="pager-gap" aria-hidden="true">…</span>'
+          : `<button class="btn" type="button" data-page="${i}" aria-label="Page ${i + 1}"${i === view.page ? ' aria-current="page"' : ''}>${i + 1}</button>`).join('')}
+        <button class="btn" type="button" data-page="${view.page + 1}" aria-label="Next page" ${view.page >= view.pages - 1 ? 'disabled' : ''}>${CHEVRON('M6 3.5 10.5 8 6 12.5')}</button>`;
+      if (held) {
+        (nav.querySelector(`[aria-label="${held}"]:not(:disabled)`)
+          || nav.querySelector('[aria-current="page"]')).focus();
+      }
+    };
+    return state;
+  }
+
+  // ── Overview and the sidebar's badges ───────────────────────────────
+  // Each loader records what it learned in OV; the overview and the badges
+  // are drawn from it and redrawn whenever a loader finishes.
+  const OV = {};
+  // Each loader is pending until it settles; a failed one is reported on
+  // the Overview, so "nothing needs attention" is said only when every
+  // loader has answered.
+  const LOADERS = {
+    llm: 'Providers', usage: 'Token spend', prices: 'Prices', users: 'Users',
+    cases: 'Cases', osint: 'Enrichment keys', mitre: 'MITRE ATT&CK', tools: 'Tool health',
+    plugins: 'Plugins', share: 'Network share', mail: 'Mail',
+  };
+  const LOAD = Object.fromEntries(Object.keys(LOADERS).map(k => [k, { state: 'pending' }]));
+  function track(name, promise, onError) {
+    return promise.then(() => { LOAD[name] = { state: 'ok' }; renderOverview(); },
+      (err) => {
+        const message = err && err.message ? err.message : String(err);
+        LOAD[name] = { state: 'failed', message };
+        badge(name, '!', 'bad');
+        if (onError) onError(message);
+        renderOverview();
+      });
+  }
+  function badge(name, text, cls) {
+    const el = $(`badge-${name}`);
+    if (!el) return;
+    el.textContent = text === null || text === undefined ? '' : String(text);
+    el.className = `side-badge${cls ? ' ' + cls : ''}`;
+  }
+  const ICON = (id) => `<svg class="i sm" aria-hidden="true"><use href="#${id}"/></svg>`;
+  function tile(section, icon, label, value, sub, pill) {
+    return `<a class="tile" href="#${section}">
+      <span class="tile-k">${ICON(icon)}${esc(label)}${pill || ''}</span>
+      <span class="tile-v">${value}</span><span>${sub}</span></a>`;
+  }
+  function renderOverview() {
+    const attn = [];
+    for (const [name, label] of Object.entries(LOADERS)) {
+      if (LOAD[name].state === 'failed') {
+        attn.push(['warn', `Could not read ${label}.`, LOAD[name].message, name, label]);
+      }
+    }
+    if (OV.llm && !OV.llm.analyst) {
+      attn.push(['bad', 'The analyst role has no provider.', 'Atlas cannot run a case until one serves it.', 'llm', 'Providers']);
+    }
+    if (OV.llm && OV.llm.overrides) {
+      const one = OV.llm.overrides === 1;
+      attn.push(['warn', `${OV.llm.overrides} role model override${one ? '' : 's'} in .env.`,
+        `Runs use ${one ? 'it' : 'them'} instead of the model shown for the role.`, 'llm', 'Providers']);
+    }
+    if (OV.llm && OV.llm.keyless.length) {
+      attn.push(['warn', `${OV.llm.keyless.join(', ')} ${OV.llm.keyless.length === 1 ? 'is' : 'are'} served by a provider with no API key.`,
+        'If its endpoint needs a key, the role fails until one is stored.', 'llm', 'Providers']);
+    }
+    if (OV.tools && OV.tools.missing) {
+      attn.push(['bad', `${OV.tools.missing} program${OV.tools.missing === 1 ? ' is' : 's are'} missing on this host.`,
+        'The tools that need them are marked unavailable to runs.', 'tools', 'Tool health']);
+    }
+    if (OV.mail && !OV.mail.configured) {
+      attn.push(['warn', 'Mail is not set up.', 'A user who forgets their password cannot reset it.', 'mail', 'Mail']);
+    }
+    if (OV.prices && OV.prices.unpriced) {
+      attn.push(['warn', `${OV.prices.unpriced} model${OV.prices.unpriced === 1 ? ' has' : 's have'} no price.`,
+        'Their calls are counted but not costed.', 'prices', 'Prices']);
+    }
+    if (OV.share && OV.share.enabled && !OV.share.passwordSet) {
+      attn.push(['warn', 'The network share has no password yet.', 'Windows machines cannot sign in to it.', 'share', 'Network share']);
+    }
+    if (OV.mitre && !OV.mitre.version) {
+      attn.push(['warn', 'No MITRE ATT&CK tables on this host.', 'Technique checks and attribution have nothing to read until they are built.', 'mitre', 'MITRE ATT&CK']);
+    }
+    if (OV.plugins && OV.plugins.incompatible) {
+      attn.push(['warn', `${OV.plugins.incompatible} plugin${OV.plugins.incompatible === 1 ? ' needs' : 's need'} a newer Atlas.`,
+        'It does not load until Atlas is updated.', 'plugins', 'Plugins']);
+    }
+    const pending = Object.values(LOAD).some(l => l.state === 'pending');
+    const rows = attn.map(([level, head, text, section, name]) => `
+      <a class="attn-row" href="#${section}"><span class="attn-dot ${level}"></span>
+        <span><strong>${esc(head)}</strong> ${esc(text)}</span>
+        <span class="attn-go">${esc(name)}${ICON('i-chev-r')}</span></a>`);
+    if (pending) {
+      rows.push('<div class="attn-row"><span class="attn-dot wait"></span><span>Checking the settings…</span><span></span></div>');
+    } else if (!rows.length) {
+      rows.push('<div class="attn-row"><span class="attn-dot"></span><span>Nothing needs attention.</span><span></span></div>');
+    }
+    $('ov-attn').innerHTML = rows.join('');
+
+    const tiles = [];
+    if (OV.llm) {
+      const a = OV.llm.analyst;
+      tiles.push(tile('llm', 'i-chip', 'Analyst model',
+        a ? `<span class="mono">${esc(a.model || 'no model set')}</span>` : 'No provider',
+        esc(`${a ? 'on ' + a.provider + ' · ' : ''}${OV.llm.assigned} of ${OV.llm.roles} roles have a provider`),
+        a ? '' : '<span class="pill bad">Off</span>'));
+    }
+    if (OV.spend) {
+      tiles.push(tile('usage', 'i-bars', `Token spend, ${OV.spend.period || 'no entries'}`,
+        `${fmtN(OV.spend.tokens)} tokens`,
+        esc(`${fmtN(OV.spend.runs)} runs · ${OV.spend.cost}`)));
+    }
+    if (OV.users) {
+      tiles.push(tile('users', 'i-users', 'Users', `${fmtN(OV.users.count)} account${OV.users.count === 1 ? '' : 's'}`,
+        esc(`${OV.users.admins} admin · ${OV.users.analysts} analyst · ${OV.users.viewers} viewer`
+          + (OV.users.disabled ? ` · ${OV.users.disabled} disabled` : ''))));
+    }
+    if (OV.cases !== undefined) {
+      tiles.push(tile('cases', 'i-folder', 'Cases', `${fmtN(OV.cases)} on this host`, 'Rename or move one to .deleted/'));
+    }
+    if (OV.tools) {
+      tiles.push(tile('tools', 'i-wrench', 'Tool health', `${fmtN(OV.tools.ready)} programs ready`,
+        esc(OV.tools.missing ? `${OV.tools.missing} missing` : 'Nothing missing'),
+        OV.tools.missing ? '<span class="pill bad">Missing</span>' : '<span class="pill ok">Ready</span>'));
+    }
+    if (OV.share) {
+      tiles.push(tile('share', 'i-server', 'Network share',
+        OV.share.installed ? (OV.share.enabled ? 'On' : 'Off') : 'Samba not installed',
+        esc(OV.share.enabled ? 'Windows machines can mount the cases folder' : 'Windows machines cannot mount the cases folder'),
+        OV.share.enabled ? '<span class="pill ok">On</span>' : ''));
+    }
+    if (OV.mitre) {
+      tiles.push(tile('mitre', 'i-matrix', 'MITRE ATT&CK', esc(OV.mitre.version ? `Release ${OV.mitre.version}` : 'No tables'),
+        esc(OV.mitre.built ? `Built on this host on ${OV.mitre.built}` : 'Refresh to build them')));
+    }
+    if (OV.plugins) {
+      tiles.push(tile('plugins', 'i-plug', 'Plugins', `${fmtN(OV.plugins.count)} installed`,
+        esc(`${OV.plugins.on} on, ${OV.plugins.count - OV.plugins.on} off`)));
+    }
+    $('ov-tiles').innerHTML = tiles.join('');
+  }
+
+  // ── Tool health ─────────────────────────────────────────────────────
+  const TOOL_STATUS = {
+    ok: ['ok', 'ready'], alternative: ['ok', 'fallback'], missing: ['bad', 'missing'],
+    // Neither is a fault: nothing the operator does clears them.
+    optional: ['neutral', 'optional'], retired: ['neutral', 'retired'],
+  };
+  let TOOL_ENTRIES = [];
+
+  function renderToolHealth() {
+    const onlyProblems = $('tools-only-problems').checked;
+    const rows = TOOL_ENTRIES.filter(e => !onlyProblems || e.status === 'missing');
+    const tbody = document.querySelector('#tools-table tbody');
+    if (!rows.length) {
+      tbody.innerHTML = `<tr><td colspan="5" class="placeholder">${onlyProblems
+        ? 'No tool problems on this host.' : 'Nothing to show.'}</td></tr>`;
+      return;
+    }
+    tbody.innerHTML = rows.map(e => {
+      const [cls, label] = TOOL_STATUS[e.status] || ['neutral', e.status];
+      return `<tr>
+        <td><span class="pill ${cls}">${esc(label)}</span></td>
+        <td><code>${esc(e.needs)}</code></td>
+        <td>${esc(e.used_by)}</td>
+        <td>${esc(e.detail || '')}</td>
+        <td>${esc(e.installed_by || '')}</td></tr>`;
+    }).join('');
+  }
+
+  async function loadToolHealth() {
+    {
+      const data = await AtlasShell.api('config/tools');
+      TOOL_ENTRIES = data.entries || [];
+      const c = data.counts || {};
+      const ready = (c.ok || 0) + (c.alternative || 0);
+      $('tools-stats').innerHTML = [
+        ['Ready', ready, c.alternative ? `${fmtN(c.alternative)} through a fallback` : 'present on this host', 'ok'],
+        ['Missing', c.missing || 0, 'needed, not found', (c.missing ? 'bad' : '')],
+        ['Optional', c.optional || 0, 'not installed; the tool is skipped', ''],
+        ['Retired', c.retired || 0, 'no longer used', ''],
+      ].map(([l, v, s, cls]) => `<div class="stat"><div class="v ${cls}">${fmtN(v)}</div><div class="l">${esc(l)}</div><div class="stat-s">${esc(s)}</div></div>`).join('');
+      $('tools-summary').textContent = data.install_report_at ? `Last install check ${data.install_report_at}.` : '';
+      say('tools-msg', '');
+      renderToolHealth();
+      OV.tools = { missing: c.missing || 0, ready };
+      badge('tools', c.missing || '', c.missing ? 'bad' : '');
+      renderOverview();
+    }
+  }
+  const toolsFailed = (message) => say('tools-msg', `Could not read tool health: ${message}`, 'err');
+  $('tools-refresh-btn').addEventListener('click', () =>
+    whileBusy($('tools-refresh-btn'), () => track('tools', loadToolHealth(), toolsFailed)));
+  $('tools-only-problems').addEventListener('change', renderToolHealth);
+
+  // ── MITRE tables: status and refresh ────────────────────────────────
+  // The refresh is a subprocess the server tracks in a state file; the page
+  // polls that state while it runs and stops when it settles.
+  let mitrePoll = null;
+  const MITRE_PILL = { idle: '', running: 'info', success: 'ok', error: 'bad' };
+
+  function renderMitre(data) {
+    const inst = data.installed || {}, bund = data.bundled || {}, r = data.refresh || {};
+    const built = (inst.built_at || '').slice(0, 10);
+    $('mitre-stats').innerHTML = [
+      ['Release', inst.present ? (inst.version || '?') : 'none', inst.present ? `bundled: ${bund.version || 'none'}` : 'no tables on this host'],
+      ['Techniques', inst.present ? fmtN(inst.techniques) : '–', ''],
+      ['Groups', inst.present ? fmtN(inst.groups) : '–', ''],
+      ['Software', inst.present ? fmtN(inst.software) : '–', ''],
+      ['Mitigations', inst.present ? (inst.mitigations == null ? 'none' : fmtN(inst.mitigations)) : '–', ''],
+    ].map(([l, v, s]) => `<div class="stat"><div class="v">${esc(v)}</div><div class="l">${esc(l)}</div>${s ? `<div class="stat-s">${esc(s)}</div>` : ''}</div>`).join('');
+    $('mitre-summary').textContent = inst.present
+      ? `Built on this host on ${built || 'an unknown date'}.`
+      : 'No tables are installed on this host yet.';
+    const pill = $('mitre-state');
+    pill.textContent = r.state || 'idle';
+    pill.className = `pill ${MITRE_PILL[r.state] || ''}`;
+    const when = r.finished_at || r.started_at || '';
+    $('mitre-message').textContent =
+      (r.message || '') + (when ? ` (${when.replace('T', ' ').slice(0, 16)} UTC)` : '');
+    const btn = $('mitre-refresh-btn');
+    btn.disabled = r.state === 'running';
+    btn.lastChild.textContent = r.state === 'running' ? 'Refreshing…' : 'Refresh from MITRE';
+    const wrap = $('mitre-log-wrap');
+    wrap.hidden = !(r.log || []).length;
+    if (!wrap.hidden) $('mitre-log').textContent = r.log.join('\n');
+    if (r.state === 'running' && !mitrePoll) {
+      mitrePoll = setInterval(() => track('mitre', loadMitre(), mitreFailed), 2000);
+    } else if (r.state !== 'running' && mitrePoll) {
+      clearInterval(mitrePoll); mitrePoll = null;
+      track('tools', loadToolHealth(), toolsFailed);   // a rebuilt table can change what the tools report
+    }
+    OV.mitre = { version: inst.present ? inst.version : '', built };
+    renderOverview();
+  }
+
+  async function loadMitre() {
+    renderMitre(await AtlasShell.api('config/mitre'));
+  }
+  const mitreFailed = (message) => { $('mitre-message').textContent = `Could not read the MITRE status: ${message}`; };
+  $('mitre-refresh-btn').addEventListener('click', async () => {
+    $('mitre-refresh-btn').disabled = true;
+    try {
+      await AtlasShell.apiPost('config/mitre/refresh', {});
+    } catch (err) {
+      $('mitre-message').textContent = err && err.message ? err.message : String(err);
+    }
+    await track('mitre', loadMitre(), mitreFailed);
+  });
+
+  // ── Providers ───────────────────────────────────────────────────────
+  let LAST_PROVIDERS = [];
+  // The provider loaded into the form with Edit, while its name is unchanged.
+  let EDITING = null;
+  const showMsg = msgFor('llm-msg');
+  const listMsg = msgFor('llm-list-msg');
+
+  // A role's model override (ATLAS_AGENT_MODEL, REASON_MODEL, DAIR_MODEL,
+  // ATLAS_REVIEW_MODEL) is read before its provider's model, so while one is
+  // set the tables below are not what the run uses. Saving the role's
+  // provider, or assigning the role again, clears it.
+  function renderModelOverrides(overrides) {
+    const el = $('llm-override-banner');
+    el.hidden = !overrides.length;
+    if (!overrides.length) { el.textContent = ''; return; }
+    const lines = overrides.map(o => {
+      const shown = o.provider_model
+        ? `${esc(o.provider)} would use ${esc(o.provider_model)}`
+        : 'no provider model is set';
+      return `${esc(o.var)}=${esc(o.model)} in .env decides the ${esc(o.role)} role (${shown}).`;
+    });
+    el.innerHTML = 'Runs will not use the models below: ' + lines.join(' ')
+      + " Saving a role's provider under Roles in a run clears that role's override.";
+  }
+
+  function renderProvidersTable(providers) {
+    LAST_PROVIDERS = providers;
+    const tbody = document.querySelector('#llm-providers-table tbody');
+    if (!providers.length) {
+      tbody.innerHTML = '<tr><td colspan="6" class="placeholder">No providers yet. Add one to give the roles a model.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = providers.map(p => `
+      <tr>
+        <td><b>${esc(p.name)}</b><span class="cell-sub mono">${esc(p.base_url || '—')}</span></td>
+        <td class="mono">${esc(p.model || '—')}</td>
+        <td class="hide-small"><span class="pill ${p.key_set ? 'ok' : 'bad'}">${p.key_set ? 'set' : 'not set'}</span></td>
+        <td class="hide-small">${esc(p.thinking || 'auto')}</td>
+        <td class="hide-small">${p.roles.map(r => `<span class="role-chip-sm">${esc(r)}</span>`).join('') || '<span class="cell-sub">none</span>'}</td>
+        <td class="acts">
+          <button class="btn ghost sm" type="button" data-edit-provider="${esc(p.name)}" aria-label="Edit ${esc(p.name)}">Edit</button>
+          ${p.name === 'llmhub' ? '' : `<button class="btn ghost sm bad" type="button" data-delete-provider="${esc(p.name)}" aria-label="Remove ${esc(p.name)}">Remove</button>`}
+        </td>
+      </tr>`).join('');
+    tbody.querySelectorAll('[data-edit-provider]').forEach(btn => {
+      btn.addEventListener('click', () => loadProviderIntoForm(btn.dataset.editProvider));
+    });
+    tbody.querySelectorAll('[data-delete-provider]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const name = btn.dataset.deleteProvider;
+        const held = (LAST_PROVIDERS.find(p => p.name === name) || { roles: [] }).roles;
+        if (held.length) {
+          // The server refuses to remove a provider that still serves a role.
+          listMsg(`${name} still serves ${held.join(', ')}. Give ${held.length === 1 ? 'that role' : 'those roles'} another provider under Roles in a run first.`, false);
+          return;
+        }
+        if (!(await confirmInline(btn, `Remove ${name}?`, 'Remove'))) return;
+        try {
+          await AtlasShell.apiPost('config/llm/delete', { name });
+          listMsg(`Removed ${name}.`, true);
+          await loadLlmConfig();
+          loadPrices().catch(e => say('usage-prices-msg', e.message, 'err'));
+        } catch (e) { listMsg(e.message, false); }
+      });
+    });
+  }
+
+  function resetProviderForm() {
+    closeInline();
+    EDITING = null;
+    $('llm-form-title').textContent = 'Add a provider';
+    $('llm-preset').value = '';
+    ['llm-name', 'llm-base-url', 'llm-model', 'llm-api-key'].forEach(id => { $(id).value = ''; });
+    $('llm-thinking').value = 'auto';
+    say('llm-msg', '');
+  }
+
+  function loadProviderIntoForm(name) {
+    const p = LAST_PROVIDERS.find(x => x.name === name);
+    if (!p) return;
+    resetProviderForm();
+    EDITING = p.name;
+    $('llm-form-title').textContent = `Edit ${p.name}`;
+    $('llm-name').value = p.name;
+    $('llm-base-url').value = p.base_url || '';
+    $('llm-model').value = p.model || '';
+    $('llm-thinking').value = p.thinking || 'auto';
+    openPanel('llm-form', 'llm-base-url');
+  }
+  $('llm-add-btn').addEventListener('click', () => { resetProviderForm(); openPanel('llm-form', 'llm-preset'); });
+  $('llm-form-close').addEventListener('click', () => {
+    resetProviderForm();   // a typed key does not stay behind in a hidden form
+    $('llm-form').hidden = true;
+    $('llm-add-btn').focus();
+  });
+
+  // What each role does in a run, for the Roles in a run table. Ids must
+  // match the role names the server sends in config/llm's `roles`
+  // (core/llm_setup.py PROVIDER_ROLE_VARS); the order here is the order a
+  // run uses them. A role the server reports that is missing here still gets
+  // a row, so a new backend role shows up as unexplained, not missing.
+  const ROLE_REF = [
+    {
+      id: 'analyst',
+      task: 'Runs the investigation: picks which forensic tools to call, reads their output, writes the findings.',
+      skills: 'Dependable tool calling, long context, holds its instructions over hundreds of turns.',
+      pick: 'Your strongest model. Most of a run’s quality comes from this one.',
+    },
+    {
+      id: 'reason',
+      task: 'Challenges the analyst while the run is live: peer-reviews hypotheses, audits citations, scores confidence.',
+      skills: 'Careful reasoning, scepticism, answers that keep to the shape it was asked for.',
+      pick: 'A reasoning-tuned model. A different family from the analyst catches more.',
+    },
+    {
+      id: 'dair',
+      task: 'Phase director. After each tool batch it judges which phase the run is in (Triage, Collect, Analyze, Scan, Report) and when to move on.',
+      skills: 'Short, consistent, schema-shaped replies. Speed matters: it is called constantly.',
+      pick: 'Small and fast. A large model here mostly buys latency.',
+    },
+    {
+      id: 'report',
+      task: 'Writes the narrative report sections from the finished claims and conclusions.',
+      skills: 'Readable prose, adds nothing its input does not support, fluent in the report language.',
+      pick: 'A medium model that writes well in the language you want the report in.',
+    },
+    {
+      id: 'reviewer',
+      task: 'Grades the finished run: reads the trace and the report, then writes recommendations. One pass, no tools.',
+      skills: 'Long-context reading and critical judgement.',
+      pick: 'Medium to large, and not the same model as the analyst: independence is the point.',
+    },
+  ];
+
+  let OVERRIDDEN = new Set();
+  function renderRolesTable(providers) {
+    const known = ROLE_REF.filter(r => ROLES.includes(r.id));
+    const extra = ROLES.filter(r => !ROLE_REF.some(k => k.id === r))
+      .map(id => ({ id, task: '', skills: '', pick: '' }));
+    const owner = (role) => (providers.find(p => p.roles.includes(role)) || {}).name || '';
+    document.querySelector('#roles-table tbody').innerHTML = known.concat(extra).map(r => {
+      const cur = owner(r.id);
+      // The analyst cannot be off; every other role can, and report then
+      // writes with the analyst's provider.
+      const none = r.id === 'analyst'
+        ? (cur ? '' : '<option value="" selected disabled>No provider</option>')
+        : `<option value=""${cur ? '' : ' selected'}>Off${r.id === 'report' ? ' (uses the analyst’s provider)' : ''}</option>`;
+      const options = none + providers.map(p =>
+        `<option value="${esc(p.name)}"${p.name === cur ? ' selected' : ''}>${esc(p.name)}${p.model ? ' · ' + esc(p.model) : ''}${p.key_set ? '' : ' (no key)'}</option>`).join('');
+      const overridden = OVERRIDDEN.has(r.id)
+        ? ' <span class="pill warn" title="A model override in .env decides this role; saving its provider here clears it">override</span>' : '';
+      return `<tr>
+        <td class="mono nowrap"><b>${esc(r.id)}</b>${overridden}</td>
+        <td class="hide-small">${esc(r.task || '—')}</td>
+        <td class="hide-narrow">${esc(r.pick || '—')}${r.skills ? `<span class="cell-sub">${esc(r.skills)}</span>` : ''}</td>
+        <td><select data-role="${esc(r.id)}" data-current="${esc(cur)}" data-keep="role:${esc(r.id)}" aria-label="Provider for ${esc(r.id)}">${options}</select></td>
+      </tr>`;
+    }).join('');
+  }
+
+  $('roles-save-btn').addEventListener('click', () => whileBusy($('roles-save-btn'), async () => {
+    // A role a model override decides is saved again even when its provider
+    // did not change: assigning a role clears its override.
+    const changed = Array.from(document.querySelectorAll('#roles-table select[data-role]'))
+      .filter(sel => sel.value && (sel.value !== sel.dataset.current || OVERRIDDEN.has(sel.dataset.role))
+        || (!sel.value && sel.dataset.current));
+    if (!changed.length) { say('roles-msg', 'Nothing changed.', 'ok'); return; }
+    say('roles-msg', 'Saving…');
+    const saved = [];
+    try {
+      for (const sel of changed) {
+        await AtlasShell.apiPost('config/llm/role', { role: sel.dataset.role, provider: sel.value });
+        saved.push(sel.dataset.role);
+      }
+      clearDirty($('roles-group'));
+      await loadLlmConfig();
+      const keyless = changed.filter(sel => {
+        const p = LAST_PROVIDERS.find(x => x.name === sel.value);
+        return p && !p.key_set;
+      }).map(sel => `${sel.dataset.role} (${sel.value})`);
+      say('roles-msg', 'Saved. The next call uses these providers; a run under way keeps the ones it started with.'
+        + (keyless.length ? ` No API key is stored for ${keyless.join(', ')}; if the endpoint needs one, the role fails until it is added.` : ''),
+        keyless.length ? 'err' : 'ok');
+      loadPrices().catch(e => say('usage-prices-msg', e.message, 'err'));
+    } catch (e) {
+      say('roles-msg', (saved.length ? `Saved ${saved.join(', ')}; ` : '') + e.message, 'err');
+      await loadLlmConfig();
+    }
+  }));
+
+  // A preset adds a provider. Its id is taken as the name only while no
+  // provider has it: saving under an existing name edits that provider.
+  function freeProviderName(base) {
+    const taken = new Set(LAST_PROVIDERS.map(p => p.name));
+    let name = base;
+    for (let n = 2; taken.has(name); n += 1) name = `${base}-${n}`;
+    return name;
+  }
+
+  function applyPreset() {
+    const preset = PRESETS.find(p => p.id === $('llm-preset').value);
+    if (!preset) return;
+    // On a provider loaded with Edit a preset fills the endpoint only; the
+    // provider keeps its name and roles.
+    const nameBox = $('llm-name');
+    if (!(EDITING && nameBox.value.trim() === EDITING)) {
+      EDITING = null;
+      if (preset.id) nameBox.value = freeProviderName(preset.id);
+    }
+    if (preset.base_url) $('llm-base-url').value = preset.base_url;
+    // Never copy a dashboard role or username into the model box. Only a
+    // preset's own default_model is prefilled; a preset without one leaves
+    // the choice to Test connection's list.
+    const presetModel = (preset.default_model || '').trim();
+    if (presetModel && !IDENTITY_MODEL_IDS.has(presetModel.toLowerCase())) {
+      $('llm-model').value = presetModel;
+    } else if (!presetModel) {
+      $('llm-model').value = '';
+    }
+  }
+  $('llm-preset').addEventListener('change', applyPreset);
+
+  // What the three-call capability check found, next to the model it is
+  // about. The roles and the Thinking setting are chosen against it.
+  function capabilityNote(c) {
+    if (!c) return '';
+    if (!c.answered) {
+      return ` The model did not answer a short question${c.error ? ': ' + c.error : ''}.`;
+    }
+    const parts = [
+      c.tool_calling ? 'tool calling works' : 'no tool call came back (the analyst role needs one)',
+      c.thinking_observed
+        ? 'thinking observed' + (c.thinking_field ? ' in ' + c.thinking_field : '')
+        : 'no thinking observed',
+    ];
+    if (c.thinking_observed) {
+      parts.push(c.control_accepted === false
+        ? 'a thinking level is refused; Auto is the only setting that applies'
+        : 'a thinking level is accepted' + (c.accepted_values ? ' (' + c.accepted_values.join(', ') + ')' : ''));
+    }
+    if (c.cap_needed) parts.push('an explicit completion cap is needed and will be sent');
+    return ' ' + parts.join('; ') + '.';
+  }
+
+  async function loadLlmConfig() {
+    const data = await AtlasShell.api('config/llm');
+    PRESETS = data.presets; ROLES = data.roles;
+    IDENTITY_MODEL_IDS = new Set((data.identity_model_ids || []).map(s => s.toLowerCase()));
+    const chosen = $('llm-preset').value;
+    $('llm-preset').innerHTML = '<option value="">Choose a preset…</option>' +
+      PRESETS.map(p => `<option value="${esc(p.id)}">${esc(p.label)}</option>`).join('');
+    $('llm-preset').value = chosen;
+    renderProvidersTable(data.providers);
+    OVERRIDDEN = new Set((data.model_overrides || []).map(o => o.role));
+    keepEdits($('roles-group'), () => renderRolesTable(data.providers));
+    renderModelOverrides(data.model_overrides || []);
+    const analyst = data.providers.find(p => p.roles.includes('analyst'));
+    OV.llm = {
+      analyst: analyst ? { provider: analyst.name, model: analyst.model } : null,
+      assigned: ROLES.filter(r => data.providers.some(p => p.roles.includes(r))).length,
+      roles: ROLES.length,
+      overrides: (data.model_overrides || []).length,
+      keyless: data.providers.filter(p => !p.key_set).flatMap(p => p.roles),
+    };
+    badge('llm', analyst ? (data.providers.length || '') : '!', analyst ? '' : 'bad');
+    renderOverview();
+  }
+
+  $('llm-test-btn').addEventListener('click', () => whileBusy($('llm-test-btn'), async () => {
+    showMsg('Testing…', true);
+    try {
+      const result = await AtlasShell.apiPost('config/llm/probe', {
+        base_url: $('llm-base-url').value.trim(),
+        api_key: $('llm-api-key').value,
+        // With a model filled in the test also asks that model one question,
+        // the only way to learn whether it reasons: the property the levels
+        // are chosen against.
+        model: $('llm-model').value.trim(),
+        name: $('llm-name').value.trim(),
+      });
+      if (result.ok) {
+        $('llm-model-list').innerHTML = (result.models || []).map(id =>
+          `<option value="${esc(id)}"></option>`).join('');
+        const listed = (result.models || []).length;
+        showMsg((listed ? `Reachable: ${listed} model(s) listed.` : 'Reachable.')
+          + (result.capabilities ? '' : ' Enter a model id to also test what it can do.')
+          + capabilityNote(result.capabilities), true);
+      } else {
+        showMsg(`Not reachable: ${result.error || 'HTTP ' + result.status}`, false);
+      }
+    } catch (e) { showMsg(e.message, false); }
+  }));
+
+  function saveProvider() {
+    const name = $('llm-name').value.trim();
+    // Roles are set under Roles in a run. A save under the name of an
+    // existing provider edits it and keeps the roles it has, however the
+    // form was opened; saving it with none would take them away.
+    const existing = LAST_PROVIDERS.find(p => p.name === name);
+    return AtlasShell.apiPost('config/llm/save', {
+      preset_id: $('llm-preset').value,
+      name,
+      base_url: $('llm-base-url').value.trim(),
+      model: $('llm-model').value.trim(),
+      api_key: $('llm-api-key').value,
+      store_key_in: $('llm-store-key-in').value,
+      roles: existing ? existing.roles : [],
+      thinking: $('llm-thinking').value,
+      skip_probe: $('llm-skip-probe').checked,
+    });
+  }
+
+  $('llm-save-btn').addEventListener('click', () => whileBusy($('llm-save-btn'), async () => {
+    const modelVal = $('llm-model').value.trim();
+    if (IDENTITY_MODEL_IDS.has(modelVal.toLowerCase())) {
+      showMsg('The model id cannot be a dashboard role (admin/analyst/viewer). Use a catalogue id from Test connection.', false);
+      return;
+    }
+    showMsg('Saving…', true);
+    const savedName = $('llm-name').value.trim();
+    const savedPreset = PRESETS.find(p => p.id === $('llm-preset').value);
+    try {
+      const result = await saveProvider();
+      $('llm-api-key').value = '';
+      await loadLlmConfig();
+      // A provider is ready for a role, now or later, only with its key. A
+      // saved provider missing from the list is the built-in hub, which the
+      // list hides while it has neither a key nor a role.
+      const saved = LAST_PROVIDERS.find(p => p.name === savedName) || { key_set: false, roles: [] };
+      const keyNote = !saved.key_set && (!savedPreset || savedPreset.needs_api_key)
+        ? ` No API key is stored for ${savedName}${savedPreset ? '' : ' (if its endpoint needs one)'}` +
+          (saved.roles.length ? '; its roles fail until you add one.' : '; add one before you give it a role.')
+        : '';
+      resetProviderForm();
+      $('llm-form').hidden = true;
+      listMsg(`Saved ${savedName}.` + (result.api_key && result.api_key.keyring_failed
+        ? ` (The keyring write failed: ${result.api_key.keyring_failed}. The key is in .env instead.)` : '') + keyNote, true);
+      loadPrices().catch(e => say('usage-prices-msg', e.message, 'err'));
+    } catch (e) { showMsg(e.message, false); }
+  }));
+
+  // ── Thinking levels ─────────────────────────────────────────────────
+  const effortMsg = msgFor('effort-msg');
+  async function loadEffortConfig() {
+    const data = await AtlasShell.api('config/effort');
+    document.querySelector('#effort-table tbody').innerHTML = (data.roles || []).map(r => {
+      // An unset role renders as unset, not as its default already chosen.
+      // A role with a level of its own runs at that level when unset; every
+      // other role then follows the provider's Thinking setting.
+      const own = r.default && r.default !== 'default' ? r.default : '';
+      const unset = !r.value;
+      const blank = unset ? `<option value="" selected>${esc(own
+        ? `Not set (${own}, this role's default)` : 'Not set (provider setting applies)')}</option>` : '';
+      const options = blank + (data.values || []).map(v => {
+        const label = v === 'default' ? 'Endpoint default' : v;
+        const suffix = own && v === own ? ' (default for this role)' : '';
+        const chosen = !unset && r.value === v ? ' selected' : '';
+        return `<option value="${esc(v)}"${chosen}>${esc(label + suffix)}</option>`;
+      }).join('');
+      const warn = r.invalid
+        ? ` <span class="pill bad">${esc(r.var)}=${esc(r.invalid)} is not a level</span>` : '';
+      return `<tr>
+        <td class="nowrap"><b>${esc(r.label)}</b><span class="cell-sub mono">${esc(r.var)}</span>${warn}</td>
+        <td>${esc(r.blurb)}</td>
+        <td><select data-effort-role="${esc(r.role)}" data-keep="effort:${esc(r.role)}" aria-label="Thinking level for ${esc(r.label)}">${options}</select></td>
+      </tr>`;
+    }).join('');
+    const pin = data.analyst_endpoint || {};
+    const note = $('effort-pin-note');
+    note.hidden = !pin.pinned;
+    note.textContent = pin.pinned
+      ? `${pin.provider}/${pin.model} requires no reasoning while Atlas's tools are on the request, so the analyst's level is not applied on this endpoint. Every other role is unaffected.`
+      : '';
+  }
+
+  $('effort-save-btn').addEventListener('click', () => whileBusy($('effort-save-btn'), async () => {
+    const roles = {};
+    document.querySelectorAll('[data-effort-role]').forEach(el => {
+      // A role still on "Not set" is left out rather than written blank.
+      if (el.value) roles[el.getAttribute('data-effort-role')] = el.value;
+    });
+    try {
+      await AtlasShell.apiPost('config/effort/save', { roles });
+      effortMsg('Saved. The next call uses these levels; a run under way keeps the level it started with.', true);
+      await loadEffortConfig();
+    } catch (e) { effortMsg(e.message, false); }
+  }));
+
+  // ── Enrichment keys ─────────────────────────────────────────────────
+  const osintMsg = msgFor('osint-msg');
+  let OSINT_FIELDS = [];
+
+  function renderOsintFields(fields) {
+    OSINT_FIELDS = fields;
+    $('osint-fields').innerHTML = fields.map(f => `
+      <div class="set-row">
+        <div><div class="row-label">${esc(f.label)}
+            <span class="pill ${f.key_set ? 'ok' : ''}">${f.key_set ? 'key set' : 'no key'}</span></div>
+          ${f.description ? `<p class="row-help">${esc(f.description)}</p>` : ''}</div>
+        <div class="row-ctl${f.url !== undefined ? ' stack' : ''}">
+          ${f.url !== undefined ? `<input type="text" data-osint-url="${esc(f.id)}" value="${esc(f.url)}"
+              placeholder="https://misp.example.org" aria-label="${esc(f.label)} server address" />` : ''}
+          <input type="password" data-osint-key="${esc(f.id)}" autocomplete="off"
+            placeholder="${f.key_set ? 'Leave empty to keep the key' : 'Paste a key'}" aria-label="${esc(f.label)} API key" />
+        </div>
+      </div>`).join('');
+    const set = fields.filter(f => f.key_set).length;
+    badge('osint', fields.length ? `${set}/${fields.length}` : '');
+  }
+
+  async function loadOsintConfig() {
+    renderOsintFields((await AtlasShell.api('config/osint')).fields);
+  }
+
+  $('osint-save-btn').addEventListener('click', () => whileBusy($('osint-save-btn'), async () => {
+    osintMsg('Saving…', true);
+    const storeIn = $('osint-store-key-in').value;
+    const payload = {};
+    OSINT_FIELDS.forEach(f => {
+      const keyEl = document.querySelector(`[data-osint-key="${f.id}"]`);
+      const urlEl = document.querySelector(`[data-osint-url="${f.id}"]`);
+      const entry = { api_key: keyEl ? keyEl.value : '', store_key_in: storeIn };
+      if (urlEl) entry.url = urlEl.value.trim();
+      payload[f.id] = entry;
+    });
+    try {
+      const result = await AtlasShell.apiPost('config/osint/save', payload);
+      const failures = Object.entries(result.saved || {})
+        .filter(([, r]) => r.keyring_failed)
+        .map(([id, r]) => `${id}: ${r.keyring_failed}`);
+      await loadOsintConfig();
+      osintMsg('Saved.' + (failures.length
+        ? ` (The keyring write failed and the key is in .env instead: ${failures.join('; ')}.)` : ''), true);
+    } catch (e) { osintMsg(e.message, false); }
+  }));
+
+  // ── Sign-in and sessions ────────────────────────────────────────────
+  const sessionMsg = msgFor('session-msg');
+
+  async function loadSessionLimits() {
+    const data = await AtlasShell.api('config/session');
+    $('session-idle').value = data.idle_hours;
+    $('session-max').value = data.max_hours;
+  }
+  async function loadToolConfig() {
+    const data = await AtlasShell.api('config/tool');
+    $('tool-viewer-chat').checked = !!data.viewer_chat_enabled;
+  }
+
+  // One Save for the group: the session limits and the viewer chat switch
+  // are two settings on the server, written one after the other.
+  $('session-save-btn').addEventListener('click', () => whileBusy($('session-save-btn'), async () => {
+    let saved = null;
+    try {
+      saved = await AtlasShell.apiPost('config/session/save', {
+        idle_hours: Number($('session-idle').value),
+        max_hours: Number($('session-max').value),
+      });
+      $('session-idle').value = saved.idle_hours;
+      $('session-max').value = saved.max_hours;
+      await AtlasShell.apiPost('config/tool/save', {
+        viewer_chat_enabled: $('tool-viewer-chat').checked,
+      });
+      sessionMsg(`Saved. Users are signed out after ${saved.idle_hours} h idle, ${saved.max_hours} h at most.`, true);
+    } catch (e) {
+      sessionMsg((saved ? 'The session limits were saved; the viewer chat setting was not: ' : '') + e.message, false);
+    }
+  }));
+
+  // ── Users ───────────────────────────────────────────────────────────
+  const usersMsg = msgFor('users-msg');
+
+  async function loadUsers() {
+    const data = await AtlasShell.api('config/users');
+    const users = data.users || [];
+    const tbody = document.querySelector('#users-table tbody');
+    tbody.innerHTML = users.length ? users.map(u => `
+      <tr>
+        <td><b>${esc(u.username)}</b><span class="cell-sub">${esc(u.email || '')}</span></td>
+        <td>
+          <select data-role-for="${esc(String(u.id))}" aria-label="Role of ${esc(u.username)}">
+            ${['viewer', 'analyst', 'admin'].map(r =>
+              `<option value="${r}" ${r === u.role ? 'selected' : ''}>${r}</option>`).join('')}
+          </select>
+        </td>
+        <td class="hide-small"><span class="pill ${u.is_active ? 'ok' : ''}">${u.is_active ? 'active' : 'disabled'}</span></td>
+        <td class="acts">
+          <button class="btn ghost sm" type="button" data-toggle-active="${esc(String(u.id))}" data-active="${u.is_active ? 'true' : 'false'}" data-username="${esc(u.username)}" aria-label="${u.is_active ? 'Disable' : 'Enable'} ${esc(u.username)}">${u.is_active ? 'Disable' : 'Enable'}</button>
+          <button class="btn ghost sm" type="button" data-reset-password="${esc(String(u.id))}" data-username="${esc(u.username)}" aria-label="Reset the password of ${esc(u.username)}">Reset password</button>
+          <button class="btn ghost sm bad" type="button" data-delete-user="${esc(String(u.id))}" data-username="${esc(u.username)}" aria-label="Delete ${esc(u.username)}">Delete</button>
+        </td>
+      </tr>`).join('') : '<tr><td colspan="4" class="placeholder">No users.</td></tr>';
+
+    tbody.querySelectorAll('select[data-role-for]').forEach(sel => {
+      sel.addEventListener('change', async () => {
+        try {
+          await AtlasShell.apiPost('config/users/update_role',
+            { user_id: Number(sel.dataset.roleFor), role: sel.value });
+          usersMsg('Role changed.', true);
+          await loadUsers();
+        } catch (e) { usersMsg(e.message, false); await loadUsers(); }
+      });
+    });
+    tbody.querySelectorAll('[data-toggle-active]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        try {
+          const active = btn.dataset.active !== 'true';
+          await AtlasShell.apiPost('config/users/set_active', {
+            user_id: Number(btn.dataset.toggleActive), active,
+          });
+          usersMsg(`${btn.dataset.username} ${active ? 'enabled' : 'disabled'}.`, true);
+          await loadUsers();
+        } catch (e) { usersMsg(e.message, false); }
+      });
+    });
+    tbody.querySelectorAll('[data-delete-user]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        if (!(await confirmInline(btn, `Delete ${btn.dataset.username}? This cannot be undone.`))) return;
+        try {
+          await AtlasShell.apiPost('config/users/delete', { user_id: Number(btn.dataset.deleteUser) });
+          usersMsg(`${btn.dataset.username} deleted.`, true);
+          await loadUsers();
+        } catch (e) { usersMsg(e.message, false); }
+      });
+    });
+    tbody.querySelectorAll('[data-reset-password]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        // Shown as typed, as the old prompt was: a mistyped password nobody
+        // saw would lock the user out.
+        const password = await askInline(btn, `New password for ${btn.dataset.username}`, 'text');
+        if (!password) return;
+        try {
+          await AtlasShell.apiPost('config/users/reset_password', {
+            user_id: Number(btn.dataset.resetPassword), new_password: password,
+          });
+          usersMsg(`Password reset. ${btn.dataset.username} has been signed out everywhere.`, true);
+        } catch (e) { usersMsg(e.message, false); }
+      });
+    });
+
+    OV.users = {
+      count: users.length,
+      admins: users.filter(u => u.role === 'admin').length,
+      analysts: users.filter(u => u.role === 'analyst').length,
+      viewers: users.filter(u => u.role === 'viewer').length,
+      disabled: users.filter(u => !u.is_active).length,
+    };
+    badge('users', users.length || '');
+    renderOverview();
+  }
+
+  $('u-add-btn').addEventListener('click', () => openPanel('u-form', 'u-username'));
+  function closeUserForm() {
+    ['u-username', 'u-email', 'u-password'].forEach(id => { $(id).value = ''; });
+    say('u-create-msg', '');
+    $('u-form').hidden = true;
+  }
+  $('u-form-close').addEventListener('click', () => { closeUserForm(); $('u-add-btn').focus(); });
+  $('u-create-btn').addEventListener('click', () => whileBusy($('u-create-btn'), async () => {
+    const username = $('u-username').value.trim();
+    try {
+      await AtlasShell.apiPost('config/users/create', {
+        username,
+        email: $('u-email').value.trim(),
+        password: $('u-password').value,
+        role: $('u-role').value,
+      });
+      closeUserForm();
+      usersMsg(`${username} created.`, true);
+      await loadUsers();
+    } catch (e) { say('u-create-msg', e.message, 'err'); }
+  }));
+
+  // ── Cases ───────────────────────────────────────────────────────────
+  const casesMsg = msgFor('cases-msg');
+
+  async function loadCasesTable() {
+    const data = await AtlasShell.api('cases');
+    const cases = data.cases || [];
+    const tbody = document.querySelector('#cases-table tbody');
+    tbody.innerHTML = cases.length ? cases.map(c => {
+      const traces = c.traces || [];
+      const last = traces.reduce((m, t) => Math.max(m, Number(t.mtime) || 0), 0);
+      return `<tr>
+        <td><b>${esc(c.case_id)}</b>${c.case_id !== c.case_dir
+          ? `<span class="cell-sub">folder: ${esc(c.case_dir)}</span>` : ''}</td>
+        <td class="r hide-small">${fmtN(traces.length)}</td>
+        <td class="hide-small">${last ? esc(new Date(last * 1000).toLocaleDateString(AtlasShell.lang())) : '<span class="cell-sub">no run yet</span>'}</td>
+        <td class="acts">
+          <button class="btn ghost sm" type="button" data-rename="${esc(c.case_dir)}" data-case-id="${esc(c.case_id)}" aria-label="Rename ${esc(c.case_id)}">Rename</button>
+          <button class="btn ghost sm bad" type="button" data-delete-case="${esc(c.case_dir)}" aria-label="Delete ${esc(c.case_id)}">Delete</button>
+        </td>
+      </tr>`;
+    }).join('') : '<tr><td colspan="4" class="placeholder">No cases yet.</td></tr>';
+    tbody.querySelectorAll('[data-delete-case]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const dir = btn.dataset.deleteCase;
+        if (!(await confirmInline(btn, `Move ${dir} to .deleted/?`))) return;
+        try {
+          await AtlasShell.apiPost('case/delete', { case_id: dir });
+          casesMsg(`${dir} moved to .deleted/.`, true);
+          await loadCasesTable();
+        } catch (e) { casesMsg(e.message, false); }
+      });
+    });
+    tbody.querySelectorAll('[data-rename]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const next = await askInline(btn, 'New case ID', 'text', btn.dataset.caseId);
+        if (!next || next.trim() === btn.dataset.caseId) return;
+        try {
+          await AtlasShell.apiPost('case/move', { case_id: btn.dataset.rename, new_case_id: next.trim() });
+          casesMsg(`Renamed to ${next.trim()}.`, true);
+          await loadCasesTable();
+        } catch (e) { casesMsg(e.message, false); }
+      });
+    });
+    OV.cases = cases.length;
+    badge('cases', cases.length || '');
+    renderOverview();
+  }
+
+  // ── Mail ────────────────────────────────────────────────────────────
+  const mailMsg = msgFor('mail-msg');
+
+  function renderMailState(configured) {
+    const pill = $('mail-state');
+    pill.textContent = configured ? 'set up' : 'not set up';
+    pill.className = `pill ${configured ? 'ok' : 'warn'}`;
+    OV.mail = { configured };
+    badge('mail', configured ? '' : 'Not set', configured ? '' : 'warn');
+    renderOverview();
+  }
+
+  async function loadMailConfig() {
+    const data = await AtlasShell.api('config/mail');
+    $('m-host').value = data.host || '';
+    $('m-port').value = data.port || 587;
+    $('m-user').value = data.user || '';
+    $('m-from').value = data.from_addr || '';
+    $('m-starttls').checked = !!data.starttls;
+    renderMailState(!!(data.host || '').trim());
+  }
+  function mailPayload() {
+    return {
+      host: $('m-host').value.trim(),
+      port: $('m-port').value.trim(),
+      user: $('m-user').value.trim(),
+      password: $('m-password').value,
+      starttls: $('m-starttls').checked,
+    };
+  }
+  $('m-test-btn').addEventListener('click', () => whileBusy($('m-test-btn'), async () => {
+    mailMsg('Testing…', true);
+    try {
+      const result = await AtlasShell.apiPost('config/mail/test', mailPayload());
+      mailMsg(result.ok ? 'Connected and signed in.' : `Failed: ${result.error}`, result.ok);
+    } catch (e) { mailMsg(e.message, false); }
+  }));
+  $('m-save-btn').addEventListener('click', () => whileBusy($('m-save-btn'), async () => {
+    try {
+      await AtlasShell.apiPost('config/mail/save', { ...mailPayload(), from_addr: $('m-from').value.trim() });
+      $('m-password').value = '';
+      mailMsg('Saved.', true);
+      renderMailState(!!$('m-host').value.trim());
+    } catch (e) { mailMsg(e.message, false); }
+  }));
+
+  // ── Network share ───────────────────────────────────────────────────
+  const shareEnableMsg = msgFor('share-enable-msg');
+  const sharePasswordMsg = msgFor('share-password-msg');
+
+  function renderShareStatus(data) {
+    const el = $('share-status');
+    const pill = $('share-pill');
+    const enableBtn = $('share-enable-btn');
+    const disableBtn = $('share-disable-btn');
+    OV.share = { installed: !!data.installed, enabled: !!data.enabled, passwordSet: !!data.password_set };
+    badge('share', data.installed ? (data.enabled ? 'On' : 'Off') : '');
+    renderOverview();
+    if (!data.installed) {
+      pill.textContent = 'not installed'; pill.className = 'pill';
+      el.textContent = 'Samba is not installed on this host. Install it through install.sh\'s '
+        + 'network-share option, or with: sudo apt-get install samba && bin/atlas-sudoers'
+        + (data.error ? ` (${data.error})` : '');
+      enableBtn.disabled = true;
+      disableBtn.disabled = true;
+      $('share-password-card').hidden = true;
+      return;
+    }
+    $('share-password-card').hidden = false;
+    enableBtn.disabled = !!data.enabled;
+    disableBtn.disabled = !data.enabled;
+    pill.textContent = data.enabled ? 'on' : 'off';
+    pill.className = `pill ${data.enabled ? 'ok' : ''}`;
+    if (!data.enabled) {
+      el.textContent = 'Off. Windows machines cannot mount the cases folder.';
+      return;
+    }
+    el.innerHTML = `On at <code>\\\\&lt;this host&gt;\\${esc(data.share_name)}</code>, `
+      + `serving <code>${esc(data.share_path)}</code> to ${esc(data.share_user)}. `
+      + `smbd is ${data.service_active ? 'running' : '<strong>not running</strong>'}; `
+      + `the share password is ${data.password_set ? 'set' : '<strong>not set yet</strong>, set one below'}.`;
+  }
+
+  async function loadShareStatus() {
+    renderShareStatus(await AtlasShell.api('config/share'));
+  }
+  $('share-enable-btn').addEventListener('click', async () => {
+    shareEnableMsg('Turning on…', true);
+    try {
+      renderShareStatus(await AtlasShell.apiPost('config/share/enable', {}));
+      shareEnableMsg('On.', true);
+    } catch (e) { shareEnableMsg(e.message, false); }
+  });
+  $('share-disable-btn').addEventListener('click', async () => {
+    shareEnableMsg('Turning off…', true);
+    try {
+      renderShareStatus(await AtlasShell.apiPost('config/share/disable', {}));
+      shareEnableMsg('Off.', true);
+    } catch (e) { shareEnableMsg(e.message, false); }
+  });
+  $('share-password-btn').addEventListener('click', () => whileBusy($('share-password-btn'), async () => {
+    const pw = $('share-password').value;
+    const again = $('share-password-confirm').value;
+    if (!pw) { sharePasswordMsg('Enter a password.', false); return; }
+    if (pw !== again) { sharePasswordMsg('The passwords do not match.', false); return; }
+    try {
+      const result = await AtlasShell.apiPost('config/share/set_password', { password: pw });
+      $('share-password').value = '';
+      $('share-password-confirm').value = '';
+      renderShareStatus(result);
+      sharePasswordMsg('Password set.', true);
+    } catch (e) { sharePasswordMsg(e.message, false); }
+  }));
+
+  // ── Plugins ─────────────────────────────────────────────────────────
+  const pluginUploadMsg = msgFor('plugin-upload-msg');
+  const pluginsMsg = msgFor('plugins-msg');
+
+  function renderPluginsTable(data) {
+    const plugins = data.addons || [];
+    const banner = $('plugins-global-banner');
+    banner.hidden = !!data.plugins_globally_enabled;
+    banner.textContent = data.plugins_globally_enabled ? ''
+      : 'ATLAS_PLUGINS turns every plugin off: each row below is off whatever its own switch says.';
+    const tbody = document.querySelector('#plugins-table tbody');
+    tbody.innerHTML = plugins.length ? plugins.map(a => `
+      <tr>
+        <td><b class="mono">${esc(a.name)}</b>${a.description ? `<span class="cell-sub">${esc(a.description)}</span>` : ''}</td>
+        <td class="nowrap">${esc(a.version) || '—'}</td>
+        <td>${esc(a.author) || '—'}</td>
+        <td><span class="pill ${a.enabled ? 'ok' : ''}">${a.enabled ? 'on' : 'off'}</span>${a.compatible ? ''
+          : ' <span class="pill bad" title="min_atlas_version not met">needs a newer Atlas</span>'}</td>
+        <td><input type="checkbox" class="switch" role="switch" data-toggle-plugin="${esc(a.name)}"
+          ${a.enabled ? 'checked' : ''} aria-label="${esc(a.name)}" /></td>
+      </tr>`).join('') : '<tr><td colspan="5" class="placeholder">No plugins found under plugins/.</td></tr>';
+    tbody.querySelectorAll('[data-toggle-plugin]').forEach(sw => {
+      sw.addEventListener('change', async () => {
+        const name = sw.dataset.togglePlugin;
+        sw.disabled = true;
+        try {
+          await AtlasShell.apiPost(`config/plugins/${sw.checked ? 'enable' : 'disable'}`, { name });
+          pluginsMsg(`${name} is ${sw.checked ? 'on' : 'off'} from the next run.`, true);
+          await loadPluginsConfig();
+        } catch (e) {
+          sw.checked = !sw.checked; sw.disabled = false;
+          pluginsMsg(e.message, false);
+        }
+      });
+    });
+    OV.plugins = {
+      count: plugins.length,
+      on: plugins.filter(a => a.enabled).length,
+      incompatible: plugins.filter(a => !a.compatible).length,
+    };
+    badge('plugins', plugins.length || '');
+    renderOverview();
+  }
+
+  async function loadPluginsConfig() {
+    renderPluginsTable(await AtlasShell.api('config/plugins'));
+  }
+
+  function readFileAsBase64(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        // readAsDataURL yields "data:<mime>;base64,<payload>"; the payload is
+        // what follows the comma.
+        const idx = reader.result.indexOf(',');
+        resolve(reader.result.slice(idx + 1));
+      };
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(file);
+    });
+  }
+
+  $('plugin-add-btn').addEventListener('click', () => openPanel('plugin-form', 'plugin-upload-name'));
+  $('plugin-form-close').addEventListener('click', () => {
+    $('plugin-upload-name').value = ''; $('plugin-upload-file').value = ''; say('plugin-upload-msg', '');
+    $('plugin-form').hidden = true; $('plugin-add-btn').focus();
+  });
+  $('plugin-upload-btn').addEventListener('click', () => whileBusy($('plugin-upload-btn'), async () => {
+    const name = $('plugin-upload-name').value.trim();
+    const fileInput = $('plugin-upload-file');
+    const file = fileInput.files[0];
+    if (!name) { pluginUploadMsg('Enter the plugin\'s name.', false); return; }
+    if (!file) { pluginUploadMsg('Choose a .zip file.', false); return; }
+    // The server takes at most 10 MB per request, and base64 adds about a
+    // third: a larger zip is refused here instead of after the upload.
+    if (file.size > 7 * 1024 * 1024) {
+      pluginUploadMsg('The file is too large: a zip may have 7 MB at most.', false);
+      return;
+    }
+    pluginUploadMsg('Uploading…', true);
+    try {
+      const zip_b64 = await readFileAsBase64(file);
+      await AtlasShell.apiPost('config/plugins/upload', { name, zip_b64 });
+      $('plugin-upload-name').value = '';
+      fileInput.value = '';
+      say('plugin-upload-msg', '');
+      $('plugin-form').hidden = true;
+      pluginsMsg(`Installed plugins/${name}/. It loads from the next run.`, true);
+      await loadPluginsConfig();
+    } catch (e) { pluginUploadMsg(e.message, false); }
+  }));
+
+  // ── Activity log ────────────────────────────────────────────────────
+  const activityMsg = msgFor('activity-msg');
+  const activityRetentionMsg = msgFor('activity-retention-msg');
+  let ACTIVITY = [];
+  let ACTIVITY_TOTAL = 0;
+  let ACTIVITY_RETENTION = 90;
+  const activityPager = makePager('activity', 'atlas.config.activityPageSize', (fromNav) => {
+    renderActivity();
+    if (fromNav) keepInView($('activity-table'));
+  });
+
+  function renderActivity() {
+    const needle = $('activity-filter').value.trim().toLowerCase();
+    const rows = needle ? ACTIVITY.filter(e =>
+      [e.username, e.event, e.case_id, e.detail, e.role].join(' ').toLowerCase().includes(needle)) : ACTIVITY;
+    const view = activityPager.view([rows.length]);
+    const shown = view.ranges[0] ? rows.slice(...view.ranges[0]) : [];
+    const tbody = document.querySelector('#activity-table tbody');
+    tbody.innerHTML = shown.length ? shown.map(e => `
+      <tr>
+        <td class="nowrap" title="${esc(e.ts)}">${esc(new Date(e.ts).toLocaleString(AtlasShell.lang()))}</td>
+        <td>${esc(e.username || '')}</td>
+        <td>${esc(e.role || '')}</td>
+        <td>${esc(e.event)}</td>
+        <td>${esc(e.case_id || '')}</td>
+        <td>${esc(e.detail || '')}</td>
+        <td class="mono">${esc(e.ip || '')}</td>
+      </tr>`).join('')
+      : `<tr><td colspan="7" class="placeholder">${needle ? 'No entry matches the filter.' : 'No entries.'}</td></tr>`;
+    $('activity-count').textContent = (needle ? `${fmtN(rows.length)} of the` : 'The')
+      + ` newest ${fmtN(ACTIVITY.length)} entries`
+      + (ACTIVITY_TOTAL > ACTIVITY.length ? ` of ${fmtN(ACTIVITY_TOTAL)}; the export carries every one.` : '.');
+    activityPager.draw(view, 'Entries');
+  }
+
+  async function loadActivity() {
+    const data = await AtlasShell.api('config/activity');
+    ACTIVITY = data.events || [];
+    ACTIVITY_TOTAL = data.count || ACTIVITY.length;
+    ACTIVITY_RETENTION = data.retention_days;
+    $('activity-retention').value = data.retention_days;
+    renderActivity();
+  }
+
+  $('activity-filter').addEventListener('input', () => { activityPager.page = 0; renderActivity(); });
+  $('activity-clear-btn').addEventListener('click', async () => {
+    const btn = $('activity-clear-btn');
+    if (!(await confirmInline(btn, 'Delete every activity entry? One entry recording the deletion stays.', 'Delete all'))) return;
+    try {
+      const r = await AtlasShell.apiPost('config/activity/clear', {});
+      activityMsg(`${fmtN(r.removed)} entries removed.`, true);
+      await loadActivity();
+    } catch (e) { activityMsg(e.message, false); }
+  });
+  $('activity-retention-btn').addEventListener('click', () => whileBusy($('activity-retention-btn'), async () => {
+    const btn = $('activity-retention-btn');
+    const days = Number($('activity-retention').value);
+    if (days < ACTIVITY_RETENTION &&
+        !(await confirmInline(btn, `Lower it to ${days} days? Older entries are removed now.`, 'Lower it'))) return;
+    try {
+      const r = await AtlasShell.apiPost('config/activity/retention', { days });
+      activityRetentionMsg(`Entries are kept for ${r.retention_days} days.`, true);
+      await loadActivity();
+    } catch (e) { activityRetentionMsg(e.message, false); }
+  }));
+
+  // ── Token spend ─────────────────────────────────────────────────────
+  const usageMsg = msgFor('usage-msg');
+  const usagePricesMsg = msgFor('usage-prices-msg');
+  const currencyMsg = msgFor('usage-currency-msg');
+  let USAGE_CURRENCY = 'EUR';
+
+  function fmtCost(v, unpriced) {
+    const s = Number(v || 0).toLocaleString(AtlasShell.lang(), { minimumFractionDigits: 2, maximumFractionDigits: 4 });
+    return `${s} ${esc(USAGE_CURRENCY)}${unpriced ? ' <span class="pill warn" title="calls of a model without a price">+' + fmtN(unpriced) + ' unpriced</span>' : ''}`;
+  }
+  function fmtCostText(v) {
+    return `${Number(v || 0).toLocaleString(AtlasShell.lang(), { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${USAGE_CURRENCY}`;
+  }
+  function usageQuery() {
+    return `period=${encodeURIComponent($('usage-period').value)}` +
+      `&months=${encodeURIComponent($('usage-months').value)}`;
+  }
+
+  // The runs are paged across the whole window. Each period keeps its
+  // heading and totals, and a page shows the slice of runs that falls on
+  // it, so a period split across two pages carries its heading on both.
+  let usagePeriods = [];
+  const usagePager = makePager('usage', 'atlas.config.usagePageSize', (fromNav) => {
+    renderUsageRuns();
+    if (fromNav) keepInView($('usage-periods'));
+  });
+
+  function usagePeriodHtml(p, runs) {
+    return `
+      <h4>${esc(p.key)} <span class="field-hint">${fmtN(p.runs.length)} runs · ${fmtN(p.input)} in / ${fmtN(p.output)} out · ${fmtCost(p.cost, p.unpriced)}</span></h4>
+      <table class="cfg-table">
+        <thead><tr><th>Started</th><th>Case and run</th><th>By</th><th>Models</th><th class="r">Calls</th><th class="r">Input</th><th class="r">Output</th><th class="r">Cost</th></tr></thead>
+        <tbody>${runs.map(r => `<tr>
+          <td class="nowrap" title="${esc(r.started)}">${esc(new Date(r.started).toLocaleString(AtlasShell.lang(), { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }))}</td>
+          <td>${esc(r.case_id)}<span class="cell-sub mono nowrap">${esc(r.command)} ${esc(r.run_id)}</span></td>
+          <td>${esc(r.started_by || '')}</td>
+          <td class="mono nowrap">${r.models.map(m => `<span title="${esc(m)}">${esc(String(m).split('|').pop())}</span>`).join('<br>')}</td>
+          <td class="r">${fmtN(r.calls)}${r.unreported ? `<span class="cell-sub">${fmtN(r.unreported)} without usage</span>` : ''}</td>
+          <td class="r">${fmtN(r.input)}<span class="cell-sub">${fmtN(r.cached)} cached</span></td>
+          <td class="r">${fmtN(r.output)}<span class="cell-sub">${fmtN(r.reasoning)} reasoning</span></td>
+          <td class="r wrap">${fmtCost(r.cost, r.unpriced)}</td>
+        </tr>`).join('')}</tbody>
+      </table>`;
+  }
+
+  function renderUsageRuns() {
+    const view = usagePager.view(usagePeriods.map(p => p.runs.length));
+    const html = usagePeriods.map((p, i) => view.ranges[i]
+      ? usagePeriodHtml(p, p.runs.slice(...view.ranges[i])) : '').join('');
+    $('usage-periods').innerHTML = html || '<p class="placeholder">No entries in this window.</p>';
+    usagePager.draw(view, 'Runs');
+  }
+
+  // The segmented controls set the hidden selects the loaders read.
+  document.querySelectorAll('.seg[data-select]').forEach(seg => {
+    const select = $(seg.dataset.select);
+    const sync = () => seg.querySelectorAll('button').forEach(b =>
+      b.setAttribute('aria-pressed', String(b.dataset.v === select.value)));
+    seg.addEventListener('click', (ev) => {
+      const b = ev.target.closest('button[data-v]');
+      if (!b || b.dataset.v === select.value) return;
+      select.value = b.dataset.v;
+      select.dispatchEvent(new Event('change'));
+      sync();
+    });
+    sync();
+  });
+
+  async function loadUsage() {
+    const data = await AtlasShell.api('config/usage', {
+      period: $('usage-period').value,
+      months: $('usage-months').value,
+    });
+    USAGE_CURRENCY = data.currency || 'EUR';
+    const imported = data.imported || {};
+    if (imported.error) usageMsg(imported.error, false);
+    else if (imported.runs) usageMsg(`Added ${fmtN(imported.runs)} earlier ${imported.runs === 1 ? 'run' : 'runs'} from their case folders.`, true);
+    $('usage-export').href = `/_dashboard/api/config/usage/export?${usageQuery()}`;
+    const t = data.total || {};
+    $('usage-stats').innerHTML = [
+      ['Runs', fmtN(t.runs), `since ${data.since || '–'}`],
+      ['Calls', fmtN(t.calls), t.unreported ? `${fmtN(t.unreported)} without usage` : 'all with usage'],
+      ['Input', fmtN(t.input), `${fmtN(t.cached)} cached`],
+      ['Output', fmtN(t.output), 'tokens'],
+      ['Cost', esc(fmtCostText(t.cost)), t.unpriced ? `${fmtN(t.unpriced)} calls unpriced` : 'every call priced'],
+    ].map(([l, v, s]) => `<div class="stat"><div class="v">${v}</div><div class="l">${l}</div><div class="stat-s">${esc(s)}</div></div>`).join('');
+    usagePeriods = (data.periods || []).map(p => ({ ...p, runs: p.runs || [] }));
+    renderUsageRuns();
+    const cases = data.cases || [];
+    document.querySelector('#usage-cases tbody').innerHTML = cases.length ? cases.map(c => `<tr>
+      <td>${esc(c.case_id)}</td><td class="r">${fmtN(c.runs)}</td><td class="r">${fmtN(c.calls)}</td>
+      <td class="r">${fmtN(c.input)}</td><td class="r">${fmtN(c.output)}</td><td class="r">${fmtN(c.cached)}</td>
+      <td class="r wrap">${fmtCost(c.cost, c.unpriced)}</td></tr>`).join('') :
+      '<tr><td colspan="7" class="placeholder">No entries.</td></tr>';
+    // The overview shows the newest period of the window.
+    const newest = usagePeriods.reduce((a, p) => (!a || p.key > a.key ? p : a), null);
+    OV.spend = newest ? {
+      period: newest.key, runs: newest.runs.length,
+      tokens: (newest.input || 0) + (newest.output || 0),
+      cost: fmtCostText(newest.cost) + (newest.unpriced ? `, ${fmtN(newest.unpriced)} calls unpriced` : ''),
+    } : { period: '', runs: 0, tokens: 0, cost: fmtCostText(0) };
+    renderOverview();
+  }
+
+  ['usage-period', 'usage-months'].forEach(id =>
+    $(id).addEventListener('change', () => {
+      usagePager.page = 0;
+      loadUsage().catch(e => usageMsg(e.message, false));
+    }));
+  $('usage-clear-all-btn').addEventListener('click', async () => {
+    const btn = $('usage-clear-all-btn');
+    if (!(await confirmInline(btn, 'Delete every token spend entry? This cannot be undone.', 'Delete all'))) return;
+    try {
+      const r = await AtlasShell.apiPost('config/usage/clear', { all: true });
+      usageMsg(`${fmtN(r.removed)} entries removed.`, true);
+      await loadUsage(); await loadPrices();
+    } catch (e) { usageMsg(e.message, false); }
+  });
+  $('usage-clear-before-btn').addEventListener('click', async () => {
+    const btn = $('usage-clear-before-btn');
+    const before = $('usage-before').value;
+    if (!before) { usageMsg('Pick a date first.', false); return; }
+    if (!(await confirmInline(btn, `Delete every entry before ${before}? This cannot be undone.`))) return;
+    try {
+      const r = await AtlasShell.apiPost('config/usage/clear', { before });
+      usageMsg(`${fmtN(r.removed)} entries removed.`, true);
+      await loadUsage(); await loadPrices();
+    } catch (e) { usageMsg(e.message, false); }
+  });
+
+  // ── Prices ──────────────────────────────────────────────────────────
+  async function loadPrices() {
+    const data = await AtlasShell.api('config/usage/prices');
+    USAGE_CURRENCY = data.currency || 'EUR';
+    // A reload from another group's save keeps edits not yet saved here.
+    keepEdits($('usage-currency').closest('.set-group'), () => {
+      const cur = $('usage-currency');
+      cur.value = cur.defaultValue = USAGE_CURRENCY;
+    });
+    $('usage-autoremove').checked = !!data.autoremove;
+    const models = data.models || [];
+    const prices = data.prices || {};
+    const tbody = document.querySelector('#usage-prices tbody');
+    keepEdits(tbody.closest('.set-group'), () => renderPriceRows(tbody, models, prices));
+    const unpriced = models.filter(m => {
+      const p = prices[m.key];
+      return !p || p.input === null || p.input === undefined;
+    }).length;
+    OV.prices = { unpriced };
+    badge('prices', unpriced || '', unpriced ? 'warn' : '');
+    renderOverview();
+  }
+
+  function renderPriceRows(tbody, models, prices) {
+    tbody.innerHTML = models.length ? models.map(m => {
+      const p = prices[m.key] || {};
+      const priced = p.input !== null && p.input !== undefined;
+      const cell = (f) => `<input type="number" min="0" step="0.0001" data-price-key="${esc(m.key)}" data-field="${f}" data-keep="price:${esc(m.key)}:${f}" value="${p[f] === null || p[f] === undefined ? '' : esc(String(p[f]))}" aria-label="${esc(m.model)} ${f} price" />`;
+      const from = [m.configured ? 'set up under Providers' : '', m.used ? 'used in runs' : ''].filter(Boolean).join(', ');
+      return `<tr>
+        <td><span class="mono">${esc(m.model)}</span>${priced ? '' : ' <span class="pill warn">no price</span>'}
+          <span class="cell-sub">${esc(m.provider)}${from ? ' · ' + esc(from) : ''}</span></td>
+        <td class="r">${cell('input')}</td><td class="r hide-small">${cell('cached')}</td><td class="r">${cell('output')}</td>
+        <td class="acts"><button class="btn ghost sm bad" type="button" data-delete-price="${esc(m.key)}" aria-label="Remove ${esc(m.model)} from the price list">Remove</button></td></tr>`;
+    }).join('') : '<tr><td colspan="5" class="placeholder">No model under Providers or in the ledger yet.</td></tr>';
+    tbody.querySelectorAll('[data-delete-price]').forEach(btn => btn.addEventListener('click', async () => {
+      const key = btn.dataset.deletePrice;
+      if (!(await confirmInline(btn, 'Remove it and its prices?', 'Remove'))) return;
+      try {
+        await AtlasShell.apiPost('config/usage/prices/delete', { key });
+        usagePricesMsg(`${key} removed from the price list.`, true);
+        await loadPrices(); await loadUsage();
+      } catch (e) { usagePricesMsg(e.message, false); }
+    }));
+  }
+
+  // Autoremove applies as soon as it is switched; its message goes to the
+  // footer of the group it sits in.
+  $('usage-autoremove').closest('.row-ctl').setAttribute('data-no-dirty', '');
+  $('usage-autoremove').addEventListener('change', async (ev) => {
+    const on = ev.target.checked;
+    try {
+      await AtlasShell.apiPost('config/usage/prices/save', { autoremove: on });
+      currencyMsg(on ? 'A model removed under Providers is now removed here too.'
+                     : 'Rows now stay until you remove them.', true);
+      await loadPrices(); await loadUsage();
+    } catch (e) { ev.target.checked = !on; currencyMsg(e.message, false); }
+  });
+  $('usage-currency-btn').addEventListener('click', () => whileBusy($('usage-currency-btn'), async () => {
+    try {
+      await AtlasShell.apiPost('config/usage/prices/save', { currency: $('usage-currency').value });
+      currencyMsg('Saved.', true);
+      await loadPrices(); await loadUsage();
+    } catch (e) { currencyMsg(e.message, false); }
+  }));
+  $('usage-prices-btn').addEventListener('click', () => whileBusy($('usage-prices-btn'), async () => {
+    const prices = {};
+    document.querySelectorAll('#usage-prices input[data-price-key]').forEach(inp => {
+      const entry = prices[inp.dataset.priceKey] || (prices[inp.dataset.priceKey] = {});
+      entry[inp.dataset.field] = inp.value === '' ? null : Number(inp.value);
+    });
+    // A row with neither input nor output price is not a price.
+    for (const k of Object.keys(prices)) {
+      if (prices[k].input === null && prices[k].output === null) { delete prices[k]; continue; }
+      if (prices[k].input === null || prices[k].output === null) {
+        usagePricesMsg(`${k}: input and output prices are both needed.`, false);
+        return;
+      }
+    }
+    try {
+      await AtlasShell.apiPost('config/usage/prices/save', { prices });
+      usagePricesMsg('Prices saved.', true);
+      await loadPrices(); await loadUsage();
+    } catch (e) { usagePricesMsg(e.message, false); }
+  }));
+
+  // ── Start ───────────────────────────────────────────────────────────
+  AtlasShell.init({ page: 'config', requiresCase: false }).then(() => {
+    if (!AtlasShell.roleAtLeast('admin')) {
+      $('app').innerHTML = '<p class="placeholder">Admin access required.</p>';
+      return;
+    }
+    syncShellHeight();
+    renderOverview();
+    track('llm', loadLlmConfig(), m => say('llm-list-msg', m, 'err'));
+    loadEffortConfig().catch(e => effortMsg(e.message, false));
+    track('osint', loadOsintConfig(), m => osintMsg(m, false));
+    loadToolConfig().catch(e => sessionMsg(e.message, false));
+    track('users', loadUsers(), m => usersMsg(m, false));
+    loadActivity().catch(e => activityMsg(e.message, false));
+    // The prices follow the usage read: it adds earlier runs, and the models
+    // they used belong on the price list.
+    const usage = loadUsage();
+    track('usage', usage, m => usageMsg(m, false));
+    track('prices', usage.catch(() => {}).then(() => loadPrices()), m => usagePricesMsg(m, false));
+    loadSessionLimits().catch(e => sessionMsg(e.message, false));
+    track('cases', loadCasesTable(), m => casesMsg(m, false));
+    track('mail', loadMailConfig(), m => mailMsg(m, false));
+    track('share', loadShareStatus(), m => shareEnableMsg(m, false));
+    track('plugins', loadPluginsConfig(), m => pluginsMsg(m, false));
+    track('tools', loadToolHealth(), toolsFailed);
+    track('mitre', loadMitre(), mitreFailed);
+  });
+})();
+</script>
+</body>
+</html>

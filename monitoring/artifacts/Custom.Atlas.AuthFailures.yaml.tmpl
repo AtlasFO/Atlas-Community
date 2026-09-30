@@ -1,0 +1,26 @@
+name: Custom.Atlas.AuthFailures
+description: |
+  Atlas-managed (Linux): tail the auth log for failed authentications and emit a
+  row per failure with the target user and source IP. Feeds the Python-side
+  Behavior.AuthBurst rule (N failures per source IP within a window → brute
+  force). Covers sshd "Failed password", PAM "authentication failure", and
+  "Invalid user" lines.
+
+type: CLIENT_EVENT
+
+parameters:
+  - name: AuthLog
+    description: Path to the auth log (Debian/Ubuntu default; RHEL uses /var/log/secure).
+    default: /var/log/auth.log
+
+sources:
+  - query: |
+      SELECT
+        timestamp(epoch=now()) AS timestamp_utc,
+        Line AS raw,
+        regex_replace(source=Line,
+          re=".*(?:Failed password|Invalid user)(?: for)?(?: invalid user)? (\\S+) from (\\S+).*",
+          replace="$1") AS user,
+        regex_replace(source=Line, re=".*from (\\d{1,3}(?:\\.\\d{1,3}){3}).*", replace="$1") AS source_ip
+      FROM watch_syslog(filename=AuthLog)
+      WHERE Line =~ "Failed password|authentication failure|Invalid user"

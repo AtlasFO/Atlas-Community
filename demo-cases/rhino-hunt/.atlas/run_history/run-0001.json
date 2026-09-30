@@ -1,0 +1,185 @@
+{
+  "schema_version": "1.0",
+  "run_id": "run-0001",
+  "started_at": "2026-09-29T16:46:18Z",
+  "finished_at": "2026-09-29T16:46:20Z",
+  "trigger": "cli-train",
+  "case_id": "RHINO-HUNT",
+  "mode": "no_agent",
+  "evidence_diff": {
+    "added": [
+      {
+        "path": "evidence/rhino2.log",
+        "evidence_id": "ev_415b7f37d5342e0d"
+      },
+      {
+        "path": "evidence/rhino3.log",
+        "evidence_id": "ev_82d787513478995f"
+      },
+      {
+        "path": "evidence/RHINOUSB.dd",
+        "evidence_id": "ev_40c2309e1b04b84f"
+      },
+      {
+        "path": "evidence/rhino.log",
+        "evidence_id": "ev_ce77321b4f22c119"
+      }
+    ],
+    "changed": [],
+    "removed": [],
+    "touched": [],
+    "counts": {
+      "added": 4,
+      "changed": 0,
+      "removed": 0,
+      "unchanged": 0,
+      "touched": 0,
+      "total_current": 4
+    }
+  },
+  "invalidation": {
+    "marked": [],
+    "skipped": []
+  },
+  "affected_claims": [],
+  "open_conflicts": [],
+  "affected_report_sections": [],
+  "rerun_brief_path": "/home/analyst/cases/RHINO-HUNT/.atlas/rerun_brief.md",
+  "work": {
+    "pending": true,
+    "first_scan": true,
+    "evidence": {
+      "added": 4,
+      "changed": 0,
+      "removed": 0
+    },
+    "claims_to_review": [],
+    "open_conflicts": [],
+    "questions": {
+      "open": [
+        "task-0001",
+        "task-0002",
+        "task-0003",
+        "task-0004"
+      ],
+      "new": [
+        "task-0001",
+        "task-0002",
+        "task-0003",
+        "task-0004"
+      ],
+      "reopened": [],
+      "followups": []
+    },
+    "context": {
+      "added": [],
+      "withdrawn": []
+    },
+    "unexamined_items": [],
+    "reasons": [
+      "first look at 4 evidence files",
+      "4 open questions (4 new)"
+    ]
+  },
+  "journal": [
+    {
+      "reason": "bootstrap",
+      "summary": "Lazy bootstrap created .atlas investigation state",
+      "details": {
+        "created": [
+          "claim_graph.json",
+          "evidence_catalog.json",
+          "investigation_memory.json",
+          "investigation_tasks.json",
+          "dependency_index.json",
+          "invalidation_queue.json",
+          "investigation_plan.json"
+        ]
+      },
+      "related_ids": [],
+      "ts": "2026-09-29T16:46:20Z"
+    },
+    {
+      "reason": "catalog_first_scan",
+      "summary": "First evidence catalog scan — baseline fingerprints recorded",
+      "details": {
+        "counts": {
+          "added": 4,
+          "changed": 0,
+          "removed": 0,
+          "unchanged": 0,
+          "touched": 0,
+          "total_current": 4
+        }
+      },
+      "related_ids": [],
+      "ts": "2026-09-29T16:46:20Z"
+    },
+    {
+      "reason": "evidence_added",
+      "summary": "New evidence introduced: evidence/rhino2.log",
+      "details": {
+        "path": "evidence/rhino2.log",
+        "evidence_id": "ev_415b7f37d5342e0d"
+      },
+      "related_ids": [
+        "ev_415b7f37d5342e0d"
+      ],
+      "ts": "2026-09-29T16:46:20Z"
+    },
+    {
+      "reason": "evidence_added",
+      "summary": "New evidence introduced: evidence/rhino3.log",
+      "details": {
+        "path": "evidence/rhino3.log",
+        "evidence_id": "ev_82d787513478995f"
+      },
+      "related_ids": [
+        "ev_82d787513478995f"
+      ],
+      "ts": "2026-09-29T16:46:20Z"
+    },
+    {
+      "reason": "evidence_added",
+      "summary": "New evidence introduced: evidence/RHINOUSB.dd",
+      "details": {
+        "path": "evidence/RHINOUSB.dd",
+        "evidence_id": "ev_40c2309e1b04b84f"
+      },
+      "related_ids": [
+        "ev_40c2309e1b04b84f"
+      ],
+      "ts": "2026-09-29T16:46:20Z"
+    },
+    {
+      "reason": "evidence_added",
+      "summary": "New evidence introduced: evidence/rhino.log",
+      "details": {
+        "path": "evidence/rhino.log",
+        "evidence_id": "ev_ce77321b4f22c119"
+      },
+      "related_ids": [
+        "ev_ce77321b4f22c119"
+      ],
+      "ts": "2026-09-29T16:46:20Z"
+    },
+    {
+      "reason": "operator_note",
+      "summary": "Rerun Brief regenerated for investigator continuity",
+      "details": {
+        "path": "/home/analyst/cases/RHINO-HUNT/.atlas/rerun_brief.md"
+      },
+      "related_ids": [],
+      "ts": "2026-09-29T16:46:20Z"
+    }
+  ],
+  "milestones_recorded": [],
+  "why_summary": [
+    "bootstrap: Lazy bootstrap created .atlas investigation state",
+    "catalog_first_scan: First evidence catalog scan — baseline fingerprints recorded",
+    "evidence_added: New evidence introduced: evidence/rhino2.log",
+    "evidence_added: New evidence introduced: evidence/rhino3.log",
+    "evidence_added: New evidence introduced: evidence/RHINOUSB.dd",
+    "evidence_added: New evidence introduced: evidence/rhino.log"
+  ]
+}

@@ -1,0 +1,1190 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Atlas Brain Earth</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<script src="assets/i18n.js"></script>
+<style>
+
+  /* Every colour and radius below is a custom property that the active theme
+     sets at runtime. Four directions ship in this file; ?theme= or the Style
+     control switches between them without rebuilding the graph. */
+  :root {
+    --bg: #05060a;
+    --bg-panel: rgba(14,18,28,.72);
+    --bg-panel-2: rgba(30,38,54,.66);
+    --fg: #eaeefb;
+    --fg-dim: #7d879e;
+    --border: rgba(120,140,180,.18);
+    --accent: #6ea8ff;
+    --radius: 10px;
+    --font: -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,sans-serif;
+    --canvas: #05060a;
+    --canvas-repeat: no-repeat;
+    --glow: 0 0 24px rgba(80,120,220,.20);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; height: 100vh; overflow: hidden;
+    background: var(--bg); color: var(--fg);
+    font: 12.5px/1.55 var(--font);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Slim, translucent chrome that fades into the canvas. A solid bar with a
+     hard rule under it would frame the graph like a widget in an admin tool. */
+  header {
+    position: fixed; inset: 0 0 auto 0; z-index: 9;
+    display: flex; align-items: center; gap: 14px;
+    height: 46px; padding: 0 18px;
+    background: linear-gradient(180deg, rgba(0,0,0,.55), rgba(0,0,0,0));
+    backdrop-filter: blur(10px);
+  }
+  header h1 {
+    margin: 0; font-size: 13px; font-weight: 650; letter-spacing: .01em;
+    display: flex; align-items: center; gap: 8px;
+  }
+  header h1 .mark {
+    width: 9px; height: 9px; border-radius: 50%;
+    background: var(--accent); box-shadow: var(--glow);
+  }
+  header .stat {
+    color: var(--fg-dim); font-size: 11px; letter-spacing: .02em;
+  }
+  header .sep { color: var(--border); }
+
+  #cy {
+    position: absolute; inset: 0;
+    background: var(--canvas);
+    background-repeat: var(--canvas-repeat);
+  }
+
+  .card {
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    backdrop-filter: blur(16px) saturate(1.3);
+    box-shadow: 0 10px 40px rgba(0,0,0,.45);
+  }
+
+  /* The Neon theme sets data-neon: scan lines and corner brackets. */
+  /* A separate element instead of #cy::after: Cytoscape puts its own canvas
+     layers into #cy, and a pseudo-element would fight their stacking order. */
+  #scan {
+    position: fixed; inset: 0; pointer-events: none; z-index: 4;
+    display: none;
+  }
+  :root[data-neon="1"] #scan {
+    display: block;
+    background: repeating-linear-gradient(0deg,
+      rgba(0,255,225,.05) 0px, rgba(0,255,225,.05) 1px,
+      transparent 1px, transparent 3px);
+    mix-blend-mode: screen;
+  }
+  :root[data-neon="1"] .card { position: relative; }
+  :root[data-neon="1"] .card::before,
+  :root[data-neon="1"] .card::after {
+    content: ""; position: absolute; width: 11px; height: 11px;
+    border-color: var(--accent); border-style: solid;
+  }
+  :root[data-neon="1"] .card::before {
+    left: -1px; top: -1px; border-width: 2px 0 0 2px;
+  }
+  :root[data-neon="1"] .card::after {
+    right: -1px; bottom: -1px; border-width: 0 2px 2px 0;
+  }
+  :root[data-neon="1"] .h { text-shadow: 0 0 10px currentColor; }
+  :root[data-neon="1"] header h1 { text-shadow: 0 0 14px var(--accent); }
+  .h {
+    display: block; color: var(--fg-dim); font-size: 9.5px;
+    letter-spacing: .14em; text-transform: uppercase; margin-bottom: 5px;
+  }
+
+  #panel {
+    position: fixed; right: 14px; top: 60px; width: 228px; z-index: 8;
+    padding: 12px 13px;
+  }
+  #panel .grp { margin-bottom: 11px; }
+  #panel .grp:last-child { margin-bottom: 0; }
+  #panel input[type=search] {
+    width: 100%; background: rgba(0,0,0,.3); color: var(--fg);
+    border: 1px solid var(--border); border-radius: calc(var(--radius) - 4px);
+    padding: 6px 8px; font: inherit;
+  }
+  #panel input[type=search]::placeholder { color: var(--fg-dim); }
+  #panel input[type=search]:focus {
+    outline: none; border-color: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent);
+  }
+
+  /* Pill segments instead of boxy buttons. */
+  .seg {
+    display: flex; gap: 2px; padding: 2px;
+    background: rgba(0,0,0,.28); border-radius: calc(var(--radius) - 2px);
+    border: 1px solid var(--border);
+  }
+  .seg button {
+    flex: 1; background: transparent; color: var(--fg-dim);
+    border: 0; border-radius: calc(var(--radius) - 4px);
+    padding: 4px 2px; font: inherit; font-size: 11px; cursor: pointer;
+    transition: background .14s, color .14s;
+  }
+  .seg.wrap { flex-wrap: wrap; }
+  .seg.wrap button { flex: 1 1 62px; }
+  .seg button:hover { color: var(--fg); }
+  .seg button[aria-pressed=true] {
+    background: var(--bg-panel-2); color: var(--fg);
+    box-shadow: inset 0 0 0 1px var(--border);
+  }
+
+  .chk { display: flex; align-items: center; gap: 7px; color: var(--fg-dim); }
+  .chk input { accent-color: var(--accent); }
+  #reset {
+    width: 100%; background: transparent; color: var(--fg-dim);
+    border: 1px solid var(--border); border-radius: calc(var(--radius) - 4px);
+    padding: 5px 0; font: inherit; font-size: 11px; cursor: pointer;
+  }
+  #reset:hover { border-color: var(--accent); color: var(--fg); }
+  #filterNote {
+    color: var(--accent); min-height: 15px; font-size: 11px;
+    letter-spacing: .02em;
+  }
+
+  #legend {
+    position: fixed; left: 14px; top: 60px; z-index: 8;
+    padding: 10px 12px; font-size: 11px; color: var(--fg-dim);
+  }
+  #legend .row {
+    display: flex; align-items: center; gap: 7px; padding: 1px 0;
+    white-space: nowrap;
+  }
+  #legend .dot {
+    width: 8px; height: 8px; border-radius: 50%; flex: none;
+    box-shadow: 0 0 8px currentColor;
+  }
+  #legend .n { margin-left: auto; opacity: .65; font-variant-numeric: tabular-nums; }
+  #legend .foot {
+    margin-top: 7px; padding-top: 6px; border-top: 1px solid var(--border);
+    font-size: 10px; opacity: .8; line-height: 1.35;
+  }
+
+  #tooltip {
+    position: fixed; display: none; max-width: 340px; z-index: 12;
+    padding: 9px 11px; font-size: 11.5px; pointer-events: none;
+  }
+  #tooltip .t-title { font-weight: 620; color: var(--fg); }
+  #tooltip .t-meta { color: var(--fg-dim); }
+
+  #details {
+    position: fixed; left: 14px; bottom: 16px; width: 316px; z-index: 9;
+    display: none; padding: 11px 13px; font-size: 11.5px;
+  }
+  #details .d-title { font-weight: 620; margin-bottom: 4px; padding-right: 18px; }
+  #details .d-meta { color: var(--fg-dim); }
+  #details .d-path {
+    color: var(--fg-dim); font-family: ui-monospace,Consolas,monospace;
+    font-size: 10.5px; word-break: break-all; margin-top: 5px; opacity: .85;
+  }
+  #details button {
+    margin-top: 9px; background: var(--bg-panel-2); color: var(--fg);
+    border: 1px solid var(--border); border-radius: calc(var(--radius) - 4px);
+    padding: 4px 9px; font: inherit; font-size: 11px; cursor: pointer;
+  }
+  #details button:hover { border-color: var(--accent); }
+  #d-close {
+    position: absolute; right: 11px; top: 9px;
+    color: var(--fg-dim); cursor: pointer;
+  }
+
+  #timeline {
+    position: fixed; display: none; align-items: center; gap: 11px;
+    left: 50%; transform: translateX(-50%); bottom: 16px; z-index: 5;
+    padding: 8px 14px; min-width: 400px; max-width: 46vw;
+  }
+  #timeline button {
+    background: var(--bg-panel-2); color: var(--fg);
+    border: 1px solid var(--border); border-radius: 50%;
+    width: 26px; height: 26px; cursor: pointer; font-size: 10px; line-height: 1;
+  }
+  #timeline button:hover { border-color: var(--accent); }
+  #timeline input[type=range] { flex: 1; accent-color: var(--accent); }
+  #timeline .t-label {
+    color: var(--fg-dim); font-size: 11px; white-space: nowrap;
+    min-width: 176px; text-align: right; font-variant-numeric: tabular-nums;
+  }
+  #hint {
+    position: fixed; right: 14px; bottom: 16px; z-index: 6;
+    color: var(--fg-dim); font-size: 10.5px; opacity: .7;
+    letter-spacing: .03em;
+  }
+  .error { padding: 90px 24px; color: #ff6b6b; font-size: 14px; }
+</style>
+</head>
+<body>
+<header>
+  <h1><span class="mark"></span>Brain Earth <span class="stat" id="meta"></span></h1>
+  <span class="stat" id="counts"></span>
+</header>
+<div id="cy"></div>
+<div id="scan"></div>
+<div id="tooltip" class="card"></div>
+<div id="legend" class="card"></div>
+
+<div id="panel" class="card">
+  <div class="grp">
+    <label class="h" for="q" data-i18n="globe.search">Search</label>
+    <input id="q" type="search" placeholder="Title, path, tag…   /" />
+  </div>
+  <div class="grp">
+    <span class="h" data-i18n="globe.style">Style</span>
+    <div class="seg wrap" id="seg-theme">
+      <button data-v="neon" aria-pressed="false">Neon</button>
+      <button data-v="orbit" aria-pressed="true">Orbit</button>
+      <button data-v="blueprint" aria-pressed="false">Blueprint</button>
+      <button data-v="aurora" aria-pressed="false">Aurora</button>
+    </div>
+  </div>
+  <div class="grp">
+    <span class="h" data-i18n="globe.layout">Layout</span>
+    <div class="seg" id="seg-layout">
+      <button data-v="rings" aria-pressed="true" data-i18n="globe.layoutRings">Rings</button>
+      <button data-v="force" aria-pressed="false" data-i18n="globe.layoutForce">Forces</button>
+      <button data-v="cluster" aria-pressed="false" data-i18n="globe.layoutCluster">Cluster</button>
+    </div>
+  </div>
+  <div class="grp">
+    <span class="h" data-i18n="globe.level">Level</span>
+    <div class="seg" id="seg-maturity">
+      <button data-v="all" aria-pressed="true" data-i18n="globe.levelAll">all</button>
+      <button data-v="accepted" aria-pressed="false" data-i18n="globe.levelAccepted">accepted only</button>
+    </div>
+  </div>
+  <div class="grp">
+    <span class="h" data-i18n="globe.decisions">Decisions</span>
+    <div class="seg" id="seg-decisions">
+      <button data-v="all" aria-pressed="true" data-i18n="globe.decisionsAll">all</button>
+      <button data-v="kept" aria-pressed="false" data-i18n="globe.decisionsKept">hide rejected</button>
+    </div>
+  </div>
+  <div class="grp chk">
+    <input id="labels" type="checkbox" /><label for="labels" data-i18n="globe.alwaysLabels">Always show labels</label>
+  </div>
+  <div class="grp" id="filterNote"></div>
+  <div class="grp"><button id="reset" data-i18n="globe.resetFilters">Reset filters</button></div>
+</div>
+
+<div id="details" class="card">
+  <span id="d-close" role="button" aria-label="Close"><svg viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></span>
+  <div class="d-title" id="d-title"></div>
+  <div class="d-meta" id="d-meta"></div>
+  <div class="d-path" id="d-path"></div>
+  <button id="d-filter" data-i18n="globe.filterCluster">Filter to this cluster</button>
+</div>
+
+<div id="timeline" class="card">
+  <button id="t-play" title="Play growth">▶</button>
+  <input id="t-slider" type="range" min="0" max="0" value="0" step="1" />
+  <span class="t-label" id="t-label"></span>
+</div>
+<div id="hint" data-i18n="globe.hint">zoom in to see names · click a cluster to filter</div>
+
+<script src="vendor/cytoscape.min.js"></script>
+<script>
+(function () {
+  // ── Design directions ────────────────────────────────────────────────────
+  // Same data, same geometry, same controls. Only the look differs, so a
+  // comparison between the directions comes down to appearance alone.
+  //
+  // Two properties of the bundled Cytoscape build carry this:
+  //   underlay-*            soft halo, the only means of making a node glow
+  //   min-zoomed-font-size  names appear only when zooming in
+  // Without the second, an overview of hundreds of nodes is bound to be cluttered.
+  const HEX = 'url(\'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="56" height="48"><path d="M28 0 L42 8 L42 24 L28 32 L14 24 L14 8 Z" fill="none" stroke="%23131b2b" stroke-width="1"/></svg>\')';
+  const GRID_S = 'url(\'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40"><path d="M0 0 H40 M0 0 V40" fill="none" stroke="%230e1a22" stroke-width="1"/></svg>\')';
+  const GRID_L = 'url(\'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200"><path d="M0 0 H200 M0 0 V200" fill="none" stroke="%23152833" stroke-width="1"/></svg>\')';
+
+  const THEMES = {
+    // Near-black canvas with a hexagon grid, nodes as glowing beads, the
+    // orbits as dotted trails.
+    orbit: {
+      label: "Orbit",
+      css: {
+        "--bg": "#05060a",
+        "--bg-panel": "rgba(14,18,28,.72)",
+        "--bg-panel-2": "rgba(30,38,54,.66)",
+        "--fg": "#eaeefb", "--fg-dim": "#7d879e",
+        "--border": "rgba(120,140,180,.18)",
+        "--accent": "#6ea8ff", "--radius": "10px",
+        "--font": '-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,sans-serif',
+        "--canvas": "radial-gradient(ellipse 62% 58% at 50% 47%, rgba(40,60,110,.30) 0%, rgba(10,14,26,0) 70%)," +
+                    "radial-gradient(circle at 50% 47%, #0a0e18 0%, #05060a 68%)," + HEX,
+        "--canvas-repeat": "no-repeat, no-repeat, repeat",
+        "--glow": "0 0 24px rgba(80,120,220,.30)",
+      },
+      palette: {
+        case: "#5b9dff", concept: "#a97bff", technique: "#ff9e5e",
+        tool: "#35d7a1", decision: "#ffe27a", research: "#5ed1d1",
+        actor: "#ff6b7a", run: "#66748f", note: "#7f8ba4",
+        memory_candidate: "#ffc957",
+      },
+      // The halo is drawn as a rectangle, not in the node's shape. With a
+      // large padding the beads therefore look like tiles -- keep it tight
+      // and it reads as a soft edge.
+      bloom: 0.5, bloomPad: 2.5, sizeScale: 1.0, outline: 0,
+      hub: { shape: "round-hexagon", fill: "rgba(20,28,44,.85)", border: 1.4,
+             font: 15, opacity: 0.6 },
+      root: { shape: "round-hexagon", color: "#eef2ff", size: 44, bloom: 0.5 },
+      tick: { color: "#243149", size: 2.6, opacity: 0.9, spacing: 40 },
+      edge: { color: "#1d2941", opacity: 0.55, spine: "#3a5080" },
+      labelFont: 9, labelOpacity: 0.72, minZoomFont: 9,
+    },
+
+    // The view as a measuring instrument: orthogonal grid, monospace type,
+    // no glow, a single accent. Types are also told apart by shape, so the
+    // picture stays readable when printed in black and white.
+    blueprint: {
+      label: "Blueprint",
+      css: {
+        "--bg": "#070b10",
+        "--bg-panel": "rgba(10,16,22,.88)",
+        "--bg-panel-2": "rgba(18,28,38,.9)",
+        "--fg": "#dbe6ee", "--fg-dim": "#6d8497",
+        "--border": "rgba(90,170,190,.26)",
+        "--accent": "#4fd1c5", "--radius": "3px",
+        "--font": 'ui-monospace,"Cascadia Mono",Consolas,monospace',
+        "--canvas": "radial-gradient(ellipse 70% 60% at 50% 47%, rgba(30,70,80,.16) 0%, rgba(7,11,16,0) 72%)," +
+                    GRID_S + "," + GRID_L,
+        "--canvas-repeat": "no-repeat, repeat, repeat",
+        "--glow": "none",
+      },
+      palette: {
+        case: "#7fd3e8", concept: "#b9c6d4", technique: "#e0a878",
+        tool: "#7fd6b0", decision: "#e8d79a", research: "#8fc9c9",
+        actor: "#e08a90", run: "#54687a", note: "#8497a8",
+        memory_candidate: "#c9a86a",
+      },
+      bloom: 0, bloomPad: 0, sizeScale: 0.92, outline: 0.6,
+      hub: { shape: "round-rectangle", fill: "rgba(10,20,26,.9)", border: 1,
+             font: 12, opacity: 0.8 },
+      root: { shape: "round-rectangle", color: "#4fd1c5", size: 34, bloom: 0 },
+      tick: { color: "#1b3340", size: 2, opacity: 1, spacing: 30 },
+      edge: { color: "#16262f", opacity: 0.7, spine: "#2f5560" },
+      labelFont: 8, labelOpacity: 0.82, minZoomFont: 8,
+      shapes: {
+        case: "round-diamond", technique: "triangle", tool: "round-rectangle",
+        decision: "star",
+      },
+    },
+
+    // Deep blue-violet with veils of colour, larger beads, a strong glow and
+    // glass panels.
+    aurora: {
+      label: "Aurora",
+      css: {
+        "--bg": "#080b1a",
+        "--bg-panel": "rgba(28,26,58,.55)",
+        "--bg-panel-2": "rgba(58,52,104,.5)",
+        "--fg": "#f2eeff", "--fg-dim": "#9a94c4",
+        "--border": "rgba(170,150,255,.22)",
+        "--accent": "#b592ff", "--radius": "14px",
+        "--font": '-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,sans-serif',
+        "--canvas": "radial-gradient(ellipse 46% 40% at 28% 30%, rgba(96,72,220,.34) 0%, rgba(8,11,26,0) 68%)," +
+                    "radial-gradient(ellipse 42% 38% at 74% 66%, rgba(220,80,180,.24) 0%, rgba(8,11,26,0) 66%)," +
+                    "radial-gradient(ellipse 38% 34% at 62% 22%, rgba(60,190,200,.20) 0%, rgba(8,11,26,0) 64%)," +
+                    "radial-gradient(circle at 50% 48%, #101534 0%, #080b1a 72%)",
+        "--canvas-repeat": "no-repeat, no-repeat, no-repeat, no-repeat",
+        "--glow": "0 0 34px rgba(150,110,255,.38)",
+      },
+      palette: {
+        case: "#68b6ff", concept: "#c49bff", technique: "#ffb27a",
+        tool: "#57e8bb", decision: "#ffe9a3", research: "#7fe3e3",
+        actor: "#ff8fa3", run: "#8b93c8", note: "#a5a7d6",
+        memory_candidate: "#ffd47e",
+      },
+      bloom: 0.62, bloomPad: 3.5, sizeScale: 1.16, outline: 0,
+      hub: { shape: "ellipse", fill: "rgba(40,36,84,.7)", border: 1.6,
+             font: 15, opacity: 0.68 },
+      root: { shape: "ellipse", color: "#ffffff", size: 52, bloom: 0.62 },
+      tick: { color: "#2b2a58", size: 3, opacity: 0.7, spacing: 46 },
+      edge: { color: "#241f4a", opacity: 0.5, spine: "#6a5bb0" },
+      labelFont: 9.5, labelOpacity: 0.7, minZoomFont: 10,
+    },
+
+    // ── NEON ───────────────────────────────────────────────────────────────
+    // Cyberpunk: scan lines, corner brackets, a strong glow, capitals in a
+    // monospace face.
+    neon: {
+      label: "Neon", neon: true,
+      css: {
+        "--bg": "#04070a",
+        "--bg-panel": "rgba(6,16,20,.78)",
+        "--bg-panel-2": "rgba(0,58,64,.55)",
+        "--fg": "#d8fff8", "--fg-dim": "#5f9aa0",
+        "--border": "rgba(0,255,225,.30)",
+        "--accent": "#00ffe1", "--radius": "2px",
+        "--font": 'ui-monospace,"Cascadia Mono",Consolas,monospace',
+        "--canvas":
+          "radial-gradient(ellipse 60% 55% at 50% 46%, rgba(0,120,130,.22) 0%, rgba(4,7,10,0) 70%)," +
+          "radial-gradient(ellipse 40% 30% at 80% 78%, rgba(255,0,110,.16) 0%, rgba(4,7,10,0) 70%)," +
+          "radial-gradient(circle at 50% 46%, #061014 0%, #04070a 72%)",
+        "--canvas-repeat": "no-repeat, no-repeat, no-repeat",
+        "--glow": "0 0 18px rgba(0,255,225,.55)",
+      },
+      palette: {
+        case: "#00e5ff", concept: "#b26bff", technique: "#ff9f1c",
+        tool: "#00ff9c", decision: "#fff35c", research: "#5cf6ff",
+        actor: "#ff2e63", run: "#3f6b72", note: "#7fb0b5",
+        memory_candidate: "#ffd000",
+      },
+      bloom: 0.75, bloomPad: 3, sizeScale: 1.05, outline: 0,
+      hub: { shape: "round-rectangle", fill: "rgba(0,20,24,.9)", border: 1.6,
+             font: 13, opacity: 0.95 },
+      root: { shape: "round-diamond", color: "#ff2e63", size: 46, bloom: 0.85,
+              text: "#04070a" },
+      tick: { color: "#0d4a4f", size: 2.4, opacity: 1, spacing: 26 },
+      edge: { color: "#0b3b40", opacity: 0.7, spine: "#00b7a3" },
+      labelFont: 8.5, labelOpacity: 0.9, minZoomFont: 8,
+    },
+  };
+
+  const FALLBACK = "#8a93a6";
+  const POLL_MS = 10000;
+
+  // Three tiers, and the radius tells which: inside the accepted knowledge
+  // from brain/wiki, then the agent runs, outside the decision log from
+  // brain/inbox/processed.
+  //
+  // IMPORTANT: the outer ring is NOT a queue. The real queue is
+  // brain/inbox/memory-candidates (globe.py counts pending_candidates from
+  // it); the nodes in the outer ring have already been decided (rejected,
+  // processed or archived). The type memory_candidate only says where a note
+  // came from. Calling the ring "unreviewed" claims something the data does
+  // not say.
+  //
+  // An unknown type counts as knowledge, so it does not silently land in the
+  // outer ring and look like a decision there.
+  const TIER_ACCEPTED = 1, TIER_RUN = 2, TIER_CANDIDATE = 3;
+  const TIER = {
+    concept: TIER_ACCEPTED, technique: TIER_ACCEPTED, tool: TIER_ACCEPTED,
+    case: TIER_ACCEPTED, decision: TIER_ACCEPTED, note: TIER_ACCEPTED,
+    actor: TIER_ACCEPTED, research: TIER_ACCEPTED,
+    run: TIER_RUN, memory_candidate: TIER_CANDIDATE,
+  };
+  const tierOf = t => TIER[t] === undefined ? TIER_ACCEPTED : TIER[t];
+
+  // Ring geometry. Fixed numbers rather than sliders: the picture has to be the
+  // same for two people looking at the same brain.
+  const R_HUB = 210;
+  const RING = { 1: 340, 2: 520, 3: 700 };
+  const SPACING = 22;
+  const SUBRING = 30;
+
+  let cy = null, lastGenerated = null, buckets = [], lastData = null;
+  const replay = { timer: null };
+  const params = new URLSearchParams(location.search);
+  const state = {
+    theme: THEMES[params.get("theme")] ? params.get("theme") : "orbit",
+    layout: params.get("layout") || "rings",
+    maturity: params.get("maturity") || "all",
+    decisions: params.get("decisions") || "all",
+    labels: params.get("labels") === "1",
+    cluster: null, query: "", pinned: null,
+  };
+  const T = () => THEMES[state.theme];
+  const $ = id => document.getElementById(id);
+  // Translation lookups. Named tr, not t: t holds a theme or a timeline bucket
+  // in several functions below. Count labels have a One and a Many form.
+  const tr = AtlasI18n.t;
+  const trCount = (key, n) => tr(key + (n === 1 ? "One" : "Many"), { n: n });
+  // Note titles, types, tags and paths come from the brain's notes, which runs
+  // write from case evidence: text, never markup, wherever HTML is built.
+  const esc = s => String(s == null ? "" : s).replace(/[&<>"']/g, c =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+  // Letter-spacing by thin spaces: this Cytoscape build has no letter-spacing.
+  const track = s => s.split("").join(" ");
+
+  function applyThemeCss() {
+    const t = T(), root = document.documentElement;
+    for (const [k, v] of Object.entries(t.css)) root.style.setProperty(k, v);
+    // One switch instead of theme logic in the CSS: data-neon turns on the
+    // scan lines and corner brackets.
+    if (t.neon) root.setAttribute("data-neon", "1");
+    else root.removeAttribute("data-neon");
+  }
+
+  // ── cytoscape style ──────────────────────────────────────────────────────
+  function buildStyle() {
+    const t = T();
+    const st = [
+      { selector: "node", style: {
+        "background-color": FALLBACK, "background-opacity": "data(opacity)",
+        width: "data(size)", height: "data(size)",
+        label: "data(label)", color: "var-fg",
+        "font-size": t.labelFont, "text-opacity": t.labelOpacity,
+        "text-valign": "bottom", "text-margin-y": 3,
+        "text-max-width": 130, "text-wrap": "ellipsis",
+        "min-zoomed-font-size": state.labels ? 0 : t.minZoomFont,
+        "border-width": t.outline, "border-color": "rgba(255,255,255,.28)",
+      }},
+    ];
+    // Colour comes from type selectors, not from the node data, so switching
+    // the style does not cost a rebuild of the graph.
+    for (const [type, col] of Object.entries(t.palette)) {
+      const s = { "background-color": col };
+      if (t.bloom) {
+        s["underlay-color"] = col;
+        s["underlay-opacity"] = t.bloom;
+        s["underlay-padding"] = t.bloomPad;
+      }
+      if (t.shapes && t.shapes[type]) s.shape = t.shapes[type];
+      st.push({ selector: 'node[type = "' + type + '"]', style: s });
+    }
+    st.push(
+      // On an orbit a node is a bead. The full size range is right for the
+      // force layout and wrong here: at this spacing the large nodes swallow
+      // their neighbours.
+      { selector: "node.ringmode[rsize]", style: {
+        width: "data(rsize)", height: "data(rsize)",
+      }},
+      // Every node carries the outcome of its review as status. Rejected
+      // nodes recede instead of vanishing: the outer ring then reads as
+      // "reviewed and largely discarded", and the few kept nodes stand out
+      // as bright dots in it. That is the statement the data actually
+      // supports.
+      { selector: 'node[status = "rejected"]', style: {
+        "background-opacity": 0.26, "underlay-opacity": 0,
+      }},
+      { selector: 'node[status = "archived"]', style: {
+        "background-opacity": 0.18, "underlay-opacity": 0,
+      }},
+      // In the overview only the accepted nodes carry a name.
+      // min-zoomed-font-size alone does not do that -- hundreds of titles at
+      // once make the view restless.
+      // Runs and candidates are texture, not text: .mute blanks their label
+      // unless the labels switch is on, and .hit and .pinned bring the name
+      // back for a search hit or the selected node.
+      { selector: "node.mute", style: { label: "" }},
+      { selector: 'node[synthetic = "tick"]', style: {
+        "background-color": t.tick.color, "background-opacity": t.tick.opacity,
+        width: t.tick.size, height: t.tick.size, label: "",
+        "underlay-opacity": 0, "border-width": 0, "z-index": 0,
+        events: "no",
+      }},
+      // Cluster names lie on the surface, the way a map labels its regions.
+      // A colour legend does not tell you where you are.
+      { selector: 'node[synthetic = "hub"]', style: {
+        shape: t.hub.shape, "background-color": t.hub.fill,
+        "background-opacity": 1, "border-width": t.hub.border,
+        "border-color": "data(accent)",
+        "underlay-color": "data(accent)", "underlay-opacity": t.bloom ? 0.22 : 0,
+        "underlay-padding": 6,
+        label: "data(track)",
+        "font-size": t.hub.font, "font-weight": 700,
+        "text-opacity": t.hub.opacity, color: "data(accent)",
+        "text-valign": "center", "text-halign": "center", "text-margin-y": 0,
+        "text-max-width": 260, "min-zoomed-font-size": 0, "z-index": 20,
+        "text-outline-width": 3, "text-outline-color": "rgba(0,0,0,.85)",
+      }},
+      { selector: 'node[synthetic = "root"]', style: {
+        shape: t.root.shape, "background-color": t.root.color,
+        "background-opacity": 1, width: t.root.size, height: t.root.size,
+        "underlay-color": t.root.color, "underlay-opacity": t.root.bloom,
+        "underlay-padding": 14,
+        label: "data(label)", "font-size": 10, "font-weight": 800,
+        "text-opacity": 0.95, color: t.root.text || "#05060a",
+        "text-valign": "center", "text-halign": "center", "text-margin-y": 0,
+        "min-zoomed-font-size": 0, "z-index": 30,
+        "border-width": 0,
+      }},
+      { selector: "edge", style: {
+        width: "mapData(weight, 0, 1, 0.4, 2)",
+        "line-color": t.edge.color, opacity: t.edge.opacity,
+        "curve-style": "haystack", "z-index": 1,
+      }},
+      { selector: 'edge[synthetic = "spine"]', style: {
+        "line-color": t.edge.spine, opacity: 0.4, width: 1.2,
+        "curve-style": "straight", "z-index": 2,
+      }},
+      { selector: "node[?warning]", style: {
+        "border-width": 2.5, "border-color": "#ff6b7a", "border-style": "double",
+      }},
+      { selector: ".hl", style: {
+        "line-color": t.css["--accent"], opacity: 1, width: 1.6,
+        "border-width": 2, "border-color": t.css["--accent"], "z-index": 25,
+      }},
+      { selector: ".pinned", style: {
+        "border-width": 3, "border-color": "#ffffff", "z-index": 26,
+        "min-zoomed-font-size": 0, label: "data(label)",
+      }},
+      { selector: ".dim", style: { "background-opacity": 0.07, "text-opacity": 0,
+        "underlay-opacity": 0 }},
+      { selector: ".hit", style: {
+        "border-width": 2.5, "border-color": "#35d7a1",
+        "min-zoomed-font-size": 0, "z-index": 24, label: "data(label)",
+      }},
+      { selector: ".future", style: { display: "none" }},
+      { selector: ".off", style: { display: "none" }},
+      { selector: ".born", style: {
+        "border-width": 3, "border-color": "#ffffff", "background-opacity": 1,
+      }}
+    );
+    // color: "var-fg" is not a Cytoscape value; the text colour comes from
+    // the theme and is filled in here.
+    st[0].style.color = t.css["--fg"];
+    return st;
+  }
+
+  function restyle() {
+    applyThemeCss();
+    if (!cy) return;
+    cy.style().fromJson(buildStyle()).update();
+    renderLegend();
+  }
+
+  function renderLegend() {
+    if (!lastData) return;
+    const t = T(), nodes = lastData.nodes || [];
+    const types = [...new Set(nodes.map(n => n.type))]
+      .sort((a, b) => nodes.filter(n => n.type === b).length
+                    - nodes.filter(n => n.type === a).length);
+    const rows = types.map(ty => {
+      const col = t.palette[ty] || FALLBACK;
+      return '<div class="row"><span class="dot" style="background:' + col +
+             ';color:' + col + '"></span>' + esc(ty) + '<span class="n">' +
+             nodes.filter(n => n.type === ty).length + '</span></div>';
+    });
+    // Without this line "memory_candidate <count>" reads as a queue. The type
+    // name comes from the data and is not renamed, so it is explained instead.
+    if (nodes.some(n => n.type === "memory_candidate")) {
+      rows.push('<div class="foot">' + tr("globe.legendFoot", { br: "<br>" }) +
+                '</div>');
+    }
+    $("legend").innerHTML = rows.join("");
+  }
+
+  function currentBucketId() {
+    const t = buckets[+$("t-slider").value];
+    return t ? t.id : null;
+  }
+
+  function load(initial) {
+    fetch("/_dashboard/api/brain/globe")
+      .then(r => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+      .then(data => {
+        if (data.generated === lastGenerated) return;
+        if (replay.timer) return;
+        const view = cy ? { zoom: cy.zoom(), pan: cy.pan(),
+                            bucket: currentBucketId() } : null;
+        lastGenerated = data.generated;
+        render(data, view);
+      })
+      .catch(err => {
+        if (initial) {
+          $("cy").innerHTML =
+            '<div class="error">' + tr("globe.noData", {
+              cmd: "<code>atlas brain globe</code>", error: esc(err.message),
+            }) + '</div>';
+        }
+      });
+  }
+
+  // ── ring positions ───────────────────────────────────────────────────────
+  // Computed here instead of by a layout engine, on purpose: a force layout
+  // gives a different picture on every run, which makes two screenshots of the
+  // same brain incomparable. These coordinates are a pure function of the data.
+  function ringPositions(nodes, clusters) {
+    const pos = {};
+    // The sector width follows the square root of the number of **accepted**
+    // nodes, not the cluster size. A width proportional to size lets one
+    // cluster swallow the circle, and the root of the total size gives the
+    // candidate cluster a wide, nearly empty sector -- the outer rings use the
+    // full circle, so only the accepted knowledge lies in the sectors.
+    // Weighted by exactly what lies inside, the accepted nodes spread around
+    // the centre.
+    const acceptedOf = c =>
+      nodes.filter(x => x.cluster === c && tierOf(x.type) === TIER_ACCEPTED).length;
+    const weightOf = c => Math.sqrt(acceptedOf(c)) || 0.7;
+    const wTotal = clusters.reduce((a, c) => a + weightOf(c), 0) || 1;
+    let angle = -Math.PI / 2;
+    const sector = {};
+    for (const c of clusters) {
+      const span = (weightOf(c) / wTotal) * Math.PI * 2;
+      sector[c] = { from: angle, span: span, mid: angle + span / 2 };
+      angle += span;
+    }
+    let maxR = RING[3];
+    const place = (x, a, r) => {
+      if (r > maxR) maxR = r;
+      pos[x.id] = { x: Math.cos(a) * r, y: Math.sin(a) * r };
+    };
+
+    // Accepted knowledge stays in its cluster's sector: that is the part
+    // people read, and that is where the map metaphor holds.
+    for (const c of clusters) {
+      const s = sector[c];
+      pos["__hub_" + c] = { x: Math.cos(s.mid) * R_HUB, y: Math.sin(s.mid) * R_HUB };
+      const group = nodes.filter(x => x.cluster === c && tierOf(x.type) === TIER_ACCEPTED);
+      if (!group.length) continue;
+      const base = RING[TIER_ACCEPTED];
+      const perRing = Math.max(1, Math.floor((s.span * base) / SPACING));
+      group.forEach((x, i) => {
+        const row = Math.floor(i / perRing), col = i % perRing;
+        const inRow = Math.min(perRing, group.length - row * perRing);
+        const step = inRow > 1 ? s.span / inRow : 0;
+        place(x, s.from + (s.span - step * (inRow - 1)) / 2 + col * step,
+              base + row * SUBRING);
+      });
+    }
+
+    // Runs and candidates go around the WHOLE circle, not inside the cluster
+    // sector. The reason is not cosmetic: all candidates share one cluster
+    // (their top-level folder) and can be most of the nodes. Laid out in its
+    // sector, that one cluster bloats and the ring turns into a crescent.
+    // Spread over the full circle they form a true orbit, which also matches
+    // the content: the bulk of runs and decisions surrounds the knowledge.
+    // The cluster order is kept, so a cluster is still one contiguous arc and
+    // recognisable by its colour.
+    for (const tier of [TIER_RUN, TIER_CANDIDATE]) {
+      const group = clusters.flatMap(
+        c => nodes.filter(x => x.cluster === c && tierOf(x.type) === tier));
+      if (!group.length) continue;
+      const base = RING[tier];
+      const perRing = Math.max(1, Math.floor((2 * Math.PI * base) / SPACING));
+      group.forEach((x, i) => {
+        const row = Math.floor(i / perRing), col = i % perRing;
+        const inRow = Math.min(perRing, group.length - row * perRing);
+        place(x, -Math.PI / 2 + (col / inRow) * Math.PI * 2, base + row * SUBRING);
+      });
+    }
+
+    pos.__root = { x: 0, y: 0 };
+    return { pos: pos, sector: sector, maxR: maxR };
+  }
+
+  // The orbits are dotted trails of tiny nodes. A background image would be
+  // simpler but would not move with the zoom — and an orbit that lies beside
+  // its nodes is worse than none.
+  function orbitTicks() {
+    const out = [];
+    const sp = T().tick.spacing;
+    for (const r of [R_HUB, RING[1], RING[2], RING[3]]) {
+      const n = Math.max(12, Math.round((2 * Math.PI * r) / sp));
+      for (let i = 0; i < n; i++) {
+        const a = (i / n) * Math.PI * 2;
+        out.push({ data: { id: "__t" + r + "_" + i, synthetic: "tick", label: "" },
+                   position: { x: Math.cos(a) * r, y: Math.sin(a) * r } });
+      }
+    }
+    return out;
+  }
+
+  function render(data, view) {
+    lastData = data;
+    const s = data.summary || {};
+    $("meta").textContent = "· " + (data.mode || "full") + " · " + data.generated;
+
+    const nodes = data.nodes || [];
+    const clusters = [...new Set(nodes.map(n => n.cluster))]
+      .sort((a, b) => nodes.filter(n => n.cluster === b).length
+                    - nodes.filter(n => n.cluster === a).length);
+    renderLegend();
+
+    const geo = ringPositions(nodes, clusters);
+    const pal = T().palette;
+    // A cluster has no type of its own, so it borrows the colour of its most
+    // common node type — that way the hub and its band match.
+    const accentOf = c => {
+      const cnt = {};
+      nodes.filter(n => n.cluster === c)
+           .forEach(n => { cnt[n.type] = (cnt[n.type] || 0) + 1; });
+      const top = Object.entries(cnt).sort((a, b) => b[1] - a[1])[0];
+      return (top && pal[top[0]]) || FALLBACK;
+    };
+
+    const elements = orbitTicks();
+    elements.push({ data: {
+      id: "__root", label: "BRAIN", synthetic: "root", size: 44, opacity: 1,
+    }, position: geo.pos.__root });
+    for (const c of clusters) {
+      const n = nodes.filter(x => x.cluster === c).length;
+      elements.push({ data: {
+        id: "__hub_" + c, label: c.toUpperCase(), track: track(c.toUpperCase()),
+        synthetic: "hub", cluster: c, count: n, accent: accentOf(c),
+        size: 22 + Math.min(28, Math.sqrt(n) * 3), opacity: 1,
+      }, position: geo.pos["__hub_" + c] });
+      elements.push({ data: {
+        id: "__e_" + c, source: "__root", target: "__hub_" + c,
+        weight: 1, synthetic: "spine",
+      }});
+    }
+    const sc = T().sizeScale;
+    for (const n of nodes) {
+      elements.push({ data: {
+        id: n.id, label: n.title, type: n.type, cluster: n.cluster,
+        tier: tierOf(n.type),
+        size: Math.min(14 + n.size * 3, 60) * sc,
+        rsize: Math.min(11 + n.size * 1.6, 26) * sc,
+        opacity: Math.max(0.4, n.recency),
+        status: n.status || "",
+        warning: n.warning, path: n.path, updated: n.updated,
+        created: n.created || "", bucket: n.bucket || "",
+        tags: (n.tags || []).join(", "), flags: (n.quality_flags || []).join(", "),
+      }, position: geo.pos[n.id] });
+    }
+    for (const e of data.edges || []) {
+      elements.push({ data: {
+        id: e.source + "->" + e.target, source: e.source, target: e.target,
+        weight: e.weight,
+      }});
+    }
+
+    if (cy) { cy.destroy(); cy = null; }
+    $("cy").innerHTML = "";
+    applyThemeCss();
+    cy = cytoscape({
+      container: $("cy"), elements: elements, style: buildStyle(),
+      layout: { name: "preset" }, wheelSensitivity: 0.25,
+    });
+
+    // Remember the computed ring coordinates. Switching to Forces or Cluster
+    // and back must give exactly the same picture, and by then a layout
+    // engine has overwritten the positions.
+    cy.nodes().forEach(n =>
+      n.scratch("_ring", { x: n.position("x"), y: n.position("y") }));
+
+    applyLayout(false);
+    if (view) cy.viewport({ zoom: view.zoom, pan: view.pan });
+    else fitView();
+    setupTimeline(cy, data.timeline || [], view && view.bucket);
+    applyFilters();
+    updateCounts(s);
+    wireInteraction();
+  }
+
+  // ── layouts ──────────────────────────────────────────────────────────────
+  function applyLayout(refit) {
+    if (!cy) return;
+    const real = cy.nodes('[!synthetic]');
+    if (state.layout === "rings") {
+      cy.nodes().addClass("ringmode");
+      cy.nodes().forEach(n => {
+        const p = n.scratch("_ring");
+        if (p) n.position(p);
+      });
+      cy.nodes('[synthetic]').style("display", "element");
+    } else {
+      cy.nodes().removeClass("ringmode");
+      // Force and Cluster have no place for an artificial centre or for
+      // orbits: those are hidden rather than left drifting in a graph they do
+      // not belong to.
+      cy.nodes('[synthetic]').style("display", "none");
+      const l = state.layout === "force"
+        ? { name: "cose", animate: false, nodeOverlap: 12,
+            idealEdgeLength: 60, gravity: 40, numIter: 600 }
+        : { name: "concentric", concentric: n => n.data("size"),
+            levelWidth: () => 8, minNodeSpacing: 24, avoidOverlap: true };
+      cy.layout(Object.assign({ eles: real }, l)).run();
+    }
+    if (refit) fitView();
+  }
+
+  // cy.fit() centres the bounding box, and the bounding box is heavier wherever
+  // the biggest cluster sits — which pushes the centre node off centre and makes
+  // a deliberate layout look like a bug. In the rings layout the root is the
+  // anchor by definition, so that is what to centre on.
+  function fitView() {
+    if (!cy) return;
+    if (state.layout !== "rings" || !cy.getElementById("__root").length) {
+      cy.fit(undefined, 40);
+      return;
+    }
+    let maxR = 1;
+    cy.nodes().forEach(n => {
+      const p = n.position();
+      const d = Math.sqrt(p.x * p.x + p.y * p.y);
+      if (d > maxR) maxR = d;
+    });
+    const w = cy.width(), h = cy.height();
+    cy.zoom(Math.min(w, h) / (2 * maxR * 1.1));
+    cy.pan({ x: w / 2, y: h / 2 });     // the root sits at model (0,0)
+  }
+
+  // ── filters ──────────────────────────────────────────────────────────────
+  // One place decides visibility. The growth replay, the maturity switch, the
+  // cluster filter and the search would otherwise each need their own
+  // show/hide call; combining them here is what keeps them from fighting.
+  function applyFilters() {
+    if (!cy) return;
+    const q = state.query.trim().toLowerCase();
+    let hits = 0;
+    cy.batch(() => {
+      cy.nodes().forEach(n => {
+        const syn = n.data("synthetic");
+        if (syn) {
+          if (syn === "hub") {
+            n.toggleClass("off", !!(state.cluster && n.data("cluster") !== state.cluster));
+          }
+          return;
+        }
+        let off = false;
+        if (state.maturity === "accepted" && n.data("tier") !== TIER_ACCEPTED) off = true;
+        if (state.decisions === "kept" && n.data("status") === "rejected") off = true;
+        if (state.cluster && n.data("cluster") !== state.cluster) off = true;
+        n.toggleClass("off", off);
+        let hit = false, dim = false;
+        if (q) {
+          const hay = (n.data("label") + " " + (n.data("path") || "") + " " +
+                       (n.data("tags") || "")).toLowerCase();
+          hit = hay.indexOf(q) !== -1;
+          dim = !hit;
+          if (hit && !off) hits++;
+        }
+        n.toggleClass("hit", hit);
+        n.toggleClass("dim", dim);
+        n.toggleClass("mute", !state.labels && n.data("tier") !== TIER_ACCEPTED);
+      });
+    });
+    const parts = [];
+    if (state.cluster) parts.push(state.cluster);
+    if (state.maturity === "accepted") parts.push(tr("globe.levelAccepted"));
+    if (state.decisions === "kept") parts.push(tr("globe.decisionsKept"));
+    if (q) parts.push(trCount("globe.matches", hits));
+    $("filterNote").textContent = parts.join(" · ");
+    refreshShown();
+  }
+
+  let lastSummary = {};
+  function updateCounts(s) { lastSummary = s || lastSummary; refreshShown(); }
+
+  function refreshShown() {
+    const s = lastSummary || {};
+    const total = cy ? cy.nodes('[!synthetic]').length : 0;
+    const vis = cy ? cy.nodes('[!synthetic]')
+      .filter(n => !n.hasClass("off") && !n.hasClass("future")).length : 0;
+    // The header states the outcome of the reviews, not a candidate count.
+    // pending_candidates is the length of the queue
+    // brain/inbox/memory-candidates and may be 0 while the outer ring is
+    // full -- that is not a counting error. Reporting the candidate nodes as
+    // "open" instead would claim a queue that does not exist.
+    const st = { active: 0, processed: 0, archived: 0, rejected: 0 };
+    if (cy) cy.nodes('[!synthetic]').forEach(n => {
+      const k = n.data("status");
+      if (st[k] !== undefined) st[k]++;
+    });
+    const dec = [];
+    if (st.active) dec.push(tr("globe.active", { n: st.active }));
+    if (st.processed) dec.push(tr("globe.processed", { n: st.processed }));
+    if (st.archived) dec.push(tr("globe.archived", { n: st.archived }));
+    if (st.rejected) dec.push(tr("globe.rejected", { n: st.rejected }));
+    // The number of DRAWN nodes, not summary.nodes. The two differ when a
+    // note exists twice, once in wiki/ as accepted knowledge and once in
+    // inbox/processed/ as the candidate it came from. The ID comes from the
+    // slug, so the two collide and cytoscape silently drops the second.
+    // summary.nodes alone would hide the difference -- so it is named.
+    const gap = (s.nodes || total) - total;
+    $("counts").innerHTML =
+      trCount("globe.nodes", total) +
+      (gap > 0 ? " <span class='sep'>(</span>" + trCount("globe.duplicates", gap) +
+                 "<span class='sep'>)</span>" : "") +
+      " <span class='sep'>·</span> " + trCount("globe.edges", s.edges || 0) +
+      " <span class='sep'>·</span> " + trCount("globe.clusters", s.clusters || 0) +
+      " <span class='sep'>·</span> " + tr("globe.open", { n: s.pending_candidates || 0 }) +
+      (dec.length ? " <span class='sep'>·</span> " + dec.join(" <span class='sep'>·</span> ") : "") +
+      (s.confidential_skipped ? " <span class='sep'>·</span> " +
+        tr("globe.confidential", { n: s.confidential_skipped }) : "") +
+      (vis !== total ? " <span class='sep'>▸</span> " + tr("globe.visible", { n: vis }) : "");
+  }
+
+  // ── interaction ──────────────────────────────────────────────────────────
+  function wireInteraction() {
+    const tip = $("tooltip");
+    cy.on("mouseover", "node", evt => {
+      const d = evt.target.data();
+      if (d.synthetic === "tick" || d.synthetic === "root") return;
+      if (d.synthetic === "hub") {
+        tip.innerHTML = '<div class="t-title">' + esc(d.label) + '</div>' +
+          '<div class="t-meta">' + trCount("globe.nodes", d.count) + ' · ' +
+          tr("globe.clickToFilter") + '</div>';
+      } else {
+        tip.innerHTML = '<div class="t-title">' + esc(d.label) + '</div>' +
+          '<div class="t-meta">' + esc(d.type) + " · " + esc(d.cluster) +
+          (d.created ? " · " + esc(d.created) : "") + '</div>' +
+          (d.tags ? '<div class="t-meta">' + esc(d.tags) + '</div>' : "") +
+          (d.flags ? '<div class="t-meta" style="color:#ffe27a">' + esc(d.flags) + '</div>' : "") +
+          (d.warning ? '<div class="t-meta" style="color:#ff6b7a">' + tr("globe.openLoop") + '</div>' : "") +
+          '<div class="t-meta" style="opacity:.7">' + esc(d.path) + '</div>';
+      }
+      tip.style.display = "block";
+      evt.target.connectedEdges().addClass("hl");
+    });
+    cy.on("mousemove", evt => {
+      if (tip.style.display === "block" && evt.originalEvent) {
+        tip.style.left = (evt.originalEvent.clientX + 14) + "px";
+        tip.style.top = (evt.originalEvent.clientY + 14) + "px";
+      }
+    });
+    cy.on("mouseout", "node", evt => {
+      tip.style.display = "none";
+      evt.target.connectedEdges().removeClass("hl");
+    });
+    cy.on("tap", "node", evt => {
+      const n = evt.target, d = n.data();
+      if (d.synthetic === "hub") {
+        setCluster(state.cluster === d.cluster ? null : d.cluster);
+        return;
+      }
+      if (d.synthetic) { setCluster(null); return; }
+      showDetails(n);
+    });
+    cy.on("tap", evt => { if (evt.target === cy) hideDetails(); });
+  }
+
+  function showDetails(n) {
+    const d = n.data();
+    cy.nodes().removeClass("pinned");
+    n.addClass("pinned");
+    state.pinned = d.cluster || null;
+    $("d-title").textContent = d.label;
+    $("d-meta").innerHTML =
+      esc(d.type) + " · " + esc(d.cluster) + " · " + tr("globe.degree", { n: n.degree(false) }) +
+      (d.created ? "<br>" + tr("globe.created", { date: esc(d.created) }) : "") +
+      (d.updated ? " · " + tr("globe.updated", { date: esc(d.updated) }) : "") +
+      (d.tags ? "<br>" + esc(d.tags) : "") +
+      (d.flags ? '<br><span style="color:#ffe27a">' + esc(d.flags) + "</span>" : "") +
+      (d.warning ? '<br><span style="color:#ff6b7a">' + tr("globe.openLoop") + "</span>" : "");
+    $("d-path").textContent = d.path || "";
+    $("details").style.display = "block";
+  }
+  function hideDetails() {
+    if (cy) cy.nodes().removeClass("pinned");
+    state.pinned = null;
+    $("details").style.display = "none";
+  }
+  function setCluster(c) { state.cluster = c; applyFilters(); applyLayout(true); }
+
+  // ── growth replay ────────────────────────────────────────────────────────
+  // One bucket per agent run, or per created timestamp for manual notes. The
+  // layout stays fixed and only visibility changes, so a note appears in its
+  // final position and the brain visibly fills in.
+  function setupTimeline(cyi, timeline, restoreBucketId) {
+    buckets = timeline;
+    const bar = $("timeline"), slider = $("t-slider"),
+          label = $("t-label"), btn = $("t-play");
+    if (timeline.length < 2) { bar.style.display = "none"; return; }
+    const index = new Map(timeline.map((t, i) => [t.id, i]));
+    bar.style.display = "flex";
+    slider.max = timeline.length - 1;
+    slider.value = restoreBucketId != null && index.has(restoreBucketId)
+      ? index.get(restoreBucketId) : timeline.length - 1;
+
+    function apply(idx, flashNew) {
+      const t = timeline[idx];
+      cyi.batch(() => {
+        cyi.nodes('[!synthetic]').forEach(n => {
+          const b = index.get(n.data("bucket"));
+          const future = b !== undefined && b > idx;
+          n.toggleClass("future", future);
+          n.removeClass("born");
+          if (flashNew && b === idx) n.addClass("born");
+        });
+      });
+      if (flashNew) setTimeout(() => cyi.nodes(".born").removeClass("born"), 450);
+      const vis = cyi.nodes('[!synthetic]')
+        .filter(n => !n.hasClass("future") && !n.hasClass("off")).length;
+      label.textContent = t.label + " (+" + t.added + ") · " +
+                          vis + "/" + cyi.nodes('[!synthetic]').length;
+      refreshShown();
+    }
+    function stop() {
+      if (replay.timer) { clearInterval(replay.timer); replay.timer = null; }
+      btn.textContent = tr("globe.play");
+    }
+    slider.oninput = () => { stop(); apply(+slider.value, false); };
+    btn.onclick = () => {
+      if (replay.timer) { stop(); return; }
+      if (+slider.value >= timeline.length - 1) slider.value = 0;
+      btn.textContent = tr("globe.pause");
+      apply(+slider.value, true);
+      replay.timer = setInterval(() => {
+        const next = +slider.value + 1;
+        if (next >= timeline.length) { stop(); return; }
+        slider.value = next;
+        apply(next, true);
+      }, 700);
+    };
+    apply(+slider.value, false);
+  }
+
+  // ── controls ─────────────────────────────────────────────────────────────
+  function seg(id, key, after) {
+    $(id).addEventListener("click", ev => {
+      const b = ev.target.closest("button");
+      if (!b) return;
+      state[key] = b.dataset.v;
+      [...$(id).querySelectorAll("button")].forEach(x =>
+        x.setAttribute("aria-pressed", String(x === b)));
+      after();
+    });
+  }
+  function press(id, val) {
+    [...$(id).querySelectorAll("button")].forEach(x =>
+      x.setAttribute("aria-pressed", String(x.dataset.v === val)));
+  }
+  seg("seg-theme", "theme", () => { restyle(); });
+  seg("seg-layout", "layout", () => { applyLayout(true); applyFilters(); });
+  seg("seg-maturity", "maturity", () => { applyFilters(); });
+  seg("seg-decisions", "decisions", () => { applyFilters(); });
+
+  $("labels").addEventListener("change", e => {
+    state.labels = e.target.checked;
+    restyle();      // re-applies min-zoomed-font-size
+    applyFilters(); // re-applies the muting of the outer rings
+  });
+  $("q").addEventListener("input", e => { state.query = e.target.value; applyFilters(); });
+  $("reset").addEventListener("click", () => {
+    state.cluster = null; state.query = ""; state.maturity = "all";
+    state.decisions = "all";
+    $("q").value = "";
+    press("seg-maturity", "all");
+    press("seg-decisions", "all");
+    hideDetails(); applyFilters(); applyLayout(true);
+  });
+  $("d-close").addEventListener("click", hideDetails);
+  $("d-filter").addEventListener("click", () => {
+    if (state.pinned) setCluster(state.pinned);
+  });
+  document.addEventListener("keydown", e => {
+    if (e.key === "/" && document.activeElement !== $("q")) {
+      e.preventDefault(); $("q").focus();
+    }
+    if (e.key === "Escape") hideDetails();
+  });
+
+  // Static labels carry their key in data-i18n. The document language and the
+  // translated attributes (placeholder, title, aria-label) are set here.
+  document.documentElement.lang = AtlasI18n.getLang();
+  document.querySelectorAll("[data-i18n]").forEach(el => {
+    el.textContent = tr(el.dataset.i18n);
+  });
+  $("q").placeholder = tr("globe.searchPlaceholder") + "   /";
+  $("t-play").title = tr("globe.playGrowth");
+  $("d-close").setAttribute("aria-label", tr("globe.close"));
+
+  // Mirror the start state from the URL, so a link is reproducible.
+  press("seg-theme", state.theme);
+  press("seg-layout", state.layout);
+  press("seg-maturity", state.maturity);
+  press("seg-decisions", state.decisions);
+  $("labels").checked = state.labels;
+  applyThemeCss();
+
+  // Skip the work while the tab is hidden and catch up the moment it is
+  // visible again, rather than waiting out the browser's background throttling.
+  setInterval(() => { if (!document.hidden) load(false); }, POLL_MS);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) load(false); });
+  load(true);
+})();
+</script>
+</body>
+</html>

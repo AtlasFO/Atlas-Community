@@ -1,0 +1,213 @@
+{
+  "schema_version": "1.0",
+  "case_id": "RHINO-HUNT",
+  "updated_at": "2026-09-29T17:40:15Z",
+  "next_id": 5,
+  "tasks": [
+    {
+      "id": "task-0001",
+      "text": "Network traces — file transfers in all three pcaps (FTP, HTTP, an encrypted zip and its password, an executable).",
+      "status": "answered",
+      "related_claim_ids": [
+        "C0003",
+        "C0004",
+        "C0011",
+        "C0012"
+      ],
+      "superseded_by": "",
+      "created_at": "2026-09-29T16:46:20Z",
+      "updated_at": "2026-09-29T17:13:39Z",
+      "parts": [
+        {
+          "id": "p1",
+          "text": "file transfers in all three pcaps",
+          "type": "path",
+          "kind": "value",
+          "typed_by": "table",
+          "status": "answered",
+          "claim_ids": [
+            "C0015"
+          ],
+          "value": "STOR contraband.zip",
+          "limitation": {}
+        },
+        {
+          "id": "p2",
+          "text": "FTP",
+          "type": "name",
+          "kind": "value",
+          "typed_by": "default",
+          "status": "answered",
+          "claim_ids": [
+            "C0004"
+          ],
+          "value": "",
+          "limitation": {}
+        },
+        {
+          "id": "p3",
+          "text": "HTTP",
+          "type": "name",
+          "kind": "value",
+          "typed_by": "default",
+          "status": "answered",
+          "claim_ids": [
+            "C0012"
+          ],
+          "value": "",
+          "limitation": {}
+        },
+        {
+          "id": "p4",
+          "text": "an encrypted zip and its password",
+          "type": "name",
+          "kind": "value",
+          "typed_by": "default",
+          "status": "answered",
+          "claim_ids": [
+            "C0003"
+          ],
+          "value": "",
+          "limitation": {}
+        },
+        {
+          "id": "p5",
+          "text": "an executable",
+          "type": "path",
+          "kind": "value",
+          "typed_by": "table",
+          "status": "answered",
+          "claim_ids": [
+            "C0012"
+          ],
+          "value": "rhino3.log",
+          "limitation": {}
+        }
+      ],
+      "parts_for": "network traces — file transfers in all three pcaps (ftp, http, an encrypted zip and its password, an executable).",
+      "parts_source": "deterministic",
+      "parts_version": "det-1"
+    },
+    {
+      "id": "task-0002",
+      "text": "USB key — the key was reformatted: recover content by carving; two carrier images hold steganographic payloads (jphide) whose passwords are derivable from the recovered diary.",
+      "status": "answered",
+      "related_claim_ids": [
+        "C0008",
+        "C0009",
+        "C0010",
+        "C0013",
+        "C0020"
+      ],
+      "superseded_by": "",
+      "created_at": "2026-09-29T16:46:20Z",
+      "updated_at": "2026-09-29T17:29:44Z",
+      "parts": [
+        {
+          "id": "p1",
+          "text": "the key was reformatted: recover content by carving",
+          "type": "list",
+          "kind": "value",
+          "typed_by": "default",
+          "status": "answered",
+          "claim_ids": [
+            "C0008"
+          ],
+          "value": "",
+          "limitation": {}
+        },
+        {
+          "id": "p2",
+          "text": "two carrier images hold steganographic payloads whose passwords are derivable from the recovered diary",
+          "type": "name",
+          "kind": "value",
+          "typed_by": "table",
+          "status": "answered",
+          "claim_ids": [
+            "C0020"
+          ],
+          "value": "",
+          "limitation": {}
+        }
+      ],
+      "parts_for": "usb key — the key was reformatted: recover content by carving; two carrier images hold steganographic payloads (jphide) whose passwords are derivable from the recovered diary.",
+      "parts_source": "deterministic",
+      "parts_version": "det-1"
+    },
+    {
+      "id": "task-0003",
+      "text": "Cross-evidence link — prove the connection between USB content and network traffic.",
+      "status": "answered",
+      "related_claim_ids": [
+        "N0022",
+        "C0017",
+        "C0014",
+        "C0016"
+      ],
+      "superseded_by": "",
+      "created_at": "2026-09-29T16:46:20Z",
+      "updated_at": "2026-09-29T17:40:15Z",
+      "parts": [
+        {
+          "id": "p1",
+          "text": "prove the connection between USB content and network traffic",
+          "type": "relation",
+          "kind": "relation",
+          "typed_by": "table",
+          "status": "answered",
+          "claim_ids": [
+            "N0022"
+          ],
+          "value": "",
+          "limitation": {}
+        }
+      ],
+      "parts_for": "cross-evidence link — prove the connection between usb content and network traffic.",
+      "parts_source": "deterministic",
+      "parts_version": "det-1"
+    },
+    {
+      "id": "task-0004",
+      "text": "The anti-forensics story — what the diary says happened to the hard drive and the USB key.",
+      "status": "answered",
+      "related_claim_ids": [
+        "C0010",
+        "C0008"
+      ],
+      "superseded_by": "",
+      "created_at": "2026-09-29T16:46:20Z",
+      "updated_at": "2026-09-29T17:13:41Z",
+      "parts": [
+        {
+          "id": "p1",
+          "text": "what the diary says happened to the hard drive",
+          "type": "list",
+          "kind": "value",
+          "typed_by": "default",
+          "status": "answered",
+          "claim_ids": [
+            "C0010"
+          ],
+          "value": "",
+          "limitation": {}
+        },
+        {
+          "id": "p2",
+          "text": "the USB key",
+          "type": "name",
+          "kind": "value",
+          "typed_by": "default",
+          "status": "answered",
+          "claim_ids": [
+            "C0008"
+          ],
+          "value": "",
+          "limitation": {}
+        }
+      ],
+      "parts_for": "the anti-forensics story — what the diary says happened to the hard drive and the usb key.",
+      "parts_source": "deterministic",
+      "parts_version": "det-1"
+    }
+  ]
+}

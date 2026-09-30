@@ -1,0 +1,32 @@
+name: Custom.Atlas.WinDnsQuery
+description: |
+  Atlas-managed (Windows): stream DNS queries from Sysmon Event ID 22
+  (DNSEvent) via watch_evtx. Per-query dedup keeps the raw alert volume to one
+  per distinct domain; the Python-side Behavior.DnsAnomaly rule scores these
+  rows for DGA-like entropy and per-process query bursts.
+
+  DNS is Windows-only here: Velociraptor has no dependable Linux DNS event
+  source (no Sysmon-for-Linux DNS provider), so we document the gap rather than
+  emit a Linux detector that silently never fires.
+
+  Requires: sysmon (with DNS query logging enabled, schemaversion ≥ 4.1).
+
+type: CLIENT_EVENT
+
+parameters:
+  - name: SysmonChannel
+    description: Sysmon operational event-log channel.
+    default: Microsoft-Windows-Sysmon/Operational
+
+sources:
+  - query: |
+      SELECT
+        System.TimeCreated.SystemTime AS timestamp_utc,
+        EventData.QueryName AS query_name,
+        EventData.QueryResults AS query_results,
+        EventData.Image AS image_path,
+        atoi(string=EventData.ProcessId) AS pid
+      FROM watch_evtx(filename=SysmonChannel, accessor="event_log")
+      WHERE System.EventID.Value = 22
+        AND query_name != ""
+        AND NOT query_name =~ "(?i)\\.(in-addr\\.arpa|ip6\\.arpa|local|localdomain)$"

@@ -1,0 +1,29 @@
+name: Custom.Atlas.WinPersistenceSnapshot
+description: |
+  Atlas baseline helper (Windows): a ONE-SHOT enumeration of the registry
+  autorun + scheduled-task persistence surface, using the SAME glob as the
+  Custom.Atlas.WinNewPersistence detector. monitor.baseline_capture collects this
+  and records every returned path as the known-good allowlist, so the detector
+  (which flags entries NOT in that allowlist) doesn't fire on the host's
+  pre-existing autoruns/services/tasks.
+
+  WatchKeys is passed in by baseline_capture from
+  monitoring/render.py:WIN_PERSISTENCE_SURFACE — the same constant the detector
+  template is rendered with — so the two globs can never drift.
+
+type: CLIENT
+
+parameters:
+  - name: WatchKeys
+    description: JSON array of registry/file globs (must match the WinNewPersistence detector).
+    default: |
+      ["HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\\*", "HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce\\*", "HKEY_LOCAL_MACHINE\\Software\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\Run\\*", "HKEY_USERS\\*\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\\*", "HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon\\*", "HKEY_LOCAL_MACHINE\\System\\CurrentControlSet\\Services\\*\\ImagePath", "C:\\Windows\\System32\\Tasks\\**"]
+
+sources:
+  - query: |
+      LET watch <= parse_json_array(data=WatchKeys)
+      SELECT
+        FullPath AS path,
+        Data.value AS value,
+        Mtime AS mtime_utc
+      FROM glob(globs=watch, accessor="auto")

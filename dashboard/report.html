@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Atlas · Report</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<link rel="stylesheet" href="assets/atlas.css" />
+<script src="assets/i18n.js"></script>
+<style>
+  .picker-row {
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    margin-bottom: 18px;
+  }
+  .picker-row label {
+    font-size: var(--fs-label); text-transform: uppercase;
+    letter-spacing: 0.07em; color: var(--fg-2); font-weight: 600;
+  }
+  .picker-row select {
+    min-width: 280px; max-width: 100%;
+  }
+  .picker-row .meta { color: var(--fg-2); font-size: var(--fs-small); }
+  .picker-row a.dl {
+    margin-left: auto; font-size: 12.5px;
+  }
+  .report-body {
+    background: var(--bg-2); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 28px 34px;
+    max-width: 900px; line-height: 1.65;
+    /* Long unbroken strings (hashes, paths, signature lines — common in a
+       report's closing metadata) would otherwise overflow the box instead
+       of wrapping. */
+    overflow-wrap: break-word; word-break: break-word;
+  }
+  .report-body h1 { font-size: 22px; margin: 0 0 14px; }
+  .report-body h2 { font-size: 17px; margin: 26px 0 10px; padding-bottom: 6px;
+    border-bottom: 1px solid var(--border); }
+  .report-body h3 { font-size: 14.5px; margin: 20px 0 8px; }
+  .report-body h4 { font-size: 13px; margin: 16px 0 6px; color: var(--fg-1); }
+  .report-body p { margin: 8px 0; }
+  .report-body ul { margin: 8px 0; padding-left: 22px; }
+  .report-body li { margin: 3px 0; }
+  .report-body pre {
+    background: var(--bg-0); border: 1px solid var(--border);
+    border-radius: var(--radius-sm); padding: 10px 12px; overflow: auto;
+    font-size: 12px;
+  }
+  .report-body table.md-table {
+    border-collapse: collapse; margin: 10px 0; font-size: 13px; width: 100%;
+  }
+  .report-body table.md-table td {
+    border: 1px solid var(--border); padding: 5px 9px; vertical-align: top;
+  }
+  .report-body table.md-table tr:first-child td {
+    background: var(--bg-3); font-weight: 600;
+  }
+</style>
+</head>
+<body>
+<div class="page" id="app">
+  <div class="state-loading">Loading</div>
+</div>
+
+<script src="assets/shell.js"></script>
+<script>
+'use strict';
+const esc = AtlasShell.esc;
+const $app = () => document.getElementById('app');
+
+let reportFiles = [];   // kind === 'report'
+let selectedPath = '';
+
+function preferredReport(files, preferredPath) {
+  if (preferredPath && files.some(f => f.path === preferredPath)) {
+    return preferredPath;
+  }
+  // Prefer estate / main report names, then newest by mtime.
+  const ranked = [...files].sort((a, b) => {
+    const score = (n) => {
+      const low = n.toLowerCase();
+      if (low.includes('estate_report')) return 3;
+      if (low.endsWith('_report.md') && !low.includes('host_')) return 2;
+      return 1;
+    };
+    const d = score(b.name) - score(a.name);
+    if (d) return d;
+    return (b.mtime || 0) - (a.mtime || 0);
+  });
+  return ranked[0] ? ranked[0].path : '';
+}
+
+/** Point the Download link at the chosen format.
+ *
+ * Markdown is the file as it stands; HTML and PDF are rendered by the server
+ * from that same file when the link is followed, so a download always matches
+ * the report on disk rather than a copy made when the page loaded. */
+function setDownloadHref() {
+  const dl = document.getElementById('report-download');
+  const sel = document.getElementById('report-format');
+  if (!dl) return;
+  const f = reportFiles.find(x => x.path === selectedPath);
+  const fmt = sel ? sel.value : 'md';
+  const cd = AtlasShell.activeCase();
+  if (!f || !cd) {
+    dl.href = '#';
+    dl.removeAttribute('download');
+    return;
+  }
+  const q = new URLSearchParams({ case: cd, name: f.name, format: fmt });
+  dl.href = `/_dashboard/api/report_export?${q}`;
+  const stem = f.name.replace(/\.md$/i, '');
+  dl.download = fmt === 'md' ? f.name : `${stem}.${fmt}`;
+  dl.textContent = `Download ${fmt.toUpperCase()}`;
+}
+
+async function showFile(path) {
+  selectedPath = path;
+  const host = document.getElementById('report-preview');
+  const meta = document.getElementById('report-meta');
+  const dl = document.getElementById('report-download');
+  const f = reportFiles.find(x => x.path === path);
+  if (dl) {
+    setDownloadHref();
+    dl.hidden = !path;
+  }
+  if (meta) {
+    meta.textContent = f
+      ? `${AtlasShell.fmtBytes(f.size)} · updated ${AtlasShell.timeAgo(f.mtime)}`
+      : '';
+  }
+  if (!host) return;
+  if (!path) {
+    host.innerHTML = '<div class="state-empty">Select a report to preview.</div>';
+    return;
+  }
+  host.innerHTML = '<div class="state-loading">Loading</div>';
+  try {
+    const r = await fetch(path, { cache: 'no-store' });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const md = await r.text();
+    if (selectedPath !== path) return;  // selection changed mid-fetch
+    host.innerHTML = `<div class="report-body">${AtlasShell.renderMarkdown(md)}</div>`;
+  } catch (e) {
+    if (selectedPath !== path) return;
+    host.innerHTML = `<div class="state-error">Could not load report.\n${esc(path)}\n${esc(e.message)}</div>`;
+  }
+}
+
+function renderShell(cd, files, preferredPath, stageLabel) {
+  reportFiles = files;
+  if (!files.length) {
+    $app().innerHTML = `
+      <h1 class="page-title">Report</h1>
+      <div class="state-empty">No report markdown is available for this case yet.
+        <div class="hint">Reports appear under <code>reports/</code> after a
+        completed run, or via <code>atlas rerun --assemble-report</code>.
+        ${AtlasShell.timelinePluginActive()
+          ? ' Timeline files live under the <a href="timeline.html?case='
+            + encodeURIComponent(cd) + '">Timeline</a> tab.'
+          : ''}</div>
+      </div>`;
+    return;
+  }
+  const sel = preferredReport(files, preferredPath);
+  $app().innerHTML = `
+    <h1 class="page-title">Report</h1>
+    <p class="page-sub">Choose a report file to preview.</p>
+    <div class="picker-row">
+      <label for="report-select">Report</label>
+      <select id="report-select">
+        ${files.map(f =>
+          `<option value="${esc(f.path)}"${f.path === sel ? ' selected' : ''}>${esc(f.name)}</option>`
+        ).join('')}
+      </select>
+      <span class="meta" id="report-meta"></span>
+      <label for="report-format">Format</label>
+      <select id="report-format">
+        <option value="md" selected>Markdown</option>
+        <option value="html">HTML</option>
+        <option value="pdf">PDF</option>
+      </select>
+      <a class="dl" id="report-download" href="#" download>Download</a>
+    </div>
+    ${stageLabel ? `<p class="page-sub" id="report-stage" style="color:var(--warn);">${esc(stageLabel)}</p>` : ''}
+    <div id="report-preview"></div>`;
+  const fmtSel = document.getElementById('report-format');
+  if (fmtSel) fmtSel.addEventListener('change', setDownloadHref);
+  document.getElementById('report-select').addEventListener('change', (ev) => {
+    const u = new URL(window.location.href);
+    u.searchParams.set('file', ev.target.value);
+    history.replaceState(null, '', u.toString());
+    showFile(ev.target.value);
+  });
+  showFile(sel);
+}
+
+async function refresh() {
+  const cd = AtlasShell.activeCase();
+  if (!cd) {
+    $app().innerHTML = `<h1 class="page-title">Report</h1>
+      <div class="state-empty">Select a case to see its report.</div>`;
+    return;
+  }
+  $app().innerHTML = '<div class="state-loading">Loading</div>';
+  let ov;
+  try {
+    ov = await AtlasShell.api('case_overview', { case: cd });
+  } catch (e) {
+    if (AtlasShell.activeCase() !== cd) return;
+    $app().innerHTML = `<div class="state-error">Could not load report status.\n${esc(e.message)}</div>`;
+    return;
+  }
+  if (AtlasShell.activeCase() !== cd) return;
+  const files = (ov.report && ov.report.files || [])
+    .filter(f => f.kind === 'report');
+  const want = new URLSearchParams(location.search).get('file')
+    || (ov.report && ov.report.path) || '';
+  // Says plainly when the file is the basis version a stopped run left,
+  // rather than letting it read as the finished report.
+  renderShell(cd, files, want, (ov.report && ov.report.report_label) || '');
+}
+
+AtlasShell.init({ page: 'report', onCase: refresh });
+</script>
+</body>
+</html>

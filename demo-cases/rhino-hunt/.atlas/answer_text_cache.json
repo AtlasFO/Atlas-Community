@@ -1,0 +1,10 @@
+{
+  "task-0002": {
+    "text": "Recovered diary (carved OLE Word doc 00335017.ole, University of New Orleans) contains the anti-forensics narrative… Gumbo1.txt is a \"Shrimp and Tasso Gumbo\" recipe. The two steganographic carrier images are among the carved rhino JPGs on the reformatted USB key (RHINOUSB).",
+    "fingerprint": "c390f04132c4ff19"
+  },
+  "task-0001": {
+    "text": "Source host 137.30.122.253 uploaded files to the \"cook\" FTP server… Source 137.30.123.234 downloaded rhino4.jpg (150k) and rhino5.gif (83k). It also downloaded rhino.exe (~131KB, Content-Type: application/octet-stream).",
+    "fingerprint": "ff3dc0f6ae239164"
+  }
+}

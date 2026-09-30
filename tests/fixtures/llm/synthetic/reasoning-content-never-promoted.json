@@ -1,0 +1,34 @@
+{
+ "stack": "synthetic",
+ "model": "hand-written",
+ "scenario": "reasoning-content-never-promoted",
+ "source": "thinking must never become the answer",
+ "status": 200,
+ "request": {},
+ "response": {
+  "choices": [
+   {
+    "index": 0,
+    "message": {
+     "role": "assistant",
+     "content": null,
+     "reasoning_content": "thinking..."
+    },
+    "finish_reason": "stop"
+   }
+  ],
+  "usage": {
+   "prompt_tokens": 10,
+   "completion_tokens": 5
+  }
+ },
+ "expect": {
+  "content": "",
+  "reasoning_prefix": "thinking...",
+  "reasoning_tokens": 0,
+  "tool_calls": 0,
+  "finish_reason": "stop",
+  "starved": false,
+  "thinking_observed": true
+ }
+}

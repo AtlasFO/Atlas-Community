@@ -1,0 +1,554 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Atlas · IoCs</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<link rel="stylesheet" href="assets/atlas.css" />
+<script src="assets/i18n.js"></script>
+<style>
+  /* View-specific layout only — tokens and the shared band, chips, board,
+     list and sheet come from atlas.css. */
+  .hero { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; margin-bottom: 6px; }
+  .hero .page-title { margin: 0; }
+  .hero .meta { color: var(--fg-2); font-size: var(--fs-label); }
+
+  /* An indicator is a value first: monospace, never clipped mid-hash. */
+  .ioc-val { font-family: var(--mono); overflow-wrap: anywhere; }
+  .bc .ioc-val { font-size: var(--fs-small); color: var(--fg-0); }
+  .bc .bc-sub { margin-top: 4px; font-size: var(--fs-label); color: var(--fg-1); line-height: 1.45; }
+  /* Copying is the point of an indicator: it goes into a SIEM query, a
+     block list or a ticket. */
+  .ioc-copy {
+    margin-left: auto; background: none; border: 1px solid var(--border); color: var(--fg-2);
+    border-radius: var(--radius-sm); font: inherit; font-size: var(--fs-label); padding: 1px 7px; cursor: pointer;
+    transition: color .15s var(--ease), border-color .15s var(--ease);
+  }
+  .ioc-copy:hover { color: var(--fg-0); border-color: var(--border-strong); }
+  .rows-h, .lrow { grid-template-columns: minmax(0, 1.1fr) 104px 112px minmax(0, 1.4fr) 140px 56px 130px; }
+  .lrow .ioc-val { font-size: var(--fs-small); padding-top: 2px; }
+  .lrow .rtype, .lrow .rcov { color: var(--fg-2); font-size: var(--fs-label); padding-top: 3px; overflow-wrap: anywhere; }
+  .lrow .rcov .owed { color: var(--warn); }
+  .sheet-body .ioc-val { font-size: var(--fs-body); color: var(--fg-0); line-height: 1.6; }
+  .sheet-body .why { margin: 0; padding-left: 18px; color: var(--fg-1); }
+  .sheet-body .why li { margin: 2px 0; }
+  .sheet-body .cov { display: flex; flex-wrap: wrap; gap: 6px; }
+  .sheet-body .btn.ioc-copy { margin-left: 0; font-size: var(--fs-small); padding: 4px 10px; }
+</style>
+</head>
+<body>
+<div class="page" id="app">
+  <div class="state-loading">Loading</div>
+</div>
+<!-- Outside #app: the board re-renders whenever the catalog moves, and the
+     open sheet must survive that untouched. -->
+<div class="scrim" id="scrim"></div>
+<aside class="sheet" id="sheet" aria-label="Indicator detail">
+  <div class="sheet-head">
+    <span class="sheet-title" id="sheet-title"></span>
+    <button class="sheet-close" id="sheet-close" aria-label="Close"><svg viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+  </div>
+  <div class="sheet-body" id="sheet-body"></div>
+</aside>
+
+<script src="assets/shell.js"></script>
+<script>
+'use strict';
+const $app = () => document.getElementById('app');
+const esc = AtlasShell.esc;
+
+const TIERS = ['CONFIRMED', 'LIKELY', 'SUSPECTED', 'UNCONFIRMED'];
+const TIER_RANK = { CONFIRMED: 4, LIKELY: 3, SUSPECTED: 2, UNCONFIRMED: 1 };
+const TIER_COLOR = {
+  CONFIRMED: 'var(--conf-confirmed)', LIKELY: 'var(--conf-likely)',
+  SUSPECTED: 'var(--conf-suspected)', UNCONFIRMED: 'var(--conf-unconfirmed)',
+};
+// What the beliefs say the indicator is. The catalog decides; this names it.
+const ROLE_LABEL = {
+  attacker_tool: 'attacker tool', attacker_infra: 'attacker infrastructure',
+  attacker_account: 'attacker account', attacker_file: 'attacker file',
+  pattern: 'pattern', compromised_host: 'compromised host',
+  affected_asset: 'own asset named in the findings',
+  subject_identifier: 'identifier of the person under investigation',
+  third_party: 'third-party identifier',
+  attacker_host: 'attacker hostname',
+};
+const SEVERAL = '*several*';   // never a real hostname   // lane key for an indicator seen on more than one host
+
+// Board or list is a per-viewer convenience, so it lives in this browser only.
+const LS_LAYOUT = 'atlas.iocs.layout';
+let storedLayout = 'board';
+try { storedLayout = localStorage.getItem(LS_LAYOUT) === 'list' ? 'list' : 'board'; } catch (_e) { /* storage blocked */ }
+
+const State = {
+  data: null, stopPoll: null, lastPayload: '',
+  layout: storedLayout,   // 'board' | 'list'
+  sort: 'confidence',     // list order: 'confidence' | 'type' | 'value'
+  view: 'all',            // 'all' | 'owed'
+  search: '', confMin: 0,
+  types: new Set(),       // selected types; empty = every type
+  hosts: new Set(),       // selected hosts; empty = every host
+  groupBy: 'type',        // board lanes: 'type' | 'host'
+  selectedId: null,
+  lastHtml: null, animTimer: null,
+};
+
+/* ── catalog helpers ───────────────────────────────────────────────────── */
+const rows = () => (State.data && State.data.rows) || [];
+const idOf = (i) => `${i.category || ''}:${i.value}`;
+const byId = (id) => rows().find(i => idOf(i) === id);
+const tierOf = (i) => String(i.confidence || 'UNCONFIRMED').toUpperCase();
+const hostsOf = (i) => (i.hosts || []).filter(Boolean);
+const owedOf = (i) => (i.pending || []).length;
+const shortPath = (p) => String(p || '').split('/').pop();
+const claimHref = (id) =>
+  `claim_view.html?case=${encodeURIComponent(AtlasShell.activeCase())}&node=${encodeURIComponent(id)}`;
+function processHref(callId) {
+  const info = AtlasShell.caseInfo();
+  const trace = info && info.traces && info.traces.length ? info.traces[0].path : null;
+  if (!trace) return null;
+  return `dashboard.html?case=${encodeURIComponent(AtlasShell.activeCase())}`
+    + `&trace=${encodeURIComponent(trace)}&call=${encodeURIComponent(callId)}`;
+}
+function confPill(conf) {
+  if (!conf) return '';
+  const c = String(conf).toUpperCase();
+  return `<span class="pill conf-${esc(c.toLowerCase())}">${esc(c)}</span>`;
+}
+// The catalog arrives grouped by type; the board and list want one row each,
+// remembering its type and the catalog's order of types.
+function flatten(data) {
+  const out = [];
+  (data.groups || []).forEach((g, order) => (g.iocs || []).forEach(i => out.push({ ...i, group: g.title, order })));
+  return out;
+}
+
+/* ── filtering ─────────────────────────────────────────────────────────── */
+function hostKeyOf(i) {
+  const h = hostsOf(i);
+  return h.length > 1 ? SEVERAL : (h[0] || '');
+}
+const laneKeyOf = (i) => (State.groupBy === 'type' ? i.group : hostKeyOf(i));
+function laneTitle(key) {
+  if (State.groupBy === 'type') return key;
+  return hostTitle(key);
+}
+function hostTitle(key) {
+  if (key === SEVERAL) return 'Several hosts';
+  return key || 'Not attributed to a host';
+}
+function matches(i) {
+  if (State.types.size && !State.types.has(i.group)) return false;
+  if (State.hosts.size && !State.hosts.has(hostKeyOf(i))) return false;
+  if (State.view === 'owed' && !owedOf(i)) return false;
+  if (State.confMin > 0 && (TIER_RANK[tierOf(i)] || 0) < State.confMin) return false;
+  if (State.search) {
+    const q = State.search.toLowerCase();
+    const hay = [i.value, i.explanation, i.group, ROLE_LABEL[i.role] || '', ...hostsOf(i), ...(i.why || []),
+                 ...(i.claims || []).map(c => `${c.id} ${c.statement}`)].join(' ').toLowerCase();
+    if (!hay.includes(q)) return false;
+  }
+  return true;
+}
+
+/* ── rendering ─────────────────────────────────────────────────────────── */
+function cardHtml(i) {
+  const tier = tierOf(i);
+  const owed = owedOf(i);
+  const n = (i.claim_ids || []).length;
+  const hosts = hostsOf(i);
+  const top = owed ? `<div class="bc-top"><span class="pill warn" title="${esc((i.pending || []).map(shortPath).join(', '))}">owed ${owed} search${owed === 1 ? '' : 'es'}</span></div>` : '';
+  return `
+    <article class="bc conf-${esc(tier.toLowerCase())}${State.selectedId === idOf(i) ? ' selected' : ''}"
+             data-id="${esc(idOf(i))}" tabindex="0" role="button" aria-label="${esc(i.value)}">
+      ${top}
+      <div class="bc-txt ioc-val">${esc(i.value)}</div>
+      <div class="bc-sub">${esc([i.side, ...(i.use || []), i.source === 'prose' ? 'from prose' : ''].filter(Boolean).join(' · '))}</div>
+      ${i.explanation ? `<div class="bc-sub">${esc(i.explanation)}</div>` : ''}
+      <div class="bc-meta">
+        <span>${n} belief${n === 1 ? '' : 's'}</span>
+        ${State.groupBy === 'host' ? `<span>${esc(i.group)}</span>` : (hosts.length ? `<span>${esc(hosts.join(' · '))}</span>` : '')}
+        <button type="button" class="ioc-copy" data-copy="${esc(i.value)}" title="Copy indicator">copy</button>
+      </div>
+    </article>`;
+}
+
+function laneHtml(key, cards, index) {
+  const byTier = { CONFIRMED: [], LIKELY: [], SUSPECTED: [], UNCONFIRMED: [] };
+  for (const i of cards) (byTier[tierOf(i)] || byTier.UNCONFIRMED).push(i);
+  const owed = cards.filter(owedOf).length;
+  const sub = [`${cards.length} indicator${cards.length === 1 ? '' : 's'}`];
+  if (owed) sub.push(`${owed} still owed a search`);
+  return `
+    <section class="lane" style="--d:${(index * 0.05).toFixed(2)}s">
+      <div class="lane-h">
+        <div class="lname">${esc(laneTitle(key))}</div>
+        <div class="lsub">${esc(sub.join(' · '))}</div>
+      </div>
+      <div class="cols">
+        ${TIERS.map(t => `
+          <div class="col">
+            <div class="col-h"><span class="cdot" style="background:${TIER_COLOR[t]}"></span>${esc(t.toLowerCase())}<span class="n">${byTier[t].length}</span></div>
+            ${byTier[t].length ? byTier[t].map(cardHtml).join('') : '<div class="col-empty">none</div>'}
+          </div>`).join('')}
+      </div>
+    </section>`;
+}
+
+/* ── the list ─────────────────────────────────────────────────────────── */
+function sortList(arr) {
+  const conf = (x, y) => (TIER_RANK[tierOf(y)] || 0) - (TIER_RANK[tierOf(x)] || 0);
+  const val = (x, y) => String(x.value).localeCompare(String(y.value));
+  const typ = (x, y) => (x.order - y.order) || conf(x, y) || val(x, y);
+  if (State.sort === 'type') return arr.sort(typ);
+  if (State.sort === 'value') return arr.sort(val);
+  return arr.sort((x, y) => conf(x, y) || typ(x, y));
+}
+
+function rowHtml(i) {
+  const tier = tierOf(i);
+  const n = (i.claim_ids || []).length;
+  const searched = (i.searched || []).length, owed = owedOf(i);
+  const why = (i.why || []).join('; ');
+  const cov = (searched || owed)
+    ? [searched ? `${searched} searched` : '', owed ? `<span class="owed">${owed} owed</span>` : ''].filter(Boolean).join(' · ')
+    : '<span class="dim">none recorded</span>';
+  return `
+    <div class="lrow${State.selectedId === idOf(i) ? ' selected' : ''}" data-id="${esc(idOf(i))}" role="button" tabindex="0">
+      <span class="ioc-val">${esc(i.value)}</span>
+      <span class="rtype">${esc(i.group)}</span>
+      <span class="rconf"><span class="cdot" style="background:${TIER_COLOR[tier] || 'var(--fg-2)'}"></span>${esc(tier.toLowerCase())}</span>
+      <span class="rtxt">${esc([i.side, ...(i.use || [])].filter(Boolean).join(' · '))}${i.source === 'prose' ? ' <span class="dim">· from prose</span>' : ''} ${esc(i.explanation || ROLE_LABEL[i.role] || '')}${why ? ` <span class="dim">· ${esc(why)}</span>` : ''}</span>
+      <span class="rhost">${esc(hostsOf(i).join(' · '))}</span>
+      <span class="rrefs">${n}</span>
+      <span class="rcov">${cov}</span>
+    </div>`;
+}
+
+function listHtml(list) {
+  return `
+    <div class="rows">
+      <div class="rows-h" aria-hidden="true"><span>Indicator</span><span>Type</span><span>Confidence</span><span>What it is</span><span>Hosts</span><span class="rrefs">Beliefs</span><span>Coverage</span></div>
+      ${list.map(rowHtml).join('')}
+    </div>`;
+}
+
+function bandHtml(all) {
+  const total = all.length;
+  const byTier = {};
+  for (const i of all) byTier[tierOf(i)] = (byTier[tierOf(i)] || 0) + 1;
+  const parts = TIERS.map(t => [t, byTier[t] || 0]).filter(p => p[1] > 0);
+  const bar = total ? `
+    <div class="minibar" aria-hidden="true">${parts.map(([t, n]) =>
+      `<span style="width:${(100 * n / total).toFixed(1)}%;background:${TIER_COLOR[t]}"></span>`).join('')}</div>
+    <div class="conf-legend">${parts.map(([t, n]) =>
+      `<span><span class="cdot" style="background:${TIER_COLOR[t]}"></span>${n} ${esc(t.toLowerCase())}</span>`).join('')}</div>`
+    : '<div class="f-sub">nothing attributed yet</div>';
+  const groups = (State.data.groups || []).map(g => [g.title, (g.iocs || []).length]);
+  const typesSub = groups.map(([t, n]) => `${t} ${n}`).join(' · ');
+  const hosts = [...new Set(all.flatMap(hostsOf))].sort();
+  const owed = all.filter(owedOf).length;
+  const searched = all.filter(i => (i.searched || []).length).length;
+  const beliefs = new Set(all.flatMap(i => i.claim_ids || [])).size;
+  return `
+    <div class="band">
+      <div class="band-figures">
+        <div class="band-cell">
+          <div class="f-v">${total}</div><div class="f-l">Indicators</div>${bar}
+        </div>
+        <div class="band-cell">
+          <div class="f-v">${groups.length}</div><div class="f-l">Types</div>
+          <div class="f-sub" title="${esc(typesSub)}">${typesSub ? esc(typesSub) : 'none yet'}</div>
+        </div>
+        <div class="band-cell">
+          <div class="f-v">${hosts.length}</div><div class="f-l">Hosts</div>
+          <div class="f-sub" title="${esc(hosts.join(' · '))}">${hosts.length ? esc(hosts.join(' · ')) : 'no host named yet'}</div>
+        </div>
+        <div class="band-cell">
+          <div class="f-v"${owed ? ' style="color:var(--warn)"' : ''}>${owed}</div><div class="f-l">Still owed a search</div>
+          <div class="f-sub">${searched ? `${searched} with a recorded search` : 'no search coverage recorded'}</div>
+        </div>
+        <div class="band-cell">
+          <div class="f-v">${beliefs}</div><div class="f-l">Source beliefs</div>
+          <div class="f-sub">of ${esc(String(State.data.beliefs_considered || 0))} considered</div>
+        </div>
+      </div>
+    </div>`;
+}
+
+function toolsHtml(all, hostKeys, shown) {
+  const owed = all.filter(owedOf).length;
+  const typeChips = (State.data.groups || []).map(g =>
+    `<button type="button" class="chip${State.types.has(g.title) ? ' on' : ''}" data-type="${esc(g.title)}">${esc(g.title)} <span class="n">${(g.iocs || []).length}</span></button>`).join('');
+  // Host chips filter everywhere; on the board they are also the lanes when
+  // the lanes are by host.
+  const hostChips = (State.layout === 'list' || State.groupBy === 'host')
+    ? hostKeys.map(k => `<button type="button" class="chip${State.hosts.has(k) ? ' on' : ''}" data-host="${esc(k)}">${esc(hostTitle(k))}</button>`).join('')
+    : '';
+  const laneSwitch = State.layout === 'board' ? `<span class="seg">
+          <button type="button" class="chip${State.groupBy === 'type' ? ' on' : ''}" data-group="type" title="A lane per kind of indicator">By type</button>
+          <button type="button" class="chip${State.groupBy === 'host' ? ' on' : ''}" data-group="host" title="A lane per host the indicator was seen on">By host</button>
+        </span>` : '';
+  return `
+    <div class="tools lead">
+      <input type="search" class="search" id="search" placeholder="Search indicators, hosts, beliefs…" value="${esc(State.search)}" />
+      <span class="seg">
+        <button type="button" class="chip${State.layout === 'board' ? ' on' : ''}" data-layout="board" title="Lanes by type or host, columns by confidence">Board</button>
+        <button type="button" class="chip${State.layout === 'list' ? ' on' : ''}" data-layout="list" title="Every indicator as one list">List</button>
+      </span>
+      ${State.layout === 'list' ? `<select class="chip" id="sort" title="Order of the list">
+        <option value="confidence"${State.sort === 'confidence' ? ' selected' : ''}>By confidence</option>
+        <option value="type"${State.sort === 'type' ? ' selected' : ''}>By type</option>
+        <option value="value"${State.sort === 'value' ? ' selected' : ''}>A to Z</option>
+      </select>` : ''}
+      <button type="button" class="chip" id="copy-shown" title="Copy every indicator the filters leave, one per line">Copy shown</button>
+      <span class="tail">${shown} of ${all.length} shown</span>
+    </div>
+    <div class="tools filters">
+      <span class="tg"><span class="tg-l">Show</span>
+        <span class="seg">
+          <button type="button" class="chip${State.view === 'all' ? ' on' : ''}" data-view="all">Everything</button>
+          <button type="button" class="chip${State.view === 'owed' ? ' on' : ''}${owed ? '' : ' zero'}" data-view="owed" title="Indicators not yet searched for everywhere they should be">Still owed a search <span class="n">${owed}</span></button>
+        </span>
+        <select class="chip" id="conf-min" title="Minimum confidence">
+          <option value="0"${State.confMin === 0 ? ' selected' : ''}>Any confidence</option>
+          <option value="2"${State.confMin === 2 ? ' selected' : ''}>Suspected or higher</option>
+          <option value="3"${State.confMin === 3 ? ' selected' : ''}>Likely or higher</option>
+          <option value="4"${State.confMin === 4 ? ' selected' : ''}>Confirmed only</option>
+        </select>
+      </span>
+      ${typeChips ? `<span class="tg"><span class="tg-l">Types</span>${typeChips}</span>` : ''}
+      ${laneSwitch || hostChips ? `<span class="tg"><span class="tg-l">${State.layout === 'board' ? 'Lanes' : 'Hosts'}</span>${laneSwitch}${hostChips}</span>` : ''}
+    </div>`;
+}
+
+function render() {
+  const cd = AtlasShell.activeCase();
+  const all = rows();
+  const visible = all.filter(matches);
+  // Hosts in name order, indicators seen on several hosts next, unattributed last.
+  const rank = (k) => (k === '' ? 2 : k === SEVERAL ? 1 : 0);
+  const hostKeys = [...new Set(all.map(hostKeyOf))].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
+
+  let body;
+  if (!all.length) {
+    body = `<div class="state-empty">No indicators yet.
+      <div class="hint">Indicators come only from findings the investigation
+      actually recorded, never from raw tool output, so an empty page means
+      no recorded belief has attributed anything to attacker activity yet.</div></div>`;
+  } else if (!visible.length) {
+    body = '<div class="state-empty">Nothing matches these filters.</div>';
+  } else if (State.layout === 'list') {
+    body = listHtml(sortList(visible.slice()));
+  } else {
+    const lanes = new Map();
+    const keys = State.groupBy === 'type'
+      ? (State.data.groups || []).map(g => g.title)
+      : hostKeys;
+    for (const k of keys) lanes.set(k, []);
+    for (const i of visible) lanes.get(laneKeyOf(i)).push(i);
+    body = keys.filter(k => lanes.get(k).length).map((k, idx) => laneHtml(k, lanes.get(k), idx)).join('');
+  }
+
+  const html = `
+    <div class="hero">
+      <h1 class="page-title">IoCs</h1>
+      <span class="meta">${esc(cd)} · ${State.layout === 'list' ? 'every indicator, in one list' : `typed indicators, own assets and review rows, by confidence and ${State.groupBy}`}</span>
+    </div>
+    ${bandHtml(all)}
+    ${all.length ? toolsHtml(all, hostKeys, visible.length) : ''}
+    ${body}`;
+
+  if (html === State.lastHtml) return;
+  const first = State.lastHtml === null;
+  $app().innerHTML = html;
+  State.lastHtml = html;
+  if (first) {
+    $app().classList.add('anim-in');
+    clearTimeout(State.animTimer);
+    State.animTimer = setTimeout(() => $app().classList.remove('anim-in'), 1400);
+  }
+  wire();
+}
+
+function rerender() { State.lastHtml = null; render(); }
+
+function setLayout(layout) {
+  if (State.layout === layout) return;
+  State.layout = layout;
+  try { localStorage.setItem(LS_LAYOUT, layout); } catch (_e) { /* storage blocked */ }
+  rerender();
+}
+
+function wire() {
+  const app = $app();
+  const search = app.querySelector('#search');
+  let t = null;
+  if (search) search.addEventListener('input', (ev) => {
+    clearTimeout(t);
+    t = setTimeout(() => {
+      State.search = ev.target.value.trim(); rerender();
+      const s = app.querySelector('#search'); if (s) { s.focus(); s.setSelectionRange(s.value.length, s.value.length); }
+    }, 200);
+  });
+  const cm = app.querySelector('#conf-min');
+  if (cm) cm.addEventListener('change', (ev) => { State.confMin = parseInt(ev.target.value, 10) || 0; rerender(); });
+  app.querySelectorAll('[data-view]').forEach(b => b.addEventListener('click', () => { State.view = b.dataset.view; rerender(); }));
+  app.querySelectorAll('[data-type]').forEach(b => b.addEventListener('click', () => {
+    const k = b.dataset.type;
+    if (State.types.has(k)) State.types.delete(k); else State.types.add(k);
+    rerender();
+  }));
+  app.querySelectorAll('[data-host]').forEach(b => b.addEventListener('click', () => {
+    const h = b.dataset.host;
+    if (State.hosts.has(h)) State.hosts.delete(h); else State.hosts.add(h);
+    rerender();
+  }));
+  app.querySelectorAll('[data-layout]').forEach(b => b.addEventListener('click', () => setLayout(b.dataset.layout)));
+  const sort = app.querySelector('#sort');
+  if (sort) sort.addEventListener('change', (ev) => { State.sort = ev.target.value; rerender(); });
+  app.querySelectorAll('[data-group]').forEach(b => b.addEventListener('click', () => {
+    if (State.groupBy === b.dataset.group) return;
+    State.groupBy = b.dataset.group; rerender();
+  }));
+  const copyShown = app.querySelector('#copy-shown');
+  if (copyShown) copyShown.addEventListener('click', () => {
+    const shown = rows().filter(matches);
+    copy((State.layout === 'list' ? sortList(shown) : shown).map(i => i.value).join('\n'), copyShown);
+  });
+  app.querySelectorAll('.ioc-copy').forEach(btn =>
+    btn.addEventListener('click', (ev) => { ev.stopPropagation(); copy(btn.dataset.copy, btn); }));
+  const open = (el) => { const id = el.dataset.id; if (id) openSheet(id); };
+  app.querySelectorAll('.bc, .lrow').forEach(el => {
+    el.addEventListener('click', () => open(el));
+    el.addEventListener('keydown', (ev) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); open(el); } });
+  });
+}
+
+/* ── copying ───────────────────────────────────────────────────────────── */
+function copy(text, btn) {
+  const done = () => {
+    const prev = btn.textContent;
+    btn.textContent = 'copied';
+    setTimeout(() => { btn.textContent = prev; }, 1200);
+  };
+  // navigator.clipboard needs a secure context and the dashboard is usually
+  // plain http on a LAN address, so fall back rather than silently failing.
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(text).then(done, () => fallbackCopy(text, done));
+  } else {
+    fallbackCopy(text, done);
+  }
+}
+function fallbackCopy(text, done) {
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.setAttribute('readonly', '');
+  ta.style.cssText = 'position:fixed;opacity:0';
+  document.body.appendChild(ta);
+  ta.select();
+  try { document.execCommand('copy'); done(); } catch (_e) { /* nothing to do */ }
+  ta.remove();
+}
+
+/* ── the sheet ─────────────────────────────────────────────────────────── */
+function openSheet(id) {
+  if (!byId(id)) return;
+  State.selectedId = id;
+  renderSheet();
+  document.getElementById('sheet').classList.add('open');
+  document.getElementById('scrim').classList.add('on');
+  $app().querySelectorAll('.bc.selected, .lrow.selected').forEach(el => el.classList.remove('selected'));
+  const card = $app().querySelector(`.bc[data-id="${CSS.escape(id)}"], .lrow[data-id="${CSS.escape(id)}"]`);
+  if (card) card.classList.add('selected');
+}
+function closeSheet() {
+  State.selectedId = null;
+  document.getElementById('sheet').classList.remove('open');
+  document.getElementById('scrim').classList.remove('on');
+  $app().querySelectorAll('.bc.selected, .lrow.selected').forEach(el => el.classList.remove('selected'));
+}
+function renderSheet() {
+  const i = byId(State.selectedId);
+  if (!i) { closeSheet(); return; }
+  document.getElementById('sheet-title').textContent = `${i.value} · ${i.group}`;
+  const hosts = hostsOf(i);
+  const why = i.why || [];
+  const claims = i.claims || [];
+  const claimsHtml = claims.length
+    ? claims.map(c => `<div class="ref">
+        <a class="cid" href="${claimHref(c.id)}" title="Open in Case Findings">${esc(c.id)}</a>
+        <span>${confPill(c.confidence)}${c.host ? ` <span class="dim">${esc(c.host)}</span>` : ''} ${esc(c.statement)}</span></div>`).join('')
+    : '<div class="dim">No recorded belief carries this indicator any more.</div>';
+  const searched = i.searched || [], pending = i.pending || [];
+  const chips = (list, cls) => `<div class="cov">${list.map(p => `<span class="pill ${cls}" title="${esc(p)}">${esc(shortPath(p))}</span>`).join('')}</div>`;
+  const covHtml = (searched.length || pending.length)
+    ? `${searched.length ? `<h4>Searched in (${searched.length})</h4>${chips(searched, 'neutral')}` : ''}
+       ${pending.length ? `<h4>Still owed (${pending.length})</h4>${chips(pending, 'warn')}` : ''}`
+    : '<h4>Search coverage</h4><div class="dim">No search for this indicator has been recorded.</div>';
+  const calls = (i.call_ids || []).map(c => {
+    const href = processHref(c);
+    return href ? `<a class="cid" href="${href}" title="Open this call in the Process view">#${esc(String(c))}</a>` : `<span class="cid">#${esc(String(c))}</span>`;
+  });
+  document.getElementById('sheet-body').innerHTML = `
+    <div>${confPill(i.confidence)} <span class="pill neutral">${esc(ROLE_LABEL[i.role] || i.role || 'indicator')}</span> <span class="pill neutral">${esc(i.group)}</span>${hosts.length ? ` <span class="pill neutral">${esc(hosts.join(' · '))}</span>` : ''}</div>
+    <div class="ioc-val" style="margin-top:10px">${esc(i.value)}</div>
+    ${i.explanation ? `<div class="muted" style="margin-top:4px">${esc(i.explanation)}</div>` : ''}
+    <div style="margin-top:10px"><button type="button" class="btn ioc-copy" data-copy="${esc(i.value)}">Copy indicator</button></div>
+    ${why.length ? `<h4>Why flagged</h4><ul class="why">${why.map(w => `<li>${esc(w)}</li>`).join('')}</ul>` : ''}
+    <h4>Source beliefs (${(i.claim_ids || []).length > claims.length ? `${claims.length} of ${i.claim_ids.length}` : claims.length})</h4>${claimsHtml}
+    ${covHtml}
+    ${calls.length ? `<h4>Seen in the run</h4><div class="ref"><span>${calls.join(' ')}</span></div>` : ''}
+    <details class="raw" style="margin-top:14px"><summary>Raw record</summary><pre>${esc(JSON.stringify(i, null, 2))}</pre></details>`;
+  const btn = document.querySelector('#sheet-body .ioc-copy');
+  if (btn) btn.addEventListener('click', () => copy(btn.dataset.copy, btn));
+}
+document.getElementById('sheet-close').addEventListener('click', closeSheet);
+document.getElementById('scrim').addEventListener('click', closeSheet);
+document.addEventListener('keydown', (ev) => { if (ev.key === 'Escape' && State.selectedId) closeSheet(); });
+
+/* ── loading ───────────────────────────────────────────────────────────── */
+async function load() {
+  const cd = AtlasShell.activeCase();
+  if (!cd) {
+    $app().innerHTML = '<div class="hero"><h1 class="page-title">IoCs</h1></div><div class="state-empty">Select a case to see its indicators.</div>';
+    return;
+  }
+  let data;
+  try {
+    data = await AtlasShell.api('case/iocs', { case: cd });
+    if (data.error) throw new Error(data.error);
+  } catch (e) {
+    if (AtlasShell.activeCase() !== cd) return;
+    if (AtlasShell.isTransient(e)) return;   // keep the page; the next poll retries
+    State.lastHtml = null; State.lastPayload = '';
+    $app().innerHTML = `<div class="hero"><h1 class="page-title">IoCs</h1></div><div class="state-error">Could not load indicators.\n${esc(e.message)}</div>`;
+    return;
+  }
+  if (AtlasShell.activeCase() !== cd) return;   // case switched mid-flight
+  // Re-rendering on every poll would wipe the "copied" feedback and any
+  // text selection, so only redraw when the catalog actually moved.
+  const payload = JSON.stringify(data.groups || []);
+  if (State.data && payload === State.lastPayload) return;
+  State.lastPayload = payload;
+  State.data = { ...data, rows: flatten(data) };
+  render();
+  if (State.selectedId) renderSheet();
+}
+
+AtlasShell.init({
+  page: 'iocs',
+  onCase: () => {
+    if (State.stopPoll) State.stopPoll();
+    State.data = null; State.lastPayload = ''; State.lastHtml = null;
+    State.types.clear(); State.hosts.clear(); State.search = '';
+    closeSheet();
+    $app().innerHTML = '<div class="state-loading">Loading</div>';
+    // Indicators only move when a new belief lands, so poll far slower than
+    // the activity-driven views.
+    State.stopPoll = AtlasShell.poll(load, 10000);
+  },
+});
+</script>
+</body>
+</html>

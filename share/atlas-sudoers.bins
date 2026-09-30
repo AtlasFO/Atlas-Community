@@ -1,0 +1,27 @@
+# Basename inventory of binaries Atlas may invoke via needs_sudo=True
+# (or sudo helpers in executor/jobs_runner). Keep in sync with
+# share/atlas-sudoers.in and the wrappers under tools/ + core/.
+# Lines starting with # are comments; one basename per line.
+true
+mkdir
+chown
+kill
+mount
+umount
+fusermount
+fusermount3
+losetup
+partprobe
+ewfmount
+vshadowmount
+bdemount
+xmount
+mmls
+photorec
+bulk_extractor
+foremost
+scalpel
+tcpxtract
+tcpdump
+ngrep
+tshark

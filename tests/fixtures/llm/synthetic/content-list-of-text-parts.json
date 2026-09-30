@@ -1,0 +1,42 @@
+{
+ "stack": "synthetic",
+ "model": "hand-written",
+ "scenario": "content-list-of-text-parts",
+ "source": "some gateways return content as OpenAI content parts",
+ "status": 200,
+ "request": {},
+ "response": {
+  "choices": [
+   {
+    "index": 0,
+    "message": {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "ok"
+      },
+      {
+       "type": "text",
+       "text": "!"
+      }
+     ]
+    },
+    "finish_reason": "stop"
+   }
+  ],
+  "usage": {
+   "prompt_tokens": 10,
+   "completion_tokens": 5
+  }
+ },
+ "expect": {
+  "content": "ok!",
+  "reasoning_empty": true,
+  "reasoning_tokens": 0,
+  "tool_calls": 0,
+  "finish_reason": "stop",
+  "starved": false,
+  "thinking_observed": false
+ }
+}

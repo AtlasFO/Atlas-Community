@@ -1,0 +1,61 @@
+{
+ "stack": "openrouter",
+ "model": "example-model",
+ "scenario": "tool-no-thinking",
+ "source": "hand-written from the documented OpenRouter response shape for a Llama model",
+ "status": 200,
+ "request": {
+  "model": "example-model",
+  "messages": [
+   {
+    "role": "user",
+    "content": "List the processes in m.img. Call the tool."
+   }
+  ],
+  "max_tokens": 512
+ },
+ "response": {
+  "id": "gen-test-0030",
+  "object": "chat.completion",
+  "created": 1924992000,
+  "model": "example-model",
+  "choices": [
+   {
+    "index": 0,
+    "finish_reason": "tool_calls",
+    "message": {
+     "role": "assistant",
+     "content": null,
+     "reasoning": null,
+     "tool_calls": [
+      {
+       "id": "call_test0030",
+       "type": "function",
+       "function": {
+        "name": "vol_pslist",
+        "arguments": "{\"image\": \"m.img\"}"
+       }
+      }
+     ]
+    }
+   }
+  ],
+  "usage": {
+   "prompt_tokens": 100,
+   "completion_tokens": 20,
+   "completion_tokens_details": {
+    "reasoning_tokens": 0
+   }
+  }
+ },
+ "expect": {
+  "content": "",
+  "reasoning_empty": true,
+  "reasoning_tokens": 0,
+  "tool_calls": 1,
+  "tool_name": "vol_pslist",
+  "finish_reason": "tool_calls",
+  "starved": false,
+  "thinking_observed": false
+ }
+}

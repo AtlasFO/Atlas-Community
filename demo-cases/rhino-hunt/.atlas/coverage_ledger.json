@@ -1,0 +1,187 @@
+{
+  "schema_version": "1.0",
+  "case_id": "RHINO-HUNT",
+  "updated_at": "2026-09-29T17:33:22Z",
+  "units": {
+    "evidence/RHINOUSB.dd": {
+      "id": "evidence/RHINOUSB.dd",
+      "path": "evidence/RHINOUSB.dd",
+      "kind": "container",
+      "reason": "intake_container",
+      "status": "probed",
+      "task_ids": [
+        "task-0001",
+        "task-0002",
+        "task-0003",
+        "task-0004"
+      ],
+      "probed_at": "2026-09-29T16:49:15Z",
+      "note": ""
+    },
+    "analysis/carve_foremost": {
+      "id": "analysis/carve_foremost",
+      "path": "analysis/carve_foremost",
+      "kind": "derived",
+      "reason": "produced by carve_foremost_carve from RHINOUSB.dd; 11 files: 7 jpg, 2 gif, 1 ole, 1 txt",
+      "status": "answered",
+      "task_ids": [],
+      "probed_at": "2026-09-29T17:33:22Z",
+      "note": "",
+      "source_rel": "evidence/RHINOUSB.dd"
+    },
+    "analysis/streams_rhino2": {
+      "id": "analysis/streams_rhino2",
+      "path": "analysis/streams_rhino2",
+      "kind": "derived",
+      "reason": "produced by net_tcpxtract_streams; 32 files: 26 html, 5 gif, 1 jpg",
+      "status": "probed",
+      "task_ids": [],
+      "probed_at": "2026-09-29T17:05:05Z",
+      "note": ""
+    },
+    "analysis/streams_rhino3": {
+      "id": "analysis/streams_rhino3",
+      "path": "analysis/streams_rhino3",
+      "kind": "derived",
+      "reason": "produced by net_tcpxtract_streams; 71 files: 63 html, 6 gif, 2 pdf",
+      "status": "probed",
+      "task_ids": [],
+      "probed_at": "2026-09-29T17:11:33Z",
+      "note": ""
+    },
+    "analysis/streams_rhino1": {
+      "id": "analysis/streams_rhino1",
+      "path": "analysis/streams_rhino1",
+      "kind": "derived",
+      "reason": "produced by net_tcpxtract_streams; 266 files: 119 html, 103 gif, 18 jpg, 15 png, 10 bmp, 1 zip",
+      "status": "probed",
+      "task_ids": [],
+      "probed_at": "2026-09-29T17:06:32Z",
+      "note": ""
+    },
+    "analysis/contraband_stream2": {
+      "id": "analysis/contraband_stream2",
+      "path": "analysis/contraband_stream2",
+      "kind": "derived",
+      "reason": "produced by net_tcpxtract_streams; 1 files: 1 zip",
+      "status": "answered",
+      "task_ids": [],
+      "probed_at": "2026-09-29T17:13:39Z",
+      "note": ""
+    }
+  },
+  "items": {
+    "evidence/RHINOUSB.dd": {
+      "id": "evidence/RHINOUSB.dd",
+      "path": "evidence/RHINOUSB.dd",
+      "kind": "image",
+      "segments": [],
+      "status": "examined",
+      "touched": [
+        "evidence/rhinousb.dd"
+      ],
+      "calls": [
+        "21",
+        "26",
+        "27",
+        "28",
+        "53"
+      ],
+      "examined_by": {
+        "call_id": "21",
+        "tool": "tsk_mmls"
+      },
+      "examined_at": "2026-09-29T16:49:15Z",
+      "blocked_reason": ""
+    },
+    "evidence/rhino.log": {
+      "id": "evidence/rhino.log",
+      "path": "evidence/rhino.log",
+      "kind": "capture",
+      "segments": [],
+      "status": "examined",
+      "touched": [
+        "evidence/rhino.log"
+      ],
+      "calls": [
+        "18",
+        "22",
+        "29",
+        "30",
+        "31",
+        "92",
+        "203",
+        "211",
+        "271"
+      ],
+      "examined_by": {
+        "call_id": "18",
+        "tool": "net_tcpdump_list_connections"
+      },
+      "examined_at": "2026-09-29T16:49:14Z",
+      "blocked_reason": ""
+    },
+    "evidence/rhino2.log": {
+      "id": "evidence/rhino2.log",
+      "path": "evidence/rhino2.log",
+      "kind": "capture",
+      "segments": [],
+      "status": "examined",
+      "touched": [
+        "evidence/rhino2.log"
+      ],
+      "calls": [
+        "19",
+        "23",
+        "55",
+        "86",
+        "90",
+        "273",
+        "279",
+        "296"
+      ],
+      "examined_by": {
+        "call_id": "19",
+        "tool": "net_tcpdump_list_connections"
+      },
+      "examined_at": "2026-09-29T16:49:15Z",
+      "blocked_reason": ""
+    },
+    "evidence/rhino3.log": {
+      "id": "evidence/rhino3.log",
+      "path": "evidence/rhino3.log",
+      "kind": "capture",
+      "segments": [],
+      "status": "examined",
+      "touched": [
+        "evidence/rhino3.log"
+      ],
+      "calls": [
+        "20",
+        "24",
+        "56",
+        "87",
+        "91",
+        "275",
+        "280",
+        "297"
+      ],
+      "examined_by": {
+        "call_id": "20",
+        "tool": "net_tcpdump_list_connections"
+      },
+      "examined_at": "2026-09-29T16:49:15Z",
+      "blocked_reason": ""
+    }
+  },
+  "meta": {
+    "source": "build_coverage_ledger",
+    "task_ids": [
+      "task-0001",
+      "task-0002",
+      "task-0003",
+      "task-0004"
+    ],
+    "unit_count": 1
+  }
+}

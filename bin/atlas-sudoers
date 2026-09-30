@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+# Install least-privilege passwordless sudo for Atlas forensic tools.
+# Template: share/atlas-sudoers.in → /etc/sudoers.d/atlas-$USER
+#
+# Usage:
+#   bin/atlas-sudoers           # install / refresh
+#   bin/atlas-sudoers --check   # exit 0 if sudo -n probes pass
+#   bin/atlas-sudoers --help
+set -euo pipefail
+
+SCRIPT="$(readlink -f "${BASH_SOURCE[0]}")"
+REPO_ROOT="$(cd "$(dirname "$SCRIPT")/.." && pwd)"
+TEMPLATE="$REPO_ROOT/share/atlas-sudoers.in"
+CURRENT_USER="$(whoami)"
+SUDOERS_FILE="/etc/sudoers.d/atlas-$CURRENT_USER"
+LEGACY_SUDOERS="/etc/sudoers.d/atlas"
+
+usage() {
+    cat <<EOF
+Atlas passwordless sudo installer
+
+Installs a least-privilege sudoers grant so investigation tools can run
+\`sudo -n\` without a password prompt (mount/loop/carve/network + infra).
+Does NOT grant NOPASSWD: ALL.
+
+  $0           install / refresh $SUDOERS_FILE
+  $0 --check   verify probes (sudo -n true, sudo -n losetup -h)
+  $0 --help    this help
+
+Source template: $TEMPLATE
+EOF
+}
+
+check_probes() {
+    local fail=0
+    if ! sudo -n true 2>/dev/null; then
+        echo "FAIL: sudo -n true" >&2
+        fail=1
+    else
+        echo "OK:   sudo -n true"
+    fi
+    local losetup_bin=""
+    losetup_bin="$(command -v losetup 2>/dev/null || true)"
+    if [ -z "$losetup_bin" ]; then
+        for cand in /usr/sbin/losetup /sbin/losetup /usr/bin/losetup; do
+            if [ -x "$cand" ]; then losetup_bin="$cand"; break; fi
+        done
+    fi
+    if [ -n "$losetup_bin" ]; then
+        if sudo -n "$losetup_bin" -h >/dev/null 2>&1 \
+                || sudo -n "$losetup_bin" --help >/dev/null 2>&1; then
+            echo "OK:   sudo -n $losetup_bin -h"
+        else
+            echo "FAIL: sudo -n $losetup_bin -h" >&2
+            fail=1
+        fi
+    else
+        echo "SKIP: losetup not found"
+    fi
+    return "$fail"
+}
+
+install_sudoers() {
+    if [ ! -f "$TEMPLATE" ]; then
+        echo "error: missing template $TEMPLATE" >&2
+        exit 1
+    fi
+    local cases_root
+    cases_root="${ATLAS_CASES_ROOT:-$HOME/cases}"
+    local staged
+    staged="$(mktemp)"
+    # shellcheck disable=SC2016
+    sed -e "s/@USER@/${CURRENT_USER}/g" \
+        -e "s#@ATLAS_DIR@#${REPO_ROOT}#g" \
+        -e "s#@CASES_ROOT@#${cases_root}#g" \
+        "$TEMPLATE" > "$staged"
+    if ! visudo -cf "$staged" >/dev/null 2>&1; then
+        echo "error: generated sudoers failed visudo -cf" >&2
+        rm -f "$staged"
+        exit 1
+    fi
+    echo "Installing $SUDOERS_FILE (may prompt for your password once)…"
+    sudo cp "$staged" "$SUDOERS_FILE"
+    sudo chmod 440 "$SUDOERS_FILE"
+    rm -f "$staged"
+    if [ -f "$LEGACY_SUDOERS" ]; then
+        sudo rm -f "$LEGACY_SUDOERS"
+        echo "Removed legacy $LEGACY_SUDOERS"
+    fi
+    echo "Installed $SUDOERS_FILE"
+    if check_probes; then
+        echo "Passwordless sudo ready for Atlas."
+        exit 0
+    fi
+    echo "Sudoers written but probes still fail — check policy / group membership." >&2
+    exit 1
+}
+
+case "${1:-}" in
+    -h|--help) usage; exit 0 ;;
+    --check)
+        if check_probes; then exit 0; fi
+        echo ""
+        echo "Run: $SCRIPT" >&2
+        exit 1
+        ;;
+    "")
+        install_sudoers
+        ;;
+    *)
+        echo "unknown option: $1" >&2
+        usage >&2
+        exit 1
+        ;;
+esac

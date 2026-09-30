@@ -1,0 +1,69 @@
+{
+ "stack": "litellm",
+ "model": "example-model",
+ "scenario": "tool-no-count",
+ "source": "hand-written from the documented LiteLLM response shape for a Gemini model",
+ "status": 200,
+ "request": {
+  "model": "example-model",
+  "messages": [
+   {
+    "role": "user",
+    "content": "List the processes in m.img. Call the tool."
+   }
+  ],
+  "max_tokens": 512
+ },
+ "response": {
+  "id": "test0006",
+  "object": "chat.completion",
+  "created": 1924992000,
+  "model": "example-model",
+  "choices": [
+   {
+    "index": 0,
+    "message": {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_test0006__thought__AAAA",
+       "type": "function",
+       "function": {
+        "name": "vol_pslist",
+        "arguments": "{\"image\": \"m.img\"}"
+       },
+       "provider_specific_fields": {
+        "thought_signature": "AAAA"
+       }
+      }
+     ],
+     "thinking_blocks": [],
+     "provider_specific_fields": {
+      "thought_signatures": [
+       "AAAA"
+      ]
+     }
+    },
+    "finish_reason": "tool_calls"
+   }
+  ],
+  "usage": {
+   "prompt_tokens": 100,
+   "completion_tokens": 20,
+   "completion_tokens_details": {
+    "text_tokens": 20
+   }
+  }
+ },
+ "expect": {
+  "content": "",
+  "reasoning_empty": true,
+  "reasoning_tokens": 0,
+  "tool_calls": 1,
+  "tool_name": "vol_pslist",
+  "finish_reason": "tool_calls",
+  "starved": false,
+  "thinking_observed": false
+ }
+}

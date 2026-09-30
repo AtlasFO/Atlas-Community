@@ -1,0 +1,32 @@
+{
+ "stack": "sglang",
+ "model": "example-model",
+ "scenario": "error-effort-literal",
+ "source": "hand-written in the sglang error format (a pydantic literal_error), inside a gateway's detail text",
+ "status": 400,
+ "request": {
+  "model": "example-model",
+  "messages": [
+   {
+    "role": "user",
+    "content": "Reply with the single word: ok"
+   }
+  ],
+  "reasoning_effort": "extreme"
+ },
+ "response": {
+  "detail": "Error: 400 - Bad Request - {\"object\": \"error\", \"message\": \"1 validation error:\\n  {'type': 'literal_error', 'loc': ('body', 'reasoning_effort', \\\"literal['none','minimal','low','medium','high','xhigh','max']\\\"), 'msg': \\\"Input should be 'none', 'minimal', 'low', 'medium', 'high', 'xhigh' or 'max'\\\", 'input': 'extreme'}\", \"type\": \"Bad Request\", \"code\": 400}"
+ },
+ "expect": {
+  "error_contains": "reasoning_effort",
+  "accepted_values": [
+   "none",
+   "minimal",
+   "low",
+   "medium",
+   "high",
+   "xhigh",
+   "max"
+  ]
+ }
+}

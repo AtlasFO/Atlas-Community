@@ -1,0 +1,62 @@
+{
+ "stack": "sglang",
+ "model": "example-model",
+ "scenario": "tool",
+ "source": "hand-written from the documented sglang response shape",
+ "status": 200,
+ "request": {
+  "model": "example-model",
+  "messages": [
+   {
+    "role": "user",
+    "content": "List the processes in m.img. Call the tool."
+   }
+  ],
+  "max_tokens": 512
+ },
+ "response": {
+  "id": "test0015",
+  "object": "chat.completion",
+  "created": 1924992000,
+  "model": "example-model",
+  "choices": [
+   {
+    "index": 0,
+    "message": {
+     "role": "assistant",
+     "content": "",
+     "reasoning_content": "The user wants the process list, so I call the tool on m.img.",
+     "tool_calls": [
+      {
+       "id": "call_test0015",
+       "type": "function",
+       "function": {
+        "name": "vol_pslist",
+        "arguments": "{\"image\": \"m.img\"}"
+       }
+      }
+     ]
+    },
+    "finish_reason": "tool_calls"
+   }
+  ],
+  "usage": {
+   "prompt_tokens": 100,
+   "completion_tokens": 21,
+   "prompt_tokens_details": {
+    "cached_tokens": 50
+   },
+   "reasoning_tokens": 16
+  }
+ },
+ "expect": {
+  "content": "",
+  "reasoning_prefix": "The user",
+  "reasoning_tokens": 16,
+  "tool_calls": 1,
+  "tool_name": "vol_pslist",
+  "finish_reason": "tool_calls",
+  "starved": false,
+  "thinking_observed": true
+ }
+}

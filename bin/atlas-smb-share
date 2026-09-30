@@ -1,0 +1,210 @@
+#!/usr/bin/env bash
+# Privileged half of the Atlas SMB network share feature. Runs as root via
+# the ATLAS_SMB_SHARE sudoers grant (share/atlas-sudoers.in) — every call
+# site is a fully literal command (no globs), so this script itself must
+# stay narrow: exactly four fixed subcommands, no free-form arguments beyond
+# what the sudoers grant already fixes per-host.
+#
+# core/smb_share.py is the only caller (via `sudo -n`) — see its docstring
+# for the Python-side contract. Never invoke this directly unless you're
+# debugging; use `atlas share ...` or the dashboard's Share tab instead.
+#
+# Usage:
+#   atlas-smb-share enable <cases_root> <username>
+#   atlas-smb-share disable
+#   atlas-smb-share status
+#   atlas-smb-share set-password <username>   # password read from stdin,
+#                                              # twice (smbpasswd -a -s
+#                                              # confirmation convention)
+set -euo pipefail
+
+SHARE_CONF="/etc/samba/atlas-share.conf"
+SMB_CONF="/etc/samba/smb.conf"
+SHARE_NAME="atlas-cases"
+INCLUDE_LINE="include = ${SHARE_CONF}"
+
+err() { echo "atlas-smb-share: $*" >&2; }
+
+require_samba() {
+    if ! command -v smbpasswd >/dev/null 2>&1 || [ ! -f "$SMB_CONF" ]; then
+        err "samba is not installed (smbpasswd/${SMB_CONF} missing) — install it first (install.sh's network-share step, or: apt-get install samba)"
+        exit 1
+    fi
+}
+
+# Containers (distrobox, Docker, ...) commonly run without systemd as PID 1
+# — `systemctl` exists on disk there but fails hard ("Failed to connect to
+# bus: Host is down"). /run/systemd/system only exists when systemd is
+# actually running the show, which is the standard way to detect this.
+_has_systemd() {
+    [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1
+}
+
+_smbd_is_active() {
+    if _has_systemd; then
+        systemctl is-active --quiet smbd 2>/dev/null
+    else
+        pgrep -x smbd >/dev/null 2>&1
+    fi
+}
+
+# Starts smbd if it's not running, or makes a running one pick up the new
+# config. Without systemd, smbd is launched directly (it daemonizes itself
+# by default) and reloaded via SIGHUP — smbd's own documented reload signal.
+_smbd_apply_config() {
+    if _has_systemd; then
+        systemctl enable --now smbd >/dev/null 2>&1 || systemctl restart smbd
+        return
+    fi
+    if _smbd_is_active; then
+        pkill -HUP -x smbd 2>/dev/null || true
+    elif ! smbd 2>/dev/null; then
+        err "no systemd on this host and 'smbd' would not start directly — start it manually, e.g.: smbd -D"
+    fi
+}
+
+_smbd_reload_if_running() {
+    if _has_systemd; then
+        systemctl reload smbd 2>/dev/null || systemctl restart smbd 2>/dev/null || true
+        return 0
+    fi
+    if _smbd_is_active; then
+        pkill -HUP -x smbd 2>/dev/null || true
+    fi
+    return 0
+}
+
+cmd_enable() {
+    local cases_root="$1" username="$2"
+    require_samba
+    if [ ! -d "$cases_root" ]; then
+        err "cases root does not exist: $cases_root"
+        exit 1
+    fi
+
+    cat > "$SHARE_CONF" <<EOF
+# Written by bin/atlas-smb-share — do not edit by hand, changes are
+# overwritten on the next \`atlas share enable\`. Remove via
+# \`atlas share disable\` or uninstall.sh --purge-system-packages.
+#
+# [global] here is included after the host's own smb.conf [global] section —
+# Samba takes the last value it reads per scalar parameter, so these apply
+# regardless of what the host's own config sets, without this script ever
+# parsing or rewriting that file.
+[global]
+    server min protocol = SMB2
+    smb encrypt = required
+    map to guest = never
+
+[${SHARE_NAME}]
+    path = ${cases_root}
+    valid users = ${username}
+    read only = no
+    browseable = yes
+    guest ok = no
+    hide dot files = yes
+EOF
+    chmod 0644 "$SHARE_CONF"
+
+    if ! grep -qF "$INCLUDE_LINE" "$SMB_CONF" 2>/dev/null; then
+        {
+            echo ""
+            echo "# Added by bin/atlas-smb-share — see share/atlas-sudoers.in"
+            echo "$INCLUDE_LINE"
+        } >> "$SMB_CONF"
+    fi
+
+    if ! testparm -s >/dev/null 2>&1; then
+        err "generated Samba config failed testparm -s — reverting"
+        rm -f "$SHARE_CONF"
+        sed -i "\#${INCLUDE_LINE//#/\\#}#d" "$SMB_CONF"
+        exit 1
+    fi
+
+    _smbd_apply_config
+    echo "enabled: [${SHARE_NAME}] -> ${cases_root} (user: ${username})"
+}
+
+cmd_disable() {
+    local changed=0
+    if [ -f "$SHARE_CONF" ]; then
+        rm -f "$SHARE_CONF"
+        changed=1
+    fi
+    if [ -f "$SMB_CONF" ] && grep -qF "$INCLUDE_LINE" "$SMB_CONF" 2>/dev/null; then
+        sed -i "\#${INCLUDE_LINE//#/\\#}#d" "$SMB_CONF"
+        changed=1
+    fi
+    # Reload only — never stop/disable smbd itself, in case the host runs
+    # other, non-Atlas shares through the same daemon.
+    if [ "$changed" = 1 ]; then
+        _smbd_reload_if_running
+    fi
+    echo "disabled"
+}
+
+json_str() {
+    # Minimal escaping (backslash, quote) — inputs here are always a path or
+    # a shell-valid username, never arbitrary attacker text.
+    printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+cmd_status() {
+    local installed="false" enabled="false" service_active="false"
+    local share_path="" share_user="" password_set="false"
+
+    if command -v smbpasswd >/dev/null 2>&1 && [ -f "$SMB_CONF" ]; then
+        installed="true"
+    fi
+    if [ -f "$SHARE_CONF" ]; then
+        enabled="true"
+        share_path="$(sed -n 's/^[[:space:]]*path[[:space:]]*=[[:space:]]*//p' "$SHARE_CONF" | head -1)"
+        share_user="$(sed -n 's/^[[:space:]]*valid users[[:space:]]*=[[:space:]]*//p' "$SHARE_CONF" | head -1)"
+    fi
+    if _smbd_is_active; then
+        service_active="true"
+    fi
+    if [ -n "$share_user" ] && command -v pdbedit >/dev/null 2>&1 \
+            && pdbedit -L 2>/dev/null | cut -d: -f1 | grep -qx "$share_user"; then
+        password_set="true"
+    fi
+
+    printf '{"installed":%s,"enabled":%s,"service_active":%s,"share_name":"%s","share_path":"%s","share_user":"%s","password_set":%s}\n' \
+        "$installed" "$enabled" "$service_active" "$(json_str "$SHARE_NAME")" \
+        "$(json_str "$share_path")" "$(json_str "$share_user")" "$password_set"
+}
+
+cmd_set_password() {
+    local username="$1"
+    require_samba
+    # smbpasswd -a -s: add-or-reset, reading the new password twice from
+    # stdin (its scripted-confirmation convention) rather than prompting.
+    if ! smbpasswd -a -s "$username"; then
+        err "smbpasswd failed for $username"
+        exit 1
+    fi
+    echo "password set for ${username}"
+}
+
+case "${1:-}" in
+    enable)
+        [ $# -eq 3 ] || { err "usage: atlas-smb-share enable <cases_root> <username>"; exit 2; }
+        cmd_enable "$2" "$3"
+        ;;
+    disable)
+        [ $# -eq 1 ] || { err "usage: atlas-smb-share disable"; exit 2; }
+        cmd_disable
+        ;;
+    status)
+        [ $# -eq 1 ] || { err "usage: atlas-smb-share status"; exit 2; }
+        cmd_status
+        ;;
+    set-password)
+        [ $# -eq 2 ] || { err "usage: atlas-smb-share set-password <username> (password on stdin, twice)"; exit 2; }
+        cmd_set_password "$2"
+        ;;
+    *)
+        err "unknown subcommand: ${1:-<none>} (enable|disable|status|set-password)"
+        exit 2
+        ;;
+esac

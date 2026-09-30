@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# Atlas pre-push hook — the PUBLIC remote (GitHub) only ever gets public content.
+#
+# Refuses to push INTERNAL paths or internal-named branches to a github.com
+# remote. Raw brain captures and internal cases stay on a private remote;
+# GitHub receives a scrubbed snapshot via `atlas publish`. Pushes to any
+# non-GitHub remote pass untouched.
+#
+# Installed per clone by install.sh via:  git config core.hooksPath .githooks
+# (the same mechanism as the pre-commit brain-contributor gate).
+set -euo pipefail
+
+remote_url="${2:-}"
+
+# Only guard the public remote. Internal pushes carry everything by design.
+case "$remote_url" in
+  *github.com*) : ;;   # public — enforce
+  *) exit 0 ;;         # private / other — allow
+esac
+
+# INTERNAL path prefixes — keep in sync with .gitignore-public.
+# Keep the two lists identical: a drift silently opens the guard.
+INTERNAL_RE='^(brain/inbox/|brain/logs/runs/|brain/analytics/deliverables/|brain/analytics/reports/|brain/wiki/cases/|brain/wiki/environments/|brain/memory/|brain/issue/|brain/CONTRIBUTORS$)'
+ZERO='0000000000000000000000000000000000000000'
+fail=0
+
+# Locate a python that can import core.brain.identifiers (mirror bin/atlas).
+repo_root="$(git rev-parse --show-toplevel)"
+if   [ -x "$repo_root/.venv/bin/python" ]; then PY="$repo_root/.venv/bin/python"
+elif [ -x "$HOME/.venv/bin/python" ];      then PY="$HOME/.venv/bin/python"
+else PY="$(command -v python3 || true)"; fi
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+    [ "$local_sha" = "$ZERO" ] && continue      # branch deletion — allow
+
+    # Branch-name guard: internal/* and case/* never reach GitHub.
+    case "$local_ref" in
+      refs/heads/internal/*|refs/heads/case/*)
+        echo "pre-push: refusing to push internal branch '$local_ref' to GitHub." >&2
+        fail=1; continue ;;
+    esac
+
+    # Files introduced by this push.
+    if [ "$remote_sha" != "$ZERO" ]; then
+        files="$(git diff --name-only "$remote_sha" "$local_sha" 2>/dev/null || true)"
+    elif git rev-parse -q --verify "refs/remotes/origin/main" >/dev/null 2>&1; then
+        files="$(git diff --name-only origin/main "$local_sha" 2>/dev/null || true)"
+    else
+        files="$(git ls-tree -r --name-only "$local_sha" 2>/dev/null || true)"
+    fi
+    [ -z "$files" ] && continue
+
+    internal_hits="$(printf '%s\n' "$files" | grep -E "$INTERNAL_RE" || true)"
+    if [ -n "$internal_hits" ]; then
+        echo "pre-push: refusing — these INTERNAL paths must never reach GitHub:" >&2
+        printf '    %s\n' $internal_hits >&2
+        fail=1
+    fi
+
+    # Defense-in-depth: scan pushed wiki/index files for case-specific IDs.
+    scan_files="$(printf '%s\n' "$files" | grep -E '^brain/(wiki|indexes)/.*\.md$' || true)"
+    if [ -n "$scan_files" ] && [ -n "$PY" ]; then
+        existing=""
+        for f in $scan_files; do [ -f "$f" ] && existing="$existing $f"; done
+        if [ -n "$existing" ]; then
+            if ! ( cd "$repo_root" && "$PY" -m core.brain.identifiers --scan $existing >&2 ); then
+                echo "pre-push: identifier scan flagged the file(s) above — redact before publishing." >&2
+                fail=1
+            fi
+        fi
+    fi
+done
+
+if [ "$fail" -ne 0 ]; then
+    {
+        echo ""
+        echo "  Push internal work to a private remote:  git push <remote> <branch>"
+        echo "  Publish a scrubbed snapshot to GitHub:   atlas publish --push"
+    } >&2
+    exit 1
+fi
+exit 0

@@ -1,0 +1,30 @@
+# Atlas — example Docker Compose setup.
+#
+# Quick start:
+#   cp .env.example .env && edit it (LLMHUB_API_KEY or REASON_BACKEND=openai-compat)
+#   docker compose build
+#   docker compose run --rm atlas guide
+#
+# See docs/docker.md for the loop-device / privilege explanation below.
+
+services:
+  atlas:
+    build: .
+    image: atlas:local
+    # Disk-image tools (tsk.*, img.*, carving.*) need loop-mount access,
+    # which Docker doesn't grant by default. --privileged is the simple,
+    # blunt option; swap the two lines below for the narrower
+    # cap_add/devices form if you'd rather not run fully privileged.
+    privileged: true
+    # cap_add: ["SYS_ADMIN"]
+    # devices: ["/dev/loop-control"]
+    env_file:
+      - .env
+    volumes:
+      # Case evidence lives on the host, not in the image or a named volume —
+      # this is what makes ~/cases persist across `docker compose down` and
+      # keeps evidence off of Docker's own storage driver.
+      - ${ATLAS_CASES_DIR:-./cases-data}:/root/cases
+    # The image's ENTRYPOINT is bin/atlas; override the command per run, e.g.:
+    #   docker compose run --rm atlas run --case /root/cases/<CASE_ID>
+    command: ["--help"]

@@ -1,0 +1,33 @@
+{
+ "stack": "synthetic",
+ "model": "hand-written",
+ "scenario": "think-tag-mid-content-is-kept",
+ "source": "a think tag that is not a leading block is content, not a guess",
+ "status": 200,
+ "request": {},
+ "response": {
+  "choices": [
+   {
+    "index": 0,
+    "message": {
+     "role": "assistant",
+     "content": "Result: ok\n<think>not a block</think> done"
+    },
+    "finish_reason": "stop"
+   }
+  ],
+  "usage": {
+   "prompt_tokens": 10,
+   "completion_tokens": 5
+  }
+ },
+ "expect": {
+  "content": "Result: ok\n<think>not a block</think> done",
+  "reasoning_empty": true,
+  "reasoning_tokens": 0,
+  "tool_calls": 0,
+  "finish_reason": "stop",
+  "starved": false,
+  "thinking_observed": false
+ }
+}

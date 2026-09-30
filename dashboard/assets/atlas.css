@@ -1,0 +1,935 @@
+/* ═══════════════════════════════════════════════════════════════════════
+   Atlas dashboard — shared design system.
+   Single source of visual truth: every page loads this file; pages add
+   only view-specific layout on top. Do not copy tokens into pages.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+:root {
+  /* Surfaces */
+  --bg-0: #0c0f14;      /* page background */
+  --bg-1: #121721;      /* header / side panels */
+  --bg-2: #1a2130;      /* cards */
+  --bg-3: #232c3e;      /* inputs, raised elements */
+  --bg-hl: #2b3650;
+
+  /* Text */
+  --fg-0: #e8ecf2;      /* primary */
+  --fg-1: #9aa5b8;      /* secondary */
+  --fg-2: #8893a6;      /* tertiary / hints — 4.5:1 vs bg-3, the lightest surface it appears on */
+
+  /* Structure */
+  --border: #27303f;
+  --border-strong: #35405280;
+  --radius: 8px;
+  --radius-sm: 5px;
+  /* Compact rows and inline code blocks; small colour marks and swatches. */
+  --radius-row: 4px;
+  --radius-chip: 2px;
+  /* A child's corner inside a 1px-bordered --radius box. */
+  --radius-inner: calc(var(--radius) - 1px);
+
+  /* Depth — dark, tinted toward the navy background rather than flat
+     black, so elevation reads as "closer to the light source" instead of
+     a generic drop shadow. */
+  --shadow-sm: 0 1px 2px rgba(2,5,12,.45);
+  --shadow-md: 0 8px 24px -8px rgba(2,5,12,.6), 0 1px 2px rgba(2,5,12,.4);
+  --shadow-glow: 0 0 0 3px rgba(91,157,255,.16);
+  --shadow-accent: 0 1px 10px -3px rgba(91,157,255,.55);
+  --shadow-accent-hover: 0 2px 14px -3px rgba(91,157,255,.7);
+  /* Scrim behind a modal. Darker than --bg-0 on purpose: it has to read
+     as "the page moved away" against the darkest surface too. */
+  --scrim: rgba(4,7,13,.55);
+  --ease: cubic-bezier(.2,.7,.3,1);
+
+  /* Semantic status colours — defined ONCE for the whole application. */
+  --accent: #5b9dff;    /* interactive / open questions */
+  --ok: #37c98e;        /* answered / success / live */
+  --warn: #f0b34e;      /* blocked / attention */
+  --bad: #f26d6d;       /* conflicts / errors */
+  /* Status tints for a background and a border, the pills' own values: a
+     warning or danger surface that is not a pill uses these. */
+  --bad-soft: rgba(242,109,109,.14);  --bad-line: rgba(242,109,109,.3);
+  --warn-soft: rgba(240,179,78,.14);  --warn-line: rgba(240,179,78,.3);
+  --partial: #b48cff;   /* partially answered / hypotheses */
+  --neutral: #8a93a6;   /* observations / secondary chrome */
+
+  /* Confidence scale */
+  --conf-confirmed: #f26d6d;
+  --conf-likely: #f0a04e;
+  --conf-suspected: #f0d24e;
+  --conf-unconfirmed: #8a93a6;
+
+  /* Type scale: 20 (page title) / 14 (body) / 12.5 (secondary) / 11 (label) */
+  --fs-title: 20px;
+  --fs-body: 14px;
+  --fs-small: 12.5px;
+  --fs-label: 11px;
+
+  --mono: ui-monospace, "SF Mono", "Menlo", "Consolas", monospace;
+}
+
+/* Light theme — a soft, slightly cool off-white, not pure white/grey.
+   Structure tokens (--radius*, --fs-*, --mono) are theme-independent and
+   stay inherited from :root above. Semantic colours get their own values
+   here rather than reusing the dark ones verbatim — the dark palette was
+   tuned for contrast against near-black surfaces (e.g. --accent's light
+   blue) and would fail contrast against a light surface. Toggled via
+   AtlasShell's theme switcher (assets/shell.js), which sets this attribute
+   on <html> and persists the choice — see that file for the toggle logic. */
+:root[data-theme="light"] {
+  --bg-0: #eef1f6;
+  --bg-1: #e4e9f2;
+  --bg-2: #ffffff;
+  --bg-3: #f3f6fa;
+  --bg-hl: #dde4f0;
+
+  --fg-0: #1b2434;
+  --fg-1: #4c5567;
+  --fg-2: #626976;      /* 4.5:1 vs bg-1, the darkest light-theme surface it appears on */
+
+  --border: #d7dce6;
+  --border-strong: #b9c2d4cc;
+
+  --accent: #2f6fe0;
+  --ok: #1f9d6c;
+  --warn: #b9791a;
+  --bad: #d94c4c;
+  --bad-soft: rgba(217,76,76,.12);   --bad-line: rgba(217,76,76,.3);
+  --warn-soft: rgba(185,121,26,.12); --warn-line: rgba(185,121,26,.3);
+  --partial: #7c4fd6;
+  --neutral: #5b6472;
+
+  --conf-confirmed: #d94c4c;
+  --conf-likely: #c47a1f;
+  --conf-suspected: #ab8f00;
+  --conf-unconfirmed: #78808f;
+
+  /* Softer, cooler-grey shadows for the light surface — the dark theme's
+     near-black shadow tint would read as a harsh smudge here. */
+  --shadow-sm: 0 1px 2px rgba(27,36,52,.06);
+  --shadow-md: 0 8px 24px -8px rgba(27,36,52,.16), 0 1px 2px rgba(27,36,52,.08);
+  --shadow-glow: 0 0 0 3px rgba(47,111,224,.16);
+  --shadow-accent: 0 1px 10px -3px rgba(47,111,224,.4);
+  --shadow-accent-hover: 0 2px 14px -3px rgba(47,111,224,.55);
+  /* Still a dark scrim on the light theme -- a pale one over pale
+     content does not separate the dialog from the page. */
+  --scrim: rgba(27,36,52,.38);
+}
+
+* { box-sizing: border-box; }
+/* The [hidden] attribute is how role-gated UI (e.g. the chat toggle for
+   viewers) gets hidden — but any element with its own `display` rule
+   (flex/inline-flex/grid buttons, etc.) silently overrides the browser's
+   default [hidden]{display:none} at equal specificity. Force it here so
+   `hidden` always actually hides, everywhere. */
+[hidden] { display: none !important; }
+html, body { margin: 0; padding: 0; }
+body {
+  /* Same base colour as --bg-0, just a soft radial wash toward --bg-1 near
+     the top — depth without introducing a new hue. Falls back to the flat
+     --bg-0 fill wherever the gradient doesn't reach. */
+  background: radial-gradient(1100px 520px at 50% -8%, var(--bg-1), var(--bg-0) 62%);
+  color: var(--fg-0);
+  font: var(--fs-body)/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI",
+        "Inter", "Helvetica Neue", sans-serif;
+  min-height: 100vh;
+  position: relative;
+}
+/* Centered logo watermark, every page — a fixed background layer behind
+   real content, not an <img> each page would have to add. It's low-opacity
+   and every content surface (.page, .cfg-card, .card, the header, …) has
+   its own opaque --bg-* background, so it only ever shows in the empty
+   space around content, never fights with text for contrast. */
+body::before {
+  content: ""; position: fixed; inset: 0; z-index: 0;
+  background: url("logo.png") no-repeat center center;
+  background-size: min(70vw, 820px) auto;
+  /* .page has no opaque background of its own — headings, sub-text, and
+     stat rows sit directly on this layer, not just the "empty space"
+     between cards. Kept faint enough that it never competes with text. */
+  opacity: .04;
+  pointer-events: none;
+}
+/* The shipped logo is a light/white mark for the dark theme — invert it
+   in light mode rather than shipping a second asset, matching the
+   "the logo goes dark in light mode" requirement directly. This also
+   flips the logo's cyan accent glow (an expected side effect of a literal
+   colour inversion, not a bug). */
+:root[data-theme="light"] body::before { filter: invert(1); }
+.atlas-shell, .page { position: relative; z-index: 1; }
+code, pre, .mono { font-family: var(--mono); font-size: 0.92em; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 5px; }
+::-webkit-scrollbar-thumb:hover { background: var(--bg-3); }
+
+/* ── Application shell (rendered by shell.js) ──────────────────────────── */
+
+.atlas-shell {
+  position: sticky; top: 0; z-index: 50;
+  background: var(--bg-1); border-bottom: 1px solid var(--border);
+  box-shadow: var(--shadow-sm);
+}
+.atlas-shell .shell-row {
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  padding: 10px 20px 8px;
+}
+.atlas-shell .brand {
+  font-weight: 700; font-size: 15px; letter-spacing: 0.02em;
+  color: var(--fg-0); text-decoration: none; white-space: nowrap;
+}
+.atlas-shell .brand:hover { text-decoration: none; color: var(--accent); }
+
+.atlas-shell .case-picker {
+  display: flex; align-items: center; gap: 8px; min-width: 0;
+}
+.atlas-shell .case-picker label {
+  font-size: var(--fs-label); text-transform: uppercase;
+  letter-spacing: 0.07em; color: var(--fg-2); font-weight: 600;
+}
+.atlas-shell select.case-select {
+  background: var(--bg-3); color: var(--fg-0);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  padding: 5px 10px; font-size: 13px; max-width: 300px; cursor: pointer;
+}
+.atlas-shell select.case-select:focus { outline: 1px solid var(--accent); }
+
+.shell-activity {
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 3px 10px; border-radius: 999px;
+  background: var(--bg-2); border: 1px solid var(--border);
+  font-size: 12px; color: var(--fg-1); white-space: nowrap;
+}
+.shell-activity .dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--fg-2); transition: background .2s;
+}
+.shell-activity.working { color: var(--ok); border-color: rgba(55,201,142,.4); }
+.shell-activity.working .dot { background: var(--ok); animation: atlas-pulse 1.4s infinite; }
+.shell-activity.offline { color: var(--fg-2); }
+
+/* Hover card listing the cases with a run in progress. The chip is the only
+   place that knows about runs in cases other than the selected one, so it
+   has to be able to say *which* — and let you jump straight there. */
+.shell-activity { position: relative; cursor: default; }
+.shell-activity.has-runs { cursor: pointer; }
+.shell-activity:focus-visible { outline: none; box-shadow: var(--shadow-glow); }
+.activity-pop {
+  position: absolute; top: calc(100% + 8px); left: 0; z-index: 60;
+  min-width: 240px; max-width: min(340px, 88vw);
+  padding: 8px; border-radius: var(--radius);
+  background: var(--bg-2); border: 1px solid var(--border-strong);
+  box-shadow: var(--shadow-md);
+  color: var(--fg-0); font-size: 12.5px; text-align: left;
+  /* visibility, not display: the card keeps its box so the fade can run,
+     and stays unreachable by pointer and screen reader while hidden. */
+  opacity: 0; visibility: hidden; transform: translateY(-3px);
+  transition: opacity .12s var(--ease), transform .12s var(--ease),
+              visibility 0s linear .12s;
+}
+.shell-activity:hover .activity-pop,
+.shell-activity:focus-within .activity-pop {
+  opacity: 1; visibility: visible; transform: translateY(0);
+  transition-delay: 0s;
+}
+.activity-pop .ap-head {
+  font-size: var(--fs-label); text-transform: uppercase; letter-spacing: .07em;
+  color: var(--fg-2); font-weight: 650; padding: 2px 6px 6px;
+}
+.activity-pop .ap-empty { padding: 4px 6px; color: var(--fg-2); }
+.activity-pop .ap-row {
+  display: flex; align-items: flex-start; gap: 8px;
+  padding: 6px; border-radius: var(--radius-sm);
+  color: var(--fg-0); text-decoration: none;
+}
+.activity-pop .ap-row:hover { background: var(--bg-3); text-decoration: none; }
+.activity-pop .ap-dot {
+  width: 7px; height: 7px; margin-top: 5px; flex: none;
+  border-radius: 50%; background: var(--ok);
+  animation: atlas-pulse 1.4s infinite;
+}
+.activity-pop .ap-body { min-width: 0; display: flex; flex-direction: column; }
+.activity-pop .ap-name {
+  font-weight: 600; overflow-wrap: anywhere;
+}
+.activity-pop .ap-here {
+  margin-left: 6px; padding: 0 6px; border-radius: 999px;
+  background: var(--bg-3); border: 1px solid var(--border);
+  font-size: 10px; font-weight: 600; color: var(--fg-2);
+  text-transform: uppercase; letter-spacing: .04em;
+}
+.activity-pop .ap-what {
+  color: var(--fg-2); font-size: 11.5px; font-family: var(--mono);
+  overflow-wrap: anywhere;
+}
+@keyframes atlas-pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+
+.shell-spacer { flex: 1; }
+
+.shell-btn {
+  display: inline-flex; align-items: center; gap: 6px; white-space: nowrap;
+  padding: 5px 12px; border-radius: var(--radius-sm);
+  background: var(--bg-3); border: 1px solid var(--border);
+  color: var(--fg-0); font-size: 12.5px; cursor: pointer;
+  text-decoration: none; font-family: inherit;
+  transition: background .15s var(--ease), border-color .15s var(--ease),
+              box-shadow .15s var(--ease), transform .08s var(--ease);
+}
+.shell-btn:hover { background: var(--bg-hl); text-decoration: none; }
+.shell-btn:active { transform: translateY(1px); }
+.shell-btn.primary {
+  background: var(--accent); border-color: var(--accent); color: #0c0f14;
+  font-weight: 600; box-shadow: var(--shadow-accent);
+}
+.shell-btn.primary:hover { filter: brightness(1.1); box-shadow: var(--shadow-accent-hover); }
+
+/* Right-hand utility cluster: view controls (theme, language), then the
+   admin config link, then the account block — grouped so the row reads as
+   three intents instead of one undifferentiated strip of buttons. */
+.atlas-shell .shell-tools {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  justify-content: flex-end; min-width: 0;
+}
+.atlas-shell .tools-sep {
+  width: 1px; align-self: stretch; margin: 2px 2px;
+  background: var(--border);
+}
+
+/* Deliberately NOT a .shell-btn — a round icon toggle, because it changes
+   the entire surface rather than navigating somewhere. */
+.atlas-shell .theme-toggle {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 30px; height: 30px; padding: 0; flex: none;
+  border-radius: 50%; cursor: pointer; font-size: 14px; line-height: 1;
+  background: transparent; color: var(--fg-1);
+  border: 1px solid var(--border);
+  font-family: inherit;
+  transition: background .15s var(--ease), color .15s var(--ease),
+              border-color .15s var(--ease), transform .15s var(--ease);
+}
+.atlas-shell .theme-toggle:hover {
+  background: var(--bg-3); color: var(--fg-0);
+  border-color: var(--border-strong); transform: rotate(-18deg);
+}
+.atlas-shell .theme-toggle:active { transform: rotate(-18deg) scale(.92); }
+.atlas-shell .theme-toggle:focus-visible {
+  outline: none; border-color: var(--accent); box-shadow: var(--shadow-glow);
+}
+
+/* Account: name over role, sat next to Log out inside one bordered chip so
+   "who am I signed in as" is one object, not two loose spans in a button row. */
+.atlas-shell .shell-account {
+  display: flex; align-items: center; gap: 10px; flex: none;
+  padding: 3px 4px 3px 10px; border-radius: 999px;
+  background: var(--bg-2); border: 1px solid var(--border);
+}
+.atlas-shell .shell-account .acct-id {
+  display: flex; flex-direction: column; line-height: 1.15; min-width: 0;
+}
+.atlas-shell .shell-account .acct-name {
+  font-size: 12.5px; color: var(--fg-0); font-weight: 600;
+  max-width: 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.atlas-shell .shell-account .acct-role {
+  font-size: 9.5px; letter-spacing: .09em; text-transform: uppercase;
+  color: var(--fg-2); font-weight: 600;
+}
+.atlas-shell .shell-account .shell-btn { border-radius: 999px; }
+
+/* Nav tabs */
+.atlas-shell nav.shell-nav {
+  display: flex; gap: 2px; padding: 0 20px;
+}
+.atlas-shell nav.shell-nav a {
+  padding: 7px 14px 9px; font-size: 13px; color: var(--fg-1);
+  text-decoration: none; border-bottom: 2px solid transparent;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  transition: color .15s var(--ease), background .15s var(--ease), border-color .15s var(--ease);
+}
+.atlas-shell nav.shell-nav a:hover { color: var(--fg-0); background: var(--bg-2); }
+.atlas-shell nav.shell-nav a.active {
+  color: var(--fg-0); font-weight: 650;
+  background: var(--bg-2);
+  border-bottom-color: var(--accent);
+  box-shadow: 0 2px 0 0 var(--accent);
+}
+/* The accent dot carries the state at a glance even where the 2px rule is
+   easy to miss (light theme, small screens, a tab strip mid-scroll). */
+.atlas-shell nav.shell-nav a.active::before {
+  content: ""; display: inline-block; vertical-align: middle;
+  width: 5px; height: 5px; margin-right: 6px; border-radius: 50%;
+  background: var(--accent);
+}
+.atlas-shell nav.shell-nav .nav-gap { flex: 1; }
+.atlas-shell nav.shell-nav a.global { color: var(--fg-2); font-size: 12.5px; }
+.atlas-shell nav.shell-nav a.global:hover, .atlas-shell nav.shell-nav a.global.active { color: var(--fg-0); }
+.atlas-shell nav.shell-nav a .nav-badge {
+  display: inline-block; min-width: 16px; text-align: center;
+  margin-left: 5px; padding: 0 4px; border-radius: 8px;
+  background: var(--accent); color: #0c0f14;
+  font-size: 10px; font-weight: 700; line-height: 15px;
+}
+
+/* ── Tablets and phones ────────────────────────────────────────────────── */
+
+/* nav.shell-nav has no wrap (the .nav-gap flex spacer that splits case tabs
+   from global tabs only makes sense on one line) — left alone, a narrow
+   viewport would overflow it off-screen and drag the whole page into
+   horizontal scroll. Scroll the tab strip itself instead, the standard
+   mobile pattern for a tab bar. Applied from tablet width, not just phone:
+   eight case tabs plus the global tabs already overflow well before 640px. */
+@media (max-width: 1024px) {
+  .atlas-shell nav.shell-nav {
+    overflow-x: auto; overflow-y: hidden; -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;              /* the tabs themselves are the affordance */
+    padding-bottom: 2px;
+  }
+  .atlas-shell nav.shell-nav::-webkit-scrollbar { height: 0; }
+  .atlas-shell nav.shell-nav a { white-space: nowrap; flex: none; }
+  /* The spacer would eat the scroll width and strand the global tabs. */
+  .atlas-shell nav.shell-nav .nav-gap { flex: none; width: 20px; }
+}
+
+@media (max-width: 760px) {
+  .atlas-shell .shell-row { padding: 8px 12px 6px; gap: 8px; }
+  /* Case picker takes the first line on its own; it is the control that
+     needs the width, and its label is redundant once it is the only thing
+     on the row — so drop the label here rather than spending a phone's
+     width on the word CASE next to a select that says the same thing. */
+  .atlas-shell .case-picker { order: 2; flex: 1 1 100%; }
+  .atlas-shell .case-picker label { display: none; }
+  /* min-width:auto floors a flex item at its content width, and a select's
+     content is its longest case name — so the select refused to shrink and
+     pushed "New case" off the side of the screen. Same trap the layout
+     primitives above disarm for grid children. */
+  .atlas-shell .case-picker select.case-select {
+    flex: 1; max-width: none; min-width: 0;
+  }
+  /* The select gives up width, the button keeps its own: squeezed the other
+     way round, "New case" is what collapses. */
+  .atlas-shell .case-picker .shell-btn { flex: none; }
+  .atlas-shell .shell-activity { order: 1; }
+  .atlas-shell .shell-spacer { display: none; }
+  .atlas-shell .shell-tools { order: 3; flex: 1 1 100%; }
+  .page { padding: 16px 12px 40px; }
+  .page-title { font-size: 17px; }
+
+
+  /* Touch targets: 30px round toggles and 5px-tall buttons are fine with a
+     mouse and unusable with a thumb. */
+  .shell-btn { padding: 7px 12px; }
+  .atlas-shell .theme-toggle { width: 34px; height: 34px; }
+  button.btn { padding: 8px 14px; }
+}
+
+@media (max-width: 420px) {
+  .atlas-shell .brand { font-size: 14px; }
+  .atlas-shell .shell-account .acct-name { max-width: 84px; }
+  .stat-row { gap: 18px; }
+}
+
+/* Fine-pointer assumptions that do not hold on touch: hover-only affordances
+   stay visible, and tap targets get real height. */
+@media (hover: none) {
+  .shell-btn, button.btn { min-height: 34px; }
+}
+
+/* ── Layout primitives ─────────────────────────────────────────────────── */
+
+.page { max-width: 1200px; margin: 0 auto; padding: 22px 20px 60px; }
+.page.wide { max-width: none; }
+.page-title { font-size: var(--fs-title); font-weight: 650; letter-spacing: -.01em; margin: 0 0 4px; }
+.page-sub { color: var(--fg-1); font-size: var(--fs-small); margin: 0 0 20px; }
+
+.grid { display: grid; gap: 16px; }
+.grid.cols-2 { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+.grid.cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+@media (max-width: 980px) {
+  .grid.cols-2, .grid.cols-3 { grid-template-columns: minmax(0, 1fr); }
+}
+/* A grid/flex item's default `min-width:auto` is its min-content width, so a
+   single unbreakable token (C:\Users\…\Update.exe, a SHA-256, a long URL)
+   props the whole column open past the viewport and every page above it
+   scrolls sideways. Forensic output is full of exactly those tokens, so the
+   floor has to come off globally rather than per-view. */
+.grid > *, .card { min-width: 0; }
+.card, .state-empty, .cell-wrap { overflow-wrap: anywhere; }
+
+.card {
+  background: var(--bg-2); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 16px 18px;
+  box-shadow: var(--shadow-sm);
+}
+.card h2, .card-h {
+  margin: 0 0 12px; font-size: var(--fs-label); font-weight: 650;
+  text-transform: uppercase; letter-spacing: 0.08em; color: var(--fg-2);
+  display: flex; align-items: center; gap: 8px;
+}
+.card-h .h-trail { margin-left: auto; text-transform: none; letter-spacing: 0;
+  font-weight: 400; color: var(--fg-2); font-size: 11.5px; }
+
+/* ── Pills / status ────────────────────────────────────────────────────── */
+
+.pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 1px 9px; border-radius: 999px;
+  font-size: 11px; font-weight: 600; white-space: nowrap;
+  background: var(--bg-3); color: var(--fg-1); border: 1px solid transparent;
+}
+.pill.ok        { background: rgba(55,201,142,.14);  color: var(--ok);      border-color: rgba(55,201,142,.3); }
+.pill.warn      { background: rgba(240,179,78,.14);  color: var(--warn);    border-color: rgba(240,179,78,.3); }
+.pill.bad       { background: rgba(242,109,109,.14); color: var(--bad);     border-color: rgba(242,109,109,.3); }
+.pill.partial   { background: rgba(180,140,255,.14); color: var(--partial); border-color: rgba(180,140,255,.3); }
+.pill.info      { background: rgba(91,157,255,.14);  color: var(--accent);  border-color: rgba(91,157,255,.3); }
+.pill.neutral   { background: rgba(138,147,166,.12); color: var(--neutral); border-color: rgba(138,147,166,.25); }
+.pill.conf-confirmed   { background: rgba(242,109,109,.15); color: var(--conf-confirmed); }
+.pill.conf-likely      { background: rgba(240,160,78,.15);  color: var(--conf-likely); }
+.pill.conf-suspected   { background: rgba(240,210,78,.15);  color: var(--conf-suspected); }
+.pill.conf-unconfirmed { background: rgba(138,147,166,.15); color: var(--conf-unconfirmed); }
+
+/* Progress bar (question buckets) */
+.progressbar {
+  display: flex; height: 10px; border-radius: 999px; overflow: hidden;
+  background: var(--bg-3); border: 1px solid var(--border);
+}
+.progressbar .seg-answered { background: var(--ok); }
+.progressbar .seg-partial  { background: var(--partial); }
+.progressbar .seg-open     { background: var(--bg-3); }
+
+/* Stats */
+.stat-row { display: flex; gap: 28px; flex-wrap: wrap; }
+.stat .v { font-size: 22px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.stat .v.ok { color: var(--ok); }
+.stat .v.bad { color: var(--bad); }
+.stat .v.partial { color: var(--partial); }
+.stat .v.warn { color: var(--warn); }
+.stat .l { font-size: var(--fs-label); color: var(--fg-2);
+  text-transform: uppercase; letter-spacing: 0.06em; margin-top: 1px; }
+
+/* ── Forms ─────────────────────────────────────────────────────────────── */
+
+input[type=text], input[type=search], input[type=password], input[type=number],
+input[type=email], input[type=url], input[type=tel], input[type=date],
+textarea, select {
+  background: var(--bg-3); color: var(--fg-0);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  padding: 6px 10px; font: inherit; font-size: 13px;
+  transition: border-color .15s var(--ease), box-shadow .15s var(--ease);
+}
+input:focus, textarea:focus, select:focus {
+  outline: 1px solid var(--accent); border-color: var(--accent);
+  box-shadow: var(--shadow-glow);
+}
+input::placeholder, textarea::placeholder { color: var(--fg-2); }
+/* A native date field draws its own calendar button and placeholder in the
+   browser's colours; the colour scheme gives them the theme's ink instead. */
+input[type=date] { color-scheme: dark; }
+:root[data-theme="light"] input[type=date] { color-scheme: light; }
+button.btn {
+  font: inherit; font-size: 12.5px; border-radius: var(--radius-sm);
+  cursor: pointer; padding: 6px 14px;
+  border: 1px solid var(--border); background: var(--bg-3); color: var(--fg-0);
+  transition: background .15s var(--ease), border-color .15s var(--ease),
+              box-shadow .15s var(--ease), transform .08s var(--ease);
+}
+button.btn:hover { background: var(--bg-hl); }
+button.btn:active:not(:disabled) { transform: translateY(1px); }
+button.btn.ok { border-color: rgba(55,201,142,.5); color: var(--ok);
+  background: rgba(55,201,142,.12); font-weight: 600; }
+button.btn.ok:hover { background: rgba(55,201,142,.2); }
+button.btn.bad { border-color: rgba(242,109,109,.5); color: var(--bad); }
+button.btn.bad:hover { background: rgba(242,109,109,.12); }
+button.btn:disabled { opacity: .45; cursor: default; }
+
+/* ── States: empty / loading / error ───────────────────────────────────── */
+
+.state-empty {
+  padding: 36px 20px; text-align: center; color: var(--fg-2);
+  font-size: 13px;
+}
+.state-empty .hint { margin-top: 6px; font-size: 12px; }
+.state-empty code { color: var(--fg-1); }
+.state-error {
+  margin: 12px 0; padding: 12px 14px; border-radius: var(--radius-sm);
+  border: 1px solid rgba(242,109,109,.4); background: rgba(242,109,109,.08);
+  color: var(--bad); font-size: 13px; white-space: pre-wrap;
+}
+.state-loading { padding: 30px; text-align: center; color: var(--fg-2); }
+.state-loading::after {
+  content: ""; display: inline-block; width: 14px; height: 14px;
+  margin-left: 10px; vertical-align: -2px;
+  border: 2px solid var(--fg-2); border-top-color: transparent;
+  border-radius: 50%; animation: atlas-spin .8s linear infinite;
+}
+@keyframes atlas-spin { to { transform: rotate(360deg); } }
+
+/* Chat entry point: a floating action button over the workspace rather than
+   a button in the header's config row — it belongs to the case you are
+   reading, not to the account/config controls it used to sit beside. */
+.chat-fab {
+  position: fixed; right: 20px; bottom: 20px; z-index: 90;
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 10px 16px; border-radius: 999px; cursor: pointer;
+  background: var(--accent); color: #0c0f14;
+  border: 1px solid var(--accent); font: inherit; font-size: 13px;
+  font-weight: 650; box-shadow: var(--shadow-md), var(--shadow-accent);
+  transition: transform .15s var(--ease), box-shadow .15s var(--ease),
+              filter .15s var(--ease);
+}
+.chat-fab:hover { filter: brightness(1.08); transform: translateY(-2px);
+  box-shadow: var(--shadow-md), var(--shadow-accent-hover); }
+.chat-fab:active { transform: translateY(0); }
+.chat-fab:focus-visible { outline: none; box-shadow: var(--shadow-md), var(--shadow-glow); }
+.chat-fab .fab-icon { font-size: 15px; line-height: 1; }
+
+/* Icon buttons carry an inline SVG sized in em. An SVG is inline by
+   default, so it sits on the text baseline and leaves descender space
+   under it — display:block inside a centring flex box removes that and
+   the icon lands optically centred. */
+.chat-fab .fab-icon,
+.atlas-shell .theme-toggle,
+.atlas-chat .chat-close {
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.chat-fab .fab-icon svg,
+.atlas-shell .theme-toggle svg,
+.atlas-chat .chat-close svg { display: block; }
+/* While the slide-over is open the button would sit on top of it. */
+.chat-fab.tucked { opacity: 0; pointer-events: none; transform: translateY(8px); }
+
+/* ── Chat slide-over (shell-owned, available on every page) ────────────── */
+
+.atlas-chat {
+  position: fixed; top: 0; right: 0; bottom: 0;
+  width: 430px; max-width: 94vw; z-index: 100;
+  display: flex; flex-direction: column;
+  background: var(--bg-1); border-left: 1px solid var(--border-strong);
+  transform: translateX(102%); transition: transform .18s ease-out;
+}
+.atlas-chat.open { transform: translateX(0); }
+.atlas-chat .chat-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 14px; background: var(--bg-2);
+  border-bottom: 1px solid var(--border);
+}
+.atlas-chat .chat-title { font-weight: 650; font-size: 13.5px; }
+.atlas-chat .chat-case {
+  color: var(--accent); font-size: 12px; font-family: var(--mono);
+  max-width: 170px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.atlas-chat .chat-close {
+  margin-left: auto; background: transparent; border: 1px solid var(--border);
+  color: var(--fg-1); border-radius: var(--radius-sm); cursor: pointer;
+  padding: 4px 8px; font-size: 13px;
+}
+.atlas-chat .chat-close:hover { background: var(--bg-hl); color: var(--fg-0); }
+.atlas-chat .chat-messages {
+  flex: 1; overflow: auto; padding: 14px;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.atlas-chat .chat-empty { color: var(--fg-2); text-align: center; padding: 26px 12px; font-size: 12.5px; }
+.atlas-chat .chat-msg {
+  max-width: 88%; padding: 8px 11px; border-radius: 10px; font-size: 13px;
+  white-space: pre-wrap; word-wrap: break-word; overflow-wrap: anywhere;
+}
+.atlas-chat .chat-msg.user {
+  align-self: flex-end; background: var(--bg-3); border-bottom-right-radius: 3px;
+}
+.atlas-chat .chat-msg.assistant {
+  align-self: flex-start; background: var(--bg-2);
+  border: 1px solid var(--border); border-bottom-left-radius: 3px;
+}
+.atlas-chat .chat-msg code { background: rgba(127,127,127,.18); padding: 0 3px; border-radius: 3px; }
+/* Marker for a tool call in the chat transcript: a drawn dot rather than
+   a glyph character, so it keeps its size and colour in both themes. */
+.atlas-chat .chat-tool .tool-dot {
+  display: inline-block; width: 6px; height: 6px; margin-right: 7px;
+  border-radius: 50%; background: var(--fg-2); vertical-align: middle;
+}
+.atlas-chat .chat-tool {
+  align-self: flex-start; color: var(--fg-2);
+  font-family: var(--mono); font-size: 11px;
+}
+.atlas-chat .chat-tool .tname { color: var(--fg-1); }
+.atlas-chat .chat-err {
+  align-self: stretch; color: var(--bad); font-size: 12px;
+  border: 1px solid rgba(242,109,109,.4); border-radius: var(--radius-sm);
+  padding: 6px 9px; background: rgba(242,109,109,.08);
+  white-space: pre-wrap;
+}
+.atlas-chat .chat-activity { min-height: 17px; padding: 0 14px 5px; color: var(--fg-2); font-size: 11.5px; }
+.atlas-chat .chat-input-row {
+  display: flex; gap: 6px; padding: 10px 14px;
+  border-top: 1px solid var(--border); background: var(--bg-1);
+}
+.atlas-chat .chat-input-row textarea {
+  flex: 1; resize: none; max-height: 120px;
+}
+.atlas-chat .chat-send {
+  align-self: flex-end; background: var(--accent); color: #0c0f14; border: none;
+  border-radius: var(--radius-sm); padding: 7px 15px; font-weight: 650;
+  cursor: pointer; font-size: 13px;
+}
+.atlas-chat .chat-send:disabled { opacity: .45; cursor: default; }
+
+/* ── Shared view components ────────────────────────────────────────────
+   The one form every case view takes: a summary band, a toolbar of chips,
+   the main display, and a slide-over for detail. Defined once here so the
+   Overview, Case Findings and the Process view read as one product
+   rather than three pages that happen to share a palette. */
+
+.band {
+  margin: 14px 0 16px;
+  background: var(--bg-2); border: 1px solid var(--border);
+  border-radius: var(--radius); box-shadow: var(--shadow-sm);
+}
+.band-figures { display: flex; flex-wrap: wrap; }
+/* What the last pre-run pass found for the investigator: one line under
+   the run controls, readable on its own when nothing is running. */
+.band-delta {
+  padding: 8px 18px; font-size: var(--fs-small); color: var(--fg-1);
+  border-bottom: 1px solid var(--border);
+}
+.band-cell {
+  flex: 1 1 170px; min-width: 0; padding: 14px 18px;
+  border-left: 1px solid var(--border); color: var(--fg-0);
+  text-decoration: none; transition: background .15s var(--ease);
+}
+.band-cell:first-child { border-left: 0; }
+a.band-cell:hover { background: var(--bg-3); text-decoration: none; }
+/* The Stat tier (650/22px/tabular-nums) — the same call-out .stat .v uses. */
+.band-cell .f-v {
+  font-size: 22px; font-weight: 650; line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+}
+.band-cell .f-v .f-of { font-size: var(--fs-small); font-weight: 400; color: var(--fg-2); }
+.band-cell .f-l {
+  margin-top: 3px; font-size: var(--fs-label); color: var(--fg-2);
+  text-transform: uppercase; letter-spacing: .07em; font-weight: 600;
+}
+.band-cell .f-sub {
+  margin-top: 7px; font-size: var(--fs-small); color: var(--fg-1);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* A split of one total across tiers, as a bar plus its legend. */
+.minibar {
+  display: flex; height: 6px; margin-top: 8px; overflow: hidden;
+  border-radius: 999px; background: var(--bg-3);
+}
+.minibar span { display: block; }
+.conf-legend {
+  display: flex; gap: 10px; flex-wrap: wrap; margin-top: 7px;
+  font-size: var(--fs-label); color: var(--fg-2);
+}
+.conf-legend .cdot {
+  display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+  margin-right: 5px; vertical-align: 1px;
+}
+
+/* Toolbar of chips in two rows: what to find and how to show it above,
+   then the filters in small labelled groups, so twenty chips read as a
+   few decisions rather than a wall. A pick-one control is one joined
+   strip; a toggle-any set stays separate pills. */
+.tools { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin: 0 0 14px; }
+.tools.lead { margin-bottom: 8px; }
+.tools .search { flex: 1 1 200px; min-width: 140px; }
+.tools .tail { margin-left: auto; font-size: var(--fs-small); color: var(--fg-2); white-space: nowrap; }
+.tools .tg { display: inline-flex; align-items: center; gap: 4px; flex-wrap: wrap; margin-right: 10px; }
+.tools .tg-l {
+  margin-right: 4px; font-size: var(--fs-label); font-weight: 650;
+  text-transform: uppercase; letter-spacing: .07em; color: var(--fg-2);
+}
+.tools .seg { display: inline-flex; }
+.tools .seg .chip { border-radius: 0; }
+.tools .seg .chip + .chip { margin-left: -1px; }
+.tools .seg .chip:first-child { border-radius: 999px 0 0 999px; }
+.tools .seg .chip:last-child { border-radius: 0 999px 999px 0; }
+.tools .seg .chip.on { position: relative; z-index: 1; }
+
+/* ── Board and list ────────────────────────────────────────────────────
+   The display Case Findings and IoCs share: a lane per host, kind or type
+   with four confidence columns of cards, or the same items as one sortable
+   list; the first paint rises in. A view sets its own list columns. */
+.lane { display: grid; grid-template-columns: 120px minmax(0, 1fr); gap: 12px; align-items: start; margin-bottom: 14px; }
+.lane-h { padding-top: 10px; min-width: 0; }
+.lane-h .lname { font-weight: 650; font-size: var(--fs-body); overflow-wrap: anywhere; }
+.lane-h .lsub { font-size: var(--fs-label); color: var(--fg-2); margin-top: 2px; }
+.cols { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+.col {
+  min-width: 0; padding: 8px; border-radius: var(--radius);
+  background: rgba(127,127,127,.04); border: 1px dashed var(--border);
+}
+.col-h {
+  display: flex; align-items: center; gap: 6px; margin: 2px 2px 8px;
+  font-size: var(--fs-label); letter-spacing: .07em; text-transform: uppercase;
+  font-weight: 650; color: var(--fg-2);
+}
+.col-h .n { margin-left: auto; font-variant-numeric: tabular-nums; }
+.col-h .cdot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.bc {
+  position: relative; margin-bottom: 8px; padding: 9px 11px;
+  background: var(--bg-2); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); font-size: var(--fs-small); color: var(--fg-0);
+  cursor: pointer; transition: border-color .15s var(--ease), transform .15s var(--ease), box-shadow .15s var(--ease);
+}
+.bc:hover { border-color: var(--border-strong); transform: translateY(-1px); box-shadow: var(--shadow-md); }
+.bc:focus-visible { outline: none; box-shadow: var(--shadow-glow); }
+.bc.gone { opacity: .55; }
+.bc.selected { box-shadow: 0 0 0 2px rgba(91,157,255,.6); }
+.bc .bc-top { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 5px; }
+.bc .bc-txt {
+  display: -webkit-box; -webkit-line-clamp: 3; line-clamp: 3;
+  -webkit-box-orient: vertical; overflow: hidden; line-height: 1.45;
+}
+.bc .bc-meta {
+  display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 7px;
+  font-size: var(--fs-label); color: var(--fg-2);
+}
+.bc .bc-meta .mono { color: var(--fg-1); }
+.col-empty { font-size: var(--fs-label); color: var(--fg-2); padding: 4px 2px 6px; }
+.rows { border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-1); overflow: hidden; }
+.rows-h, .lrow {
+  display: grid; grid-template-columns: 58px 104px 112px minmax(0, 1fr) 150px 40px 96px;
+  gap: 12px; align-items: start; padding: 8px 12px;
+}
+.rows-h {
+  font-size: var(--fs-label); letter-spacing: .07em; text-transform: uppercase;
+  font-weight: 650; color: var(--fg-2); background: var(--bg-2);
+}
+.lrow { border-top: 1px solid var(--border); font-size: var(--fs-small); color: var(--fg-0); cursor: pointer; }
+.lrow:hover { background: var(--bg-3); }
+.lrow:focus-visible { outline: none; box-shadow: inset 0 0 0 2px rgba(91,157,255,.6); }
+.lrow.selected { background: rgba(91,157,255,.1); }
+.lrow.gone { opacity: .55; }
+.lrow .rid { font-family: var(--mono); font-size: var(--fs-label); color: var(--fg-1); padding-top: 3px; }
+.lrow .rconf {
+  display: flex; align-items: center; gap: 6px; padding-top: 3px;
+  font-size: var(--fs-label); letter-spacing: .05em; text-transform: uppercase; color: var(--fg-1);
+}
+.lrow .rconf .cdot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.lrow .rtxt { min-width: 0; line-height: 1.45; overflow-wrap: anywhere; }
+.lrow .rtxt .pills { display: inline-flex; gap: 6px; flex-wrap: wrap; margin-left: 8px; vertical-align: 1px; }
+.lrow .rhost, .lrow .rwhen { color: var(--fg-2); font-size: var(--fs-label); padding-top: 3px; overflow-wrap: anywhere; }
+.rows .rrefs { color: var(--fg-2); font-size: var(--fs-label); padding-top: 3px; text-align: right; font-variant-numeric: tabular-nums; }
+@media (max-width: 980px) {
+  .rows-h { display: none; }
+  .lrow { display: flex; flex-wrap: wrap; gap: 4px 12px; }
+  .lrow .rtxt { flex: 1 1 100%; order: -1; }
+}
+@media (max-width: 980px) { .cols { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 760px) {
+  .lane { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+  .lane-h { padding-top: 0; }
+}
+@keyframes rise { from { opacity: 0; transform: translateY(8px); } }
+.anim-in .band, .anim-in .lane, .anim-in .rows { animation: rise .4s var(--ease) both; animation-delay: var(--d, 0s); }
+@media (prefers-reduced-motion: reduce) {
+  .anim-in .band, .anim-in .lane, .anim-in .rows { animation: none; }
+  .bc:hover { transform: none; }
+}
+.chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 10px; border-radius: 999px; cursor: pointer; user-select: none;
+  background: var(--bg-3); border: 1px solid var(--border); color: var(--fg-1);
+  font: inherit; font-size: var(--fs-small); white-space: nowrap;
+  transition: background .15s var(--ease), border-color .15s var(--ease), color .15s var(--ease);
+}
+.chip:hover { background: var(--bg-hl); color: var(--fg-0); }
+.chip:focus-visible { outline: none; box-shadow: var(--shadow-glow); }
+.chip.on { color: var(--fg-0); border-color: rgba(91,157,255,.45); background: rgba(91,157,255,.12); }
+.chip.zero { opacity: .5; }
+.chip .n { color: var(--fg-2); font-variant-numeric: tabular-nums; }
+.chip.on .n { color: var(--accent); }
+.chip .cdot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; }
+select.chip { padding-right: 10px; }
+
+/* Slide-over for detail: exists only while something is selected, so the
+   first frame of a view is content, not an empty pane waiting for a click. */
+.scrim {
+  position: fixed; inset: 0; z-index: 94; background: var(--scrim);
+  opacity: 0; visibility: hidden;
+  transition: opacity .18s var(--ease), visibility 0s linear .18s;
+}
+.scrim.on { opacity: 1; visibility: visible; transition-delay: 0s; }
+.sheet {
+  position: fixed; top: 0; right: 0; bottom: 0; z-index: 95;
+  width: 480px; max-width: 94vw;
+  display: flex; flex-direction: column;
+  background: var(--bg-1); border-left: 1px solid var(--border-strong);
+  box-shadow: var(--shadow-md);
+  transform: translateX(102%); visibility: hidden;
+  transition: transform .18s ease-out, visibility 0s linear .18s;
+}
+.sheet.open { transform: translateX(0); visibility: visible; transition-delay: 0s; }
+.sheet-head {
+  display: flex; align-items: center; gap: 10px; flex: none;
+  padding: 12px 16px; background: var(--bg-2); border-bottom: 1px solid var(--border);
+}
+.sheet-title { font-weight: 650; font-size: 13.5px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sheet-close {
+  margin-left: auto; flex: none; background: transparent; border: 1px solid var(--border);
+  color: var(--fg-1); border-radius: var(--radius-sm); cursor: pointer;
+  padding: 4px 8px; font-size: 13px; display: inline-flex; align-items: center;
+}
+.sheet-close svg { display: block; }
+.sheet-close:hover { background: var(--bg-hl); color: var(--fg-0); }
+.sheet-body { flex: 1; overflow: auto; padding: 14px 16px; font-size: var(--fs-small); line-height: 1.55; }
+.sheet-body h4 {
+  margin: 16px 0 6px; font-size: var(--fs-label); font-weight: 650;
+  text-transform: uppercase; letter-spacing: .07em; color: var(--fg-2);
+}
+.sheet-body h4:first-child { margin-top: 0; }
+.sheet-body .statement { font-size: var(--fs-body); color: var(--fg-0); line-height: 1.6; }
+.sheet-body .ref {
+  display: flex; gap: 8px; align-items: baseline; padding: 5px 0;
+  border-top: 1px solid var(--border); overflow-wrap: anywhere;
+}
+.sheet-body .ref:first-of-type { border-top: 0; }
+.sheet-body .ref .cid { font-family: var(--mono); font-size: var(--fs-label); color: var(--accent); flex: none; cursor: pointer; }
+.sheet-body .ref .cid:hover { text-decoration: underline; }
+.sheet-body details.raw summary { cursor: pointer; color: var(--fg-2); font-size: var(--fs-small); }
+.sheet-body details.raw pre {
+  margin-top: 8px; background: var(--bg-0); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); padding: 8px 10px; overflow: auto;
+  font-size: 11px; white-space: pre-wrap; word-break: break-word;
+}
+@media (max-width: 760px) {
+  .sheet { width: 100%; max-width: 100%; }
+  /* Five figures one per row is a whole phone screen of numbers before any
+     content; two per row keeps the band a band. */
+  .band-cell { flex: 1 1 42%; padding: 12px 14px; }
+  .band-cell:nth-child(odd) { border-left: 0; }
+  .band-cell:nth-child(n+3) { border-top: 1px solid var(--border); }
+}
+
+/* ── Misc shared bits ──────────────────────────────────────────────────── */
+
+.kv { display: grid; grid-template-columns: 140px 1fr; gap: 4px 14px; font-size: var(--fs-small); }
+.kv .k { color: var(--fg-2); }
+.kv .v { word-break: break-word; }
+
+.divider { border: 0; border-top: 1px solid var(--border); margin: 14px 0; }
+
+.muted { color: var(--fg-1); }
+.dim { color: var(--fg-2); }
+.small { font-size: var(--fs-small); }
+
+/* ── Small-screen overrides that must outrank rules defined above ──────── */
+/* Same specificity as the base rules, so these have to come last in the
+   file: a media query does not raise specificity. */
+@media (max-width: 760px) {
+  /* A 430px slide-over on a 390px phone is not a slide-over. */
+  .atlas-chat { width: 100%; max-width: 100%; }
+  .chat-fab { right: 14px; bottom: 14px; padding: 9px 14px; }
+
+  /* Wide config/data tables scroll inside their own box rather than
+     dragging the whole document into horizontal scroll. */
+  .cfg-table, table.wide {
+    display: block; width: 100%; overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .cfg-table th, .cfg-table td { white-space: nowrap; }
+}

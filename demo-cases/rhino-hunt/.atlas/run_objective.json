@@ -1,0 +1,6 @@
+{
+  "text": "Investigate the following open requests:\n- task-0001: Network traces \u2014 file transfers in all three pcaps (FTP, HTTP, an encrypted zip and its password, an executable).\n- task-0002: USB key \u2014 the key was reformatted: recover content by carving; two carrier images hold steganographic payloads (jphide) whose passwords are derivable from the recovered diary.\n- task-0003: Cross-evidence link \u2014 prove the connection between USB content and network traffic.\n- task-0004: The anti-forensics story \u2014 what the diary says happened to the hard drive and the USB key.",
+  "source": "tasks",
+  "trace_path": "/home/analyst/cases/RHINO-HUNT/analysis/RHINO-HUNT_trace.json",
+  "recorded_at": "2026-09-29T16:46:20+00:00"
+}

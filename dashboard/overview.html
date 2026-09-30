@@ -1,0 +1,1359 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Atlas · Case Overview</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<link rel="stylesheet" href="assets/atlas.css" />
+<script src="assets/i18n.js"></script>
+<style>
+  /* View-specific layout only — all tokens/components come from atlas.css. */
+  .hero {
+    display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap;
+    margin-bottom: 6px;
+  }
+  .hero .page-title { margin: 0; }
+  /* --fs-label (11px), not --fs-small (12.5px): sitting right next to
+     .page-title (--fs-title, 20px) in the same row, this needs a clearer
+     step down to read as secondary/meta rather than a same-tier sibling —
+     matches .stat .l's existing use of --fs-label for the same relationship. */
+  .hero .meta { color: var(--fg-2); font-size: var(--fs-label); }
+
+  /* ── Status band ──────────────────────────────────────────────────────
+     One instrument rather than a row of identical boxes: the run's own
+     strip on top, the case's standing figures across the middle divided by
+     hairlines, and the run's findings laid out in time along the bottom.
+     A grid of same-weight cards gave every number the same importance and
+     left holes wherever two columns disagreed about height. */
+  .band {
+    margin: 14px 0 16px;
+    background: var(--bg-2); border: 1px solid var(--border);
+    border-radius: var(--radius); box-shadow: var(--shadow-sm);
+  }
+  /* No overflow:hidden on the band — a mark's hover card has to paint
+     outside it. The two rows that carry their own background round their
+     own outer corners instead, so the band still ends in a curve. */
+  .band-run { border-radius: var(--radius-inner) var(--radius-inner) 0 0; }
+  .band-time { border-radius: 0 0 var(--radius-inner) var(--radius-inner); }
+  .band.live { border-color: rgba(55,201,142,.35); }
+
+  .band-run {
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    padding: 9px 16px; background: var(--bg-1);
+    border-bottom: 1px solid var(--border);
+  }
+  .band-run .rb-state {
+    display: inline-flex; align-items: center; gap: 8px; flex: none;
+    font-size: var(--fs-body); font-weight: 650;
+  }
+  .band-run .rb-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--fg-2); }
+  .band.live .rb-dot { background: var(--ok); animation: atlas-pulse 1.4s infinite; }
+  .band.live .rb-state { color: var(--ok); }
+  .band-run .rb-facts {
+    display: flex; gap: 6px 16px; flex-wrap: wrap; min-width: 0;
+    color: var(--fg-2); font-size: var(--fs-small);
+  }
+  /* Each fact is one item: a number and the word it belongs to never end up
+     on different lines, whatever the width. */
+  .band-run .rb-facts > span { white-space: nowrap; }
+  /* The token breakdown is the one fact allowed to fold, and only within
+     itself — on a phone it is longer than the screen. */
+  .band-run .rb-breakdown { white-space: normal; }
+  .band-run .rb-facts b {
+    color: var(--fg-0); font-weight: 600; font-variant-numeric: tabular-nums;
+  }
+  .band-run .rb-actions { margin-left: auto; display: flex; gap: 8px; flex: none; }
+  /* A run's log lives in the activity card, folded, not across the top of
+     the page in red. Most of what lands here is Atlas refusing a malformed
+     tool call before it runs — the run is working, not breaking — and a
+     red banner over the whole case said the opposite. */
+  .runlog { margin-top: 12px; }
+  .runlog summary {
+    cursor: pointer; user-select: none; list-style: none;
+    display: flex; align-items: center; gap: 7px;
+    font-size: var(--fs-small); color: var(--fg-2);
+  }
+  .runlog summary::-webkit-details-marker { display: none; }
+  .runlog summary .rl-chev { transition: transform .15s var(--ease); }
+  .runlog summary .rl-chev svg { display: block; }
+  .runlog[open] summary .rl-chev { transform: rotate(90deg); }
+  .runlog summary:hover { color: var(--fg-1); }
+  .runlog .rl-note {
+    margin: 8px 0 6px; font-size: var(--fs-label); color: var(--fg-2);
+    line-height: 1.5;
+  }
+  .runlog .rl-item {
+    display: flex; gap: 8px; align-items: flex-start;
+    padding: 5px 0; border-top: 1px solid var(--border);
+    font-size: var(--fs-label); color: var(--fg-1);
+    overflow-wrap: anywhere;
+  }
+  .runlog .rl-dot {
+    width: 6px; height: 6px; border-radius: 50%; margin-top: 5px; flex: none;
+    background: var(--fg-2);
+  }
+  .runlog .rl-item.failed { color: var(--bad); }
+  .runlog .rl-item.failed .rl-dot { background: var(--bad); }
+
+  .band-figures { display: flex; flex-wrap: wrap; }
+  .band-cell {
+    flex: 1 1 180px; min-width: 0; padding: 15px 18px;
+    border-left: 1px solid var(--border); color: var(--fg-0);
+    text-decoration: none; transition: background .15s var(--ease);
+  }
+  .band-cell:first-child { border-left: 0; }
+  a.band-cell:hover { background: var(--bg-3); text-decoration: none; }
+  .band-cell.progress { display: flex; align-items: center; gap: 14px; flex: 1 1 230px; }
+  /* The design system's Stat tier (650/22px/tabular-nums) — the same
+     call-out size .stat .v uses in atlas.css, not a new step. */
+  .band-cell .f-v {
+    font-size: 22px; font-weight: 650; line-height: 1.2;
+    font-variant-numeric: tabular-nums;
+  }
+  .band-cell .f-v .f-of { font-size: var(--fs-small); font-weight: 400; color: var(--fg-2); }
+  .band-cell .f-l {
+    margin-top: 3px; font-size: var(--fs-label); color: var(--fg-2);
+    text-transform: uppercase; letter-spacing: .07em; font-weight: 600;
+  }
+  .band-cell .f-sub {
+    margin-top: 7px; font-size: var(--fs-small); color: var(--fg-1);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+
+  /* Donut: r=15.9155 makes the circumference 100, so every dash length is
+     literally a percentage — no arc maths and no charting dependency. */
+  .ring { position: relative; width: 62px; height: 62px; flex: none; }
+  .ring svg { display: block; transform: rotate(-90deg); }
+  .ring .track { fill: none; stroke: var(--border); stroke-width: 4; }
+  .ring .seg { fill: none; stroke-width: 4; }
+  .ring .seg.answered { stroke: var(--ok); }
+  .ring .seg.partial { stroke: var(--partial); }
+  .ring .rv {
+    position: absolute; inset: 0; display: flex;
+    align-items: center; justify-content: center;
+    font-size: 14px; font-weight: 650; font-variant-numeric: tabular-nums;
+  }
+
+  /* Confidence split of everything recorded, as one bar. */
+  .minibar {
+    display: flex; height: 6px; margin-top: 8px; overflow: hidden;
+    border-radius: 999px; background: var(--bg-3);
+  }
+  .minibar span { display: block; }
+  .conf-legend {
+    display: flex; gap: 10px; flex-wrap: wrap; margin-top: 7px;
+    font-size: var(--fs-label); color: var(--fg-2);
+  }
+  .conf-legend .cdot {
+    display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+    margin-right: 5px; vertical-align: 1px;
+  }
+
+  /* ── Findings in time ─────────────────────────────────────────────────
+     Every finding at its real position between the first and the last, tier
+     by colour. Whether the case came together in one burst or accumulated
+     across the run is the shape an analyst actually reads, and a bucketed
+     sparkline threw exactly that away. Positions come from the server
+     (dashboard/read_models.py, _finding_stats). */
+  .band-time { padding: 13px 18px 15px; border-top: 1px solid var(--border); background: var(--bg-1); }
+  .bt-head {
+    display: flex; align-items: baseline; gap: 10px; margin-bottom: 12px;
+    font-size: var(--fs-label); text-transform: uppercase; letter-spacing: .08em;
+    color: var(--fg-2); font-weight: 650;
+  }
+  .bt-head .bt-span { margin-left: auto; text-transform: none; letter-spacing: 0; font-weight: 400; }
+  .bt-track {
+    position: relative; height: 22px;
+    background: linear-gradient(var(--border), var(--border)) left 50% / 100% 1px no-repeat;
+  }
+  .bt-track::before, .bt-track::after {
+    content: ""; position: absolute; top: 50%; width: 1px; height: 9px;
+    margin-top: -4px; background: var(--border-strong);
+  }
+  .bt-track::before { left: 0; }
+  .bt-track::after { right: 0; }
+  /* One mark = one recorded finding. It opens that finding's own entry in
+     the process trace, so the timeline is a way into the evidence rather
+     than a picture of it. */
+  .bt-mark {
+    position: absolute; top: 50%; width: 9px; height: 9px; margin: -4.5px 0 0 -4.5px;
+    display: block; cursor: default;
+  }
+  a.bt-mark { cursor: pointer; }
+  /* The dot is a pseudo-element so growing it on hover cannot scale the
+     hover card with it — a transform on the anchor scales its children too,
+     and the card came out 1.6x oversized. The tier colour rides on --c
+     because ::before cannot inherit an inline background. */
+  .bt-mark::before {
+    content: ""; position: absolute; inset: 0; border-radius: 50%;
+    background: var(--c, var(--fg-2));
+    /* A ring in the band's own surface colour so findings written seconds
+       apart stay countable where they overlap. */
+    box-shadow: 0 0 0 2px var(--bg-1);
+    transition: transform .15s var(--ease);
+  }
+  .bt-mark:hover, .bt-mark:focus-visible { z-index: 3; }
+  .bt-mark:hover::before, .bt-mark:focus-visible::before { transform: scale(1.6); }
+  .bt-mark:focus-visible { outline: none; }
+  .bt-mark:focus-visible::before { box-shadow: 0 0 0 2px var(--bg-1), var(--shadow-glow); }
+
+  /* Hover card. The browser's own title tooltip needs a second of stillness
+     and cannot be styled or read by touch — for the one element that says
+     what the whole timeline means, that is too slow to find. */
+  .bt-tip {
+    position: absolute; bottom: calc(100% + 10px); left: 50%;
+    transform: translateX(-50%);
+    width: max-content; max-width: min(420px, calc(100vw - 28px)); z-index: 4;
+    padding: 9px 11px; border-radius: var(--radius);
+    background: var(--bg-2); border: 1px solid var(--border-strong);
+    box-shadow: var(--shadow-md); color: var(--fg-0);
+    font-size: var(--fs-small); line-height: 1.45; text-align: left;
+    white-space: normal; pointer-events: none;
+    /* display, not visibility: a hidden-but-laid-out card is still 420px of
+       content hanging off a 9px dot, which on a phone dragged the whole
+       document into ~200px of horizontal scroll. Taking it out of layout
+       costs the fade-in and keeps the page the width of the screen. */
+    display: none;
+  }
+  .bt-mark:hover .bt-tip, .bt-mark:focus-visible .bt-tip { display: block; }
+  /* A mark near either end would push its card off the page. */
+  .bt-mark.at-start .bt-tip { left: -6px; transform: none; }
+  .bt-mark.at-end .bt-tip { left: auto; right: -6px; transform: none; }
+  .bt-tip .tip-head {
+    display: flex; align-items: baseline; gap: 8px; margin-bottom: 5px;
+    font-size: var(--fs-label); color: var(--fg-2);
+  }
+  .bt-tip .tip-go { margin-left: auto; color: var(--accent); }
+  .bt-hint { color: var(--fg-2); text-transform: none; letter-spacing: 0; font-weight: 400; }
+  .bt-scale {
+    display: flex; justify-content: space-between; gap: 10px; margin-top: 6px;
+    font-size: var(--fs-label); color: var(--fg-2);
+  }
+  .bt-empty { font-size: var(--fs-small); color: var(--fg-2); }
+
+  /* ── Questions, expanded in place ─────────────────────────────────────
+     The Overview is the one-pager: a question opens its answer here rather
+     than sending the reader to the Questions tab to read it. */
+  .qrow { border-bottom: 1px solid var(--border); }
+  .qrow:last-child { border-bottom: 0; }
+  .qhead {
+    display: flex; align-items: center; gap: 10px; width: 100%;
+    padding: 9px 6px; margin: 0; border: 0; border-radius: var(--radius-sm);
+    background: none; color: inherit; font: inherit; text-align: left;
+    cursor: pointer;
+  }
+  .qhead:hover { background: var(--bg-3); }
+  .qhead:focus-visible { outline: none; box-shadow: var(--shadow-glow); }
+  /* Drawn status marks rather than glyph characters: they keep their size,
+     weight and colour in both themes and under any font stack. */
+  .qdot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+  .qdot.answered { background: var(--ok); }
+  .qdot.partial {
+    background: linear-gradient(90deg, var(--partial) 50%, transparent 50%);
+    box-shadow: inset 0 0 0 1px var(--partial);
+  }
+  .qdot.open { box-shadow: inset 0 0 0 1px var(--accent); }
+  .qhead .qtext {
+    min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-size: var(--fs-body);
+  }
+  .qhead .qtrail {
+    margin-left: auto; flex: none; display: flex; align-items: center; gap: 6px;
+  }
+  .qhead .chev { color: var(--fg-2); transition: transform .15s var(--ease); }
+  .qhead .chev svg { display: block; }
+  .qrow.expanded .qhead .chev { transform: rotate(90deg); }
+  .qbody { display: none; padding: 2px 8px 14px 25px; }
+  .qrow.expanded .qbody { display: block; }
+  .qbody .verdict { font-size: var(--fs-body); font-weight: 650; color: var(--fg-0); }
+  .qbody .ans { margin-top: 4px; font-size: var(--fs-small); color: var(--fg-1); line-height: 1.6; }
+  .qbody .ans.none { color: var(--fg-2); font-style: italic; }
+  .qbody h5 {
+    margin: 13px 0 5px; font-size: var(--fs-label); font-weight: 650;
+    text-transform: uppercase; letter-spacing: .07em; color: var(--fg-2);
+  }
+  .sup { display: flex; gap: 8px; align-items: baseline; padding: 4px 0; font-size: var(--fs-small); }
+  .sup .cid { flex: none; font-family: var(--mono); font-size: var(--fs-label); color: var(--accent); }
+  .sup .host { flex: none; color: var(--fg-2); font-size: var(--fs-label); }
+  .gap-item {
+    position: relative; padding: 3px 0 3px 13px;
+    font-size: var(--fs-small); color: var(--fg-2);
+  }
+  .gap-item::before {
+    content: ""; position: absolute; left: 0; top: 10px;
+    width: 5px; height: 5px; border-radius: 50%; background: var(--warn);
+  }
+  .qbody .more { margin-top: 11px; font-size: var(--fs-small); }
+
+  /* ── Findings / conflicts / indicators ────────────────────────────── */
+  .finding {
+    display: flex; gap: 10px; align-items: flex-start;
+    padding: 8px 0; border-bottom: 1px solid var(--border);
+    font-size: var(--fs-small);
+  }
+  .finding:last-child { border-bottom: 0; }
+  .finding .fdot { width: 7px; height: 7px; border-radius: 50%; margin-top: 6px; flex: none; }
+  /* Two lines each, so the card holding the newest handful is the same
+     height whether a finding is one line or a paragraph. The full text is
+     on the row's title, and every finding is in the report. */
+  .finding .desc {
+    color: var(--fg-0); display: -webkit-box; -webkit-line-clamp: 2;
+    line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  }
+  .finding .when {
+    margin-left: auto; flex: none; color: var(--fg-2);
+    font-size: var(--fs-label); white-space: nowrap;
+  }
+
+  .conflict-item {
+    padding: 8px 10px; margin-bottom: 8px;
+    border: 1px solid rgba(242,109,109,.35); border-radius: var(--radius-sm);
+    background: rgba(242,109,109,.06); font-size: var(--fs-body);
+  }
+  .conflict-item:last-child { margin-bottom: 0; }
+  .conflict-item .cid { color: var(--bad); font-family: var(--mono); font-size: var(--fs-label); }
+
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+  .ioc-line {
+    display: flex; gap: 8px; align-items: baseline;
+    padding: 6px 0; border-bottom: 1px solid var(--border); font-size: var(--fs-small);
+  }
+  .ioc-line:last-child { border-bottom: 0; }
+  .ioc-line .val { font-family: var(--mono); color: var(--fg-0); word-break: break-all; }
+  .ioc-line .exp {
+    color: var(--fg-2); font-size: var(--fs-label); min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .ioc-line .pill { margin-left: auto; flex: none; }
+
+  /* ── Workspace ────────────────────────────────────────────────────────
+     Two columns that stack independently rather than one grid whose rows
+     align: a grid row is only as short as its tallest card, so an empty
+     "no open conflicts" card beside a full indicator list opened a hole
+     the width of half the page. Each column packs its own cards tight and
+     the columns simply end where they end.
+     Asymmetric on purpose — the wide side carries what the case *is*
+     (findings, indicators), the rail carries the context around it. */
+  .workspace {
+    display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr);
+    gap: 16px; align-items: start;
+  }
+  .wcol { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+  /* The rail sits on the recessed surface so it reads as context beside the
+     main column rather than as four more cards of equal weight. */
+  .wcol.rail > .card { background: var(--bg-1); }
+  /* A card saying "nothing here" should not reserve the height of a full
+     page-level empty state to do it — and in the rail it need not centre
+     itself either. */
+  .workspace .state-empty { padding: 20px 16px; }
+  .wcol.rail .state-empty { padding: 4px 0; text-align: left; }
+  @media (max-width: 1100px) {
+    .workspace { grid-template-columns: minmax(0, 1fr); }
+  }
+
+  .activity-line { font-size: var(--fs-body); color: var(--fg-1); margin-bottom: 8px; }
+  .activity-line strong { color: var(--fg-0); font-weight: 600; }
+  /* The run's last narration is whatever the model last wrote — sometimes a
+     sentence, sometimes a page of it. Clamped like a finding so one verbose
+     turn cannot stretch the rail past everything beside it; the full text is
+     on the element's title, and the process trace has all of it. */
+  .narration {
+    border-left: 2px solid var(--border-strong); padding-left: 10px;
+    display: -webkit-box; -webkit-line-clamp: 8; line-clamp: 8;
+    -webkit-box-orient: vertical; overflow: hidden;
+  }
+
+  .case-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 14px; }
+  .case-card {
+    display: block; background: var(--bg-2); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 16px 18px; color: var(--fg-0);
+    text-decoration: none;
+    transition: border-color .15s var(--ease), transform .15s var(--ease),
+                box-shadow .15s var(--ease);
+  }
+  .case-card:hover {
+    border-color: var(--accent); text-decoration: none;
+    transform: translateY(-2px); box-shadow: var(--shadow-md);
+  }
+  .case-card .cname { font-weight: 650; font-size: 15px; margin-bottom: 4px; }
+  .case-card .cmeta { color: var(--fg-2); font-size: var(--fs-small); }
+
+  /* ── Entrance motion ──────────────────────────────────────────────────
+     Once per case, not once per render: refresh() rebuilds #app whenever
+     anything moves (during a live run that is every few seconds), and an
+     animation on that path would make the page flash rather than feel
+     alive. The class is set on the first paint for a case and dropped a
+     moment later — see markFirstPaint(). */
+  @keyframes rise { from { opacity: 0; transform: translateY(8px); } }
+  @keyframes ring-draw { from { stroke-dasharray: 0 100; } }
+  @keyframes mark-in { from { opacity: 0; transform: scale(.2); } }
+  @keyframes bar-grow { from { transform: scaleX(0); } }
+  .anim-in .band, .anim-in .card, .anim-in .case-card {
+    animation: rise .4s var(--ease) both; animation-delay: var(--d, 0s);
+  }
+  .anim-in .ring .seg { animation: ring-draw .8s var(--ease) both; }
+  .anim-in .minibar span { transform-origin: left; animation: bar-grow .6s var(--ease) both; }
+  .anim-in .bt-mark::before { animation: mark-in .5s var(--ease) both; animation-delay: var(--d, 0s); }
+
+  @media (prefers-reduced-motion: reduce) {
+    .anim-in .band, .anim-in .card, .anim-in .case-card,
+    .anim-in .ring .seg, .anim-in .minibar span, .anim-in .bt-mark::before {
+      animation: none;
+    }
+    .bt-mark:hover::before, .case-card:hover { transform: none; }
+  }
+
+  /* ── Phones ───────────────────────────────────────────────────────────
+     One row per question works down to tablet width; on a phone the status
+     pills leave two words for the question itself, which is the one thing
+     on the row worth reading. Let the question take the width and drop its
+     status beneath it. */
+  @media (max-width: 760px) {
+    .qhead { flex-wrap: wrap; row-gap: 6px; }
+    .qhead .qtext { white-space: normal; overflow: visible; }
+    .qhead .qtrail { margin-left: 19px; }
+    .qbody { padding-left: 19px; }
+  }
+
+  /* Run options panel — lives outside #app (see run-options-panel-host in
+     body) so it survives the polling refresh() untouched; see that div's
+     comment for why. */
+  .field { margin-bottom: 10px; }
+  .field label {
+    display: block; font-size: var(--fs-label); color: var(--fg-1);
+    margin-bottom: 4px; text-transform: uppercase; letter-spacing: .03em;
+  }
+  .field input, .field select { width: 100%; box-sizing: border-box; }
+  .field textarea {
+    width: 100%; box-sizing: border-box; font: inherit; resize: vertical;
+  }
+  .field-hint { font-size: var(--fs-small); color: var(--fg-2); margin-top: 3px; }
+  .run-opt-group summary {
+    cursor: pointer; font-size: var(--fs-small); color: var(--fg-2);
+    margin: 10px 0 8px;
+  }
+
+  /* Run options dialog. <dialog> centres itself and paints its own backdrop;
+     all that is needed here is the surface and a scrollable body so a long
+     option list never grows past the viewport. */
+  .run-options-dialog {
+    padding: 0; border: 1px solid var(--border); border-radius: var(--radius);
+    background: var(--bg-2); color: var(--fg-0);
+    width: min(520px, calc(100vw - 32px));
+    max-height: min(80vh, 720px);
+    box-shadow: var(--shadow-md);
+  }
+  .run-options-dialog::backdrop { background: var(--scrim); }
+  .run-options-form { display: flex; flex-direction: column; max-height: inherit; }
+  .rod-head {
+    display: flex; align-items: center; gap: 10px;
+    padding: 14px 16px; border-bottom: 1px solid var(--border);
+  }
+  .rod-title { font-weight: 650; font-size: 14px; }
+  .rod-close {
+    margin-left: auto; background: none; border: 0; cursor: pointer;
+    color: var(--fg-2); font-size: 14px; line-height: 1; padding: 5px 6px;
+    border-radius: var(--radius-sm); font-family: inherit;
+    display: inline-flex; align-items: center; justify-content: center;
+  }
+  .rod-close svg { display: block; }
+  .rod-close:hover { background: var(--bg-3); color: var(--fg-0); }
+  .rod-body { padding: 16px; overflow-y: auto; }
+  .rod-foot {
+    display: flex; justify-content: flex-end; gap: 8px;
+    padding: 12px 16px; border-top: 1px solid var(--border);
+    background: var(--bg-1);
+  }
+</style>
+</head>
+<body>
+<div class="page" id="app">
+  <div class="state-loading">Loading</div>
+</div>
+<!-- Outside #app deliberately: refresh() replaces #app's innerHTML wholesale
+     on every real content change (new finding, activity tick, etc.) — an
+     editable form living inside it would lose whatever the analyst had
+     typed mid-edit. This host is built once per case and never touched by
+     refresh(); see ensureRunOptionsHost().
+     A <dialog> rather than a panel appended below the page: as a bottom-of-
+     document div it opened off-screen under the content and went unnoticed. -->
+<dialog id="run-options-panel-host" class="run-options-dialog"></dialog>
+
+<script src="assets/shell.js"></script>
+<script>
+'use strict';
+const $app = () => document.getElementById('app');
+const esc = AtlasShell.esc;
+let stopPoll = null;
+// Every poll re-renders from scratch; without this, an unchanged case (the
+// common case — most 4s polls have nothing new) still tears down and
+// rebuilds the whole DOM tree, which is the actual cause of the periodic
+// "jump" (reflow/scroll-reset/flash) and of run-controls buttons briefly
+// vanishing mid-rebuild. Comparing the freshly-built HTML against what's
+// already on screen and skipping the write when nothing changed removes
+// the jump entirely on the no-op polls, and keeps a real content change
+// rendering exactly as before.
+let lastRenderedHtml = null;
+let lastNoCaseHtml = null;
+// Which questions the reader has opened. Lives outside the render so an
+// expanded answer survives the next poll's rebuild.
+const expandedQ = new Set();
+let animTimer = null;
+
+const CONF_TIERS = ['CONFIRMED', 'LIKELY', 'SUSPECTED', 'UNCONFIRMED'];
+const CONF_COLOR = {
+  CONFIRMED: 'var(--conf-confirmed)', LIKELY: 'var(--conf-likely)',
+  SUSPECTED: 'var(--conf-suspected)', UNCONFIRMED: 'var(--conf-unconfirmed)',
+};
+const CHEVRON = '<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 5l7 7-7 7"/></svg>';
+
+function confPill(conf) {
+  if (!conf) return '';
+  return `<span class="pill conf-${esc(conf.toLowerCase())}">${esc(conf)}</span>`;
+}
+
+// The entrance animation runs once per case rather than once per render.
+function markFirstPaint() {
+  const app = $app();
+  app.classList.add('anim-in');
+  clearTimeout(animTimer);
+  animTimer = setTimeout(() => app.classList.remove('anim-in'), 1400);
+}
+
+function renderNoCase() {
+  const cases = AtlasShell.cases();
+  const html = !cases.length ? `
+      <h1 class="page-title">Atlas Investigations</h1>
+      <div class="state-empty">
+        No cases found under the dashboard's cases root.
+        <div class="hint">Create a case directory with a <code>CASE.md</code>
+        (Investigation Requests section) and evidence under
+        <code>evidence/</code> — it appears here automatically.</div>
+      </div>` : `
+    <h1 class="page-title">Atlas Investigations</h1>
+    <p class="page-sub">Select a case to open its investigation.</p>
+    <div class="case-cards">
+      ${cases.map((c, i) => `
+        <a class="case-card" href="#" data-case="${esc(c.case_dir)}" style="--d:${(i * 0.04).toFixed(2)}s">
+          <div class="cname">${esc(c.case_id)}</div>
+          <div class="cmeta">${esc(c.case_dir)}${c.traces && c.traces.length
+            ? ` · ${c.traces.length} run${c.traces.length > 1 ? 's' : ''}` : ''}</div>
+        </a>`).join('')}
+    </div>`;
+  if (html === lastNoCaseHtml) return;
+  $app().innerHTML = html;
+  lastNoCaseHtml = html;
+  markFirstPaint();
+  $app().querySelectorAll('.case-card').forEach(a =>
+    a.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      AtlasShell.setActiveCase(a.dataset.case);
+    }));
+}
+
+function fmtDuration(seconds) {
+  const s = Math.max(0, Math.round(seconds || 0));
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  return h ? `${h}h ${m}m` : m ? `${m}m ${sec}s` : `${sec}s`;
+}
+
+// ── Drawn figures ─────────────────────────────────────────────────────────
+// SVG the browser already draws, rather than a charting dependency: a
+// two-segment donut, a stacked bar and a sparkline do not pay for a
+// library, its bundle, or its attribution obligations.
+
+function ringHtml(answered, partial, total) {
+  const pct = (n) => (total ? (100 * n / total) : 0);
+  const a = pct(answered), p = pct(partial);
+  const seg = (cls, len, offset) => (len <= 0 ? '' : `
+      <circle class="seg ${cls}" cx="21" cy="21" r="15.9155"
+              stroke-dasharray="${len.toFixed(2)} ${(100 - len).toFixed(2)}"
+              stroke-dashoffset="${(-offset).toFixed(2)}" />`);
+  return `
+    <div class="ring">
+      <svg viewBox="0 0 42 42" width="62" height="62" aria-hidden="true">
+        <circle class="track" cx="21" cy="21" r="15.9155" />
+        ${seg('answered', a, 0)}${seg('partial', p, a)}
+      </svg>
+      <span class="rv">${total ? `${Math.round(a)}%` : '—'}</span>
+    </div>`;
+}
+
+function minibarHtml(byConfidence, total) {
+  if (!total) return '';
+  const parts = CONF_TIERS
+    .map(tier => [tier, byConfidence[tier] || 0])
+    .filter(pair => pair[1] > 0);
+  if (!parts.length) return '';
+  return `
+    <div class="minibar" aria-hidden="true">
+      ${parts.map(([tier, n]) =>
+        `<span style="width:${(100 * n / total).toFixed(2)}%;background:${CONF_COLOR[tier]}"></span>`).join('')}
+    </div>
+    <div class="conf-legend">
+      ${parts.map(([tier, n]) =>
+        `<span><span class="cdot" style="background:${CONF_COLOR[tier]}"></span>${n} ${esc(tier.toLowerCase())}</span>`).join('')}
+    </div>`;
+}
+
+// Wall-clock stamp for the timeline's ends. timeAgo answers "how long since"
+// — which is the same answer at both ends of a run that took an hour, and
+// the two ends are exactly what a reader wants to compare here.
+function stamp(ts) {
+  const when = new Date(ts);
+  if (isNaN(when)) return '—';
+  return when.toLocaleString(AtlasShell.lang(), {
+    month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+
+function ribbonHtml(timeline, caseDir, trace) {
+  const marks = (timeline && timeline.marks) || [];
+  if (!marks.length) {
+    return `<div class="band-time">
+      <div class="bt-head">Findings across the run</div>
+      <div class="bt-empty">Nothing recorded yet — the timeline fills in as the
+        investigation records what it establishes.</div>
+    </div>`;
+  }
+  const span = timeline.span_seconds || 0;
+  const dots = marks.map((m, i) => {
+    // A mark opens its own finding in the process trace; without a trace on
+    // disk it stays a plain marker rather than a dead link.
+    const href = (trace && m.call_id != null)
+      ? `dashboard.html?case=${encodeURIComponent(caseDir)}&trace=${encodeURIComponent(trace)}&call=${encodeURIComponent(m.call_id)}`
+      : null;
+    const edge = m.at <= 0.12 ? ' at-start' : m.at >= 0.88 ? ' at-end' : '';
+    const tip = `
+        <span class="bt-tip">
+          <span class="tip-head">
+            ${confPill(m.confidence)}
+            <span>${esc(stamp(m.ts))}</span>
+            ${href ? '<span class="tip-go">open in Process &rarr;</span>' : ''}
+          </span>
+          ${esc(m.text)}${m.text && m.text.length >= 160 ? '…' : ''}
+        </span>`;
+    const attrs = `class="bt-mark${edge}" style="left:${(m.at * 100).toFixed(2)}%;`
+      + `--c:${CONF_COLOR[m.confidence] || 'var(--fg-2)'};`
+      + `--d:${Math.min(i * 0.03, 0.6).toFixed(2)}s"`;
+    return href
+      ? `<a ${attrs} href="${href}" aria-label="Finding recorded ${esc(stamp(m.ts))}, ${esc(m.confidence)}">${tip}</a>`
+      : `<span ${attrs} tabindex="0" role="note" aria-label="Finding recorded ${esc(stamp(m.ts))}, ${esc(m.confidence)}">${tip}</span>`;
+  }).join('');
+  return `
+    <div class="band-time">
+      <div class="bt-head">Findings across the run
+        <span class="bt-hint">— one dot per recorded finding, placed when it
+          was recorded and coloured by confidence${trace ? '; open one to see its evidence trail' : ''}</span>
+        <span class="bt-span">${marks.length} recorded${
+          marks.length > 1 && span ? ` over ${esc(fmtDuration(span))}`
+          : marks.length > 1 ? ' at one moment' : ''}</span>
+      </div>
+      <div class="bt-track">${dots}</div>
+      <div class="bt-scale">
+        <span>${esc(stamp(timeline.first_ts))}</span>
+        <span class="dim">${esc(AtlasShell.timeAgo(timeline.last_ts))}</span>
+        <span>${esc(stamp(timeline.last_ts))}</span>
+      </div>
+    </div>`;
+}
+
+// ── The band's run strip ─────────────────────────────────────────────────
+// State, the live counters and the controls as one strip across the top of
+// the status band; returns the markup plus whether the run is live, because
+// the band's own border reports that too.
+
+function runStripHtml(st, act) {
+  if (!st) return '';
+  const running = !!st.running;
+  // "external": a live run this dashboard didn't start (CLI, or a
+  // previous dashboard process before a restart) — detected via the pid
+  // recorded in run_status.json (see dashboard/read_models.py's
+  // run_process_alive()), not via a Popen handle this process owns. Start
+  // must stay blocked (a second `atlas run` over the same case would race
+  // it) and Stop must too — run_manager has no process handle to signal.
+  const external = !!st.external;
+  const label = running
+    ? (external ? 'Run in progress (started via CLI)' : 'Run in progress')
+    : (st.dashboard_tracked ? 'Run finished' : 'Idle');
+  const blockedTitle = external
+    ? 'This run was started outside the dashboard (CLI) — it can only be started or stopped the same way.'
+    : '';
+  // The first action follows the case's history: a case that ran before
+  // continues from what changed; a case that never ran gets its first run.
+  // "Start over" stays in the options dialog.
+  const prior = !!st.prior_run;
+  const primaryMode = prior ? 'rerun' : 'run';
+  const primaryLabel = prior ? 'Continue' : 'Start run';
+  const primaryTitle = blockedTitle || (prior
+    ? 'Picks up what changed since the last run: new evidence, questions and facts, findings under review. Keeps everything else.'
+    : 'Runs the investigation on the evidence and the brief.');
+  const tokens = (st.input_tokens || 0) + (st.output_tokens || 0);
+  // Only once the agent has written a live snapshot (turns is set from the
+  // first turn onward) — an idle or just-started session has nothing to say
+  // here yet, and a half-filled row of facts reads worse than none.
+  const facts = [];
+  if (st.turns !== undefined && st.turns !== null) {
+    if (act && act.current_phase) facts.push(`<b>${esc(act.current_phase)}</b> phase`);
+    facts.push(`turn <b>${esc(String(st.turns))}</b>`);
+    // A live run's figure is filled in by tickElapsed(), outside render().
+    facts.push(running && st.elapsed_seconds != null
+      ? `<b id="rb-elapsed"></b> elapsed`
+      : `<b>${esc(fmtDuration(st.duration_seconds))}</b> elapsed`);
+    facts.push(`<b>${tokens.toLocaleString()}</b> tokens`
+      + ` <span class="rb-breakdown">(${(st.input_tokens || 0).toLocaleString()} in / `
+      + `${(st.output_tokens || 0).toLocaleString()} out`
+      + `${st.cached_tokens ? `, ${st.cached_tokens.toLocaleString()} cached` : ''})</span>`);
+    if (st.activity) facts.push(`<b>${esc(st.activity)}</b>`);
+    if (st.info_count) facts.push(`${st.info_count} info`);
+  }
+  // Counts only, and in the run's own row of facts — the detail sits in
+  // the folded log on the activity card. A refused call is reported plainly
+  // rather than in red: nothing ran, so nothing broke.
+  const errCount = st.error_count || 0;
+  const refusedCount = st.refusal_count || 0;
+  if (errCount) {
+    facts.push(`<b style="color:var(--bad)">${errCount}</b> `
+      + `${errCount > 1 ? 'tool failures' : 'tool failure'}`);
+  }
+  if (refusedCount) {
+    facts.push(`<b>${refusedCount}</b> ${refusedCount > 1 ? 'calls' : 'call'} refused`);
+  }
+  return {
+    live: running,
+    html: `
+      <div class="band-run">
+        <span class="rb-state"><span class="rb-dot"></span>${esc(label)}</span>
+        <span class="rb-facts">${facts.map(f => `<span>${f}</span>`).join('')}</span>
+        <span class="rb-actions">
+          <button class="btn ok" id="run-start-btn" data-mode="${primaryMode}" title="${esc(primaryTitle)}" ${running ? 'disabled' : ''}>${primaryLabel}</button>
+          <button class="btn bad" id="run-stop-btn" title="${esc(blockedTitle)}" ${(running && !external) ? '' : 'disabled'}>Stop</button>
+          <button class="btn" id="run-options-toggle" type="button" ${running ? 'disabled' : ''}>Options</button>
+        </span>
+      </div>`,
+  };
+}
+
+// What the last pre-run pass found for the investigator (the run journal's
+// work summary, dashboard/read_models.py latest_run_journal): the delta
+// since the previous run, or that there was none.
+function deltaHtml(last) {
+  if (!last || !last.work) return '';
+  const w = last.work;
+  const reasons = (w.reasons || []).map(esc).join(' · ');
+  const when = last.finished_at
+    ? ` <span class="dim">(${esc(AtlasShell.timeAgo(last.finished_at))})</span>` : '';
+  let text;
+  if (w.first_scan) text = reasons ? `First run: ${reasons}` : 'First run';
+  else if (reasons) text = `Since the previous run: ${reasons}`;
+  else text = 'Nothing new since the previous run';
+  return `<div class="band-delta">${text}${when}</div>`;
+}
+
+// The run's log: what a tool reported as a failure, and what the toolbox
+// refused before running anything. Folded and low-contrast on purpose —
+// see the .runlog note in the stylesheet.
+function runLogHtml(st) {
+  if (!st) return '';
+  const failed = st.recent_errors || [];
+  const refused = st.recent_refusals || [];
+  const errCount = st.error_count || 0;
+  const refusedCount = st.refusal_count || 0;
+  if (!errCount && !refusedCount) return '';
+  const counts = [];
+  if (errCount) counts.push(`${errCount} tool failure${errCount > 1 ? 's' : ''}`);
+  if (refusedCount) counts.push(`${refusedCount} refused call${refusedCount > 1 ? 's' : ''}`);
+  const note = refusedCount
+    ? `<div class="rl-note">A refused call never reached its tool: Atlas checked
+       the arguments against the tool's own parameters, declined the call and
+       told the model how to write it. The investigation carries on.</div>`
+    : '';
+  const item = (text, cls) => `
+      <div class="rl-item ${cls}"><span class="rl-dot"></span>
+        <span>${esc(text)}</span></div>`;
+  return `
+    <details class="runlog">
+      <summary><span class="rl-chev">${CHEVRON}</span>Run log — ${esc(counts.join(' · '))}</summary>
+      ${note}
+      ${failed.map(e => item(e, 'failed')).join('')}
+      ${refused.map(e => item(e, 'refused')).join('')}
+    </details>`;
+}
+
+// Run options: field id -> {id, flag, type, group, label, choices?, help}
+// fetched from GET case/run/options?mode=... (dashboard/run_options.py is
+// the single source of truth both this render and the actual subprocess
+// argv are built from — see that module's docstring).
+let RUN_OPTIONS_CACHE = {};   // {mode: [field, ...]}
+let RUN_OPTIONS_MODE = 'run';
+let RUN_OPTIONS_CASE = null;  // case this host's DOM was built for
+let RUN_MODES = [];           // [{id, label, help}] from the server, once
+
+function runOptFieldHtml(f) {
+  const id = `run-opt-${f.id}`;
+  if (f.type === 'checkbox') {
+    return `<div class="field">
+      <label style="display:flex;align-items:center;gap:6px;text-transform:none;letter-spacing:0;font-size:var(--fs-body);color:var(--fg-0);">
+        <input type="checkbox" id="${id}" style="width:auto;" /> ${esc(f.label)}
+      </label>
+      ${f.help ? `<p class="field-hint">${esc(f.help)}</p>` : ''}
+    </div>`;
+  }
+  const control = f.type === 'select'
+    ? `<select id="${id}">${f.choices.map(c =>
+        `<option value="${esc(c)}">${esc(c || '(default)')}</option>`).join('')}</select>`
+    : f.type === 'textarea'
+      ? `<textarea id="${id}" rows="3"></textarea>`
+      : `<input type="text" id="${id}" />`;
+  return `<div class="field">
+    <label for="${id}">${esc(f.label)}</label>
+    ${control}
+    ${f.help ? `<p class="field-hint">${esc(f.help)}</p>` : ''}
+  </div>`;
+}
+
+function runOptionsFormHtml(fields) {
+  const byGroup = (g) => fields.filter(f => f.group === g);
+  let html = byGroup('basic').map(runOptFieldHtml).join('');
+  html += `<p class="field-hint">New evidence: put the files in this case's
+    <code>evidence/</code> folder (or on the network share). The run finds them
+    by fingerprint.</p>`;
+  for (const [group, label] of [['advanced', 'Advanced options'], ['remote', 'Remote execution']]) {
+    const fs = byGroup(group);
+    if (!fs.length) continue;
+    html += `<details class="run-opt-group"><summary>${esc(label)}</summary>
+      ${fs.map(runOptFieldHtml).join('')}</details>`;
+  }
+  return html;
+}
+
+async function renderRunOptionsBody() {
+  const modeSel = document.getElementById('run-opt-mode');
+  const mode = (modeSel && modeSel.value) || RUN_OPTIONS_MODE || 'run';
+  RUN_OPTIONS_MODE = mode;
+  const body = document.getElementById('run-options-body');
+  if (!body) return;
+  if (!RUN_OPTIONS_CACHE[mode]) {
+    try {
+      const res = await AtlasShell.api('case/run/options', { mode });
+      RUN_OPTIONS_CACHE[mode] = res.options || [];
+      if (Array.isArray(res.modes) && res.modes.length) RUN_MODES = res.modes;
+    } catch (e) {
+      body.innerHTML = `<p class="field-hint">${esc(e.message)}</p>`;
+      return;
+    }
+  }
+  // The mode picker's labels and help come with the first options answer
+  // (dashboard/run_options.py MODES), so the page and the CLI describe the
+  // two starts in the same words.
+  if (modeSel && !modeSel.options.length && RUN_MODES.length) {
+    modeSel.innerHTML = RUN_MODES.map(m =>
+      `<option value="${esc(m.id)}">${esc(m.label)}</option>`).join('');
+    modeSel.value = mode;
+  }
+  const info = RUN_MODES.find(m => m.id === mode);
+  const help = document.getElementById('run-opt-mode-help');
+  if (help) help.textContent = info ? info.help : '';
+  const go = document.getElementById('run-opt-start');
+  if (go) go.textContent = info ? info.label : 'Start';
+  body.innerHTML = runOptionsFormHtml(RUN_OPTIONS_CACHE[mode]);
+}
+
+function collectRunOptions() {
+  const fields = RUN_OPTIONS_CACHE[RUN_OPTIONS_MODE] || [];
+  const options = {};
+  for (const f of fields) {
+    const el = document.getElementById(`run-opt-${f.id}`);
+    if (!el) continue;
+    if (f.type === 'checkbox') { if (el.checked) options[f.id] = true; }
+    else if (el.value) { options[f.id] = el.value; }
+  }
+  return { mode: RUN_OPTIONS_MODE, options };
+}
+
+// Built once per case (not on every poll — see the host div's own comment
+// for why) and left alone until the case changes.
+function ensureRunOptionsHost(caseDir, initialMode) {
+  const host = document.getElementById('run-options-panel-host');
+  if (!host || RUN_OPTIONS_CASE === caseDir) return;
+  RUN_OPTIONS_CASE = caseDir;
+  RUN_OPTIONS_CACHE = {};
+  RUN_OPTIONS_MODE = initialMode || 'run';
+  host.innerHTML = `
+    <form method="dialog" class="run-options-form">
+      <div class="rod-head">
+        <span class="rod-title">Run options</span>
+        <button class="rod-close" value="cancel" aria-label="Close"><svg viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+      </div>
+      <div class="rod-body">
+        <div class="field">
+          <label for="run-opt-mode">Mode</label>
+          <select id="run-opt-mode"></select>
+          <p class="field-hint" id="run-opt-mode-help"></p>
+        </div>
+        <div id="run-options-body"></div>
+      </div>
+      <div class="rod-foot">
+        <button class="btn" value="cancel">Cancel</button>
+        <button class="btn ok" id="run-opt-start" value="start">Start</button>
+      </div>
+    </form>`;
+  document.getElementById('run-opt-mode').addEventListener('change', renderRunOptionsBody);
+  // A dialog closed with "start" launches the run with whatever is on the
+  // form; any other close (Cancel, Esc, the X) discards it. Reading a
+  // display:none check at start time, as the old panel did, could not tell
+  // "configured and dismissed" from "never opened".
+  host.addEventListener('close', () => {
+    if (host.returnValue === 'start') startRun(RUN_OPTIONS_CASE, collectRunOptions());
+  });
+  renderRunOptionsBody();
+}
+
+async function startRun(caseDir, payload) {
+  const startBtn = document.getElementById('run-start-btn');
+  if (startBtn) startBtn.disabled = true;
+  try {
+    await AtlasShell.apiPost('case/run/start', {
+      case: caseDir, mode: payload.mode, options: payload.options,
+    });
+    await refresh();
+  } catch (e) {
+    alert(e.message);
+    if (startBtn) startBtn.disabled = false;
+  }
+}
+
+function wireRunControls(caseDir) {
+  const startBtn = document.getElementById('run-start-btn');
+  const stopBtn = document.getElementById('run-stop-btn');
+  const toggleBtn = document.getElementById('run-options-toggle');
+  // toggleBtn only exists when runStripHtml got a non-null st, i.e. the
+  // viewer role check (AtlasShell.roleAtLeast('analyst') in refresh())
+  // already passed — a plain viewer never triggers the options fetch.
+  const primaryMode = (startBtn && startBtn.dataset.mode) || 'run';
+  if (toggleBtn) {
+    ensureRunOptionsHost(caseDir, primaryMode);
+    toggleBtn.addEventListener('click', () => {
+      const host = document.getElementById('run-options-panel-host');
+      if (!host) return;
+      // The dialog opens on the action the primary button offers now; the
+      // picker is there to choose the other one.
+      const modeSel = document.getElementById('run-opt-mode');
+      if (modeSel && modeSel.options.length && modeSel.value !== primaryMode) {
+        modeSel.value = primaryMode;
+        renderRunOptionsBody();
+      }
+      // showModal (not show): the backdrop, Esc-to-close and focus trapping
+      // are the point — this used to be a panel below the fold.
+      if (typeof host.showModal === 'function') host.showModal();
+      else host.setAttribute('open', '');   // very old browsers: inline dialog
+    });
+  }
+  // Both entry points — the primary button and the dialog's own Start —
+  // go through one place, so options can never be collected on one path and
+  // silently dropped on the other.
+  if (startBtn) startBtn.addEventListener('click', () =>
+    startRun(caseDir, { mode: primaryMode, options: {} }));
+  if (stopBtn) stopBtn.addEventListener('click', async () => {
+    stopBtn.disabled = true;
+    try {
+      await AtlasShell.apiPost('case/run/stop', { case: caseDir });
+      await refresh();
+    } catch (e) { alert(e.message); stopBtn.disabled = false; }
+  });
+}
+
+// ── Questions, answered in place ──────────────────────────────────────────
+
+function supportRow(caseDir, s) {
+  return `
+    <div class="sup">
+      <a class="cid" href="claim_view.html?case=${encodeURIComponent(caseDir)}&node=${encodeURIComponent(s.id)}"
+         title="Open in Case Findings">${esc(s.id)}</a>
+      ${confPill(s.confidence)}
+      <span>${esc(s.statement || '(no statement)')}</span>
+      ${s.host ? `<span class="host">${esc(s.host)}</span>` : ''}
+    </div>`;
+}
+
+function questionRow(caseDir, q) {
+  const bucket = (q.bucket === 'dropped' || q.bucket === 'withdrawn') ? 'open' : q.bucket;
+  const a = q.answer || {};
+  const open = expandedQ.has(q.id);
+  const disputed = (a.conflicts || []).length ? '<span class="pill bad">disputed</span>' : '';
+  const statusClass = bucket === 'answered' ? 'ok' : bucket === 'partial' ? 'partial'
+    : q.status === 'blocked_missing_evidence' ? 'warn' : 'info';
+
+  const answerHtml = a.has_answer
+    ? `${a.verdict ? `<div class="verdict">${esc(a.verdict)}</div>` : ''}
+       ${a.summary ? `<div class="ans">${esc(a.summary)}</div>` : ''}`
+    : '<div class="ans none">No supporting finding is linked to this question yet.</div>';
+
+  const gaps = (a.gaps || []).length
+    ? `<h5>Not examined</h5>${a.gaps.map(g => `<div class="gap-item">${esc(g)}</div>`).join('')}`
+    : '';
+
+  const supporting = (a.supporting || []).slice(0, 4);
+  const supportHtml = supporting.length
+    ? `<h5>Supporting claims</h5>${supporting.map(s => supportRow(caseDir, s)).join('')}`
+      + ((a.supporting || []).length > supporting.length
+        ? `<div class="dim small">+${a.supporting.length - supporting.length} more</div>` : '')
+    : '';
+
+  const conflictsHtml = (a.conflicts || []).map(c => `
+      <div class="conflict-item" style="margin-top:10px;">
+        <strong>Conflicting evidence</strong> —
+        <span class="cid">${esc(c.id)}</span> ${esc(c.statement || '')}
+      </div>`).join('');
+
+  return `
+    <div class="qrow ${open ? 'expanded' : ''}" data-qid="${esc(q.id)}">
+      <button class="qhead" type="button" aria-expanded="${open}">
+        <span class="qdot ${esc(bucket)}"></span>
+        <span class="qtext" title="${esc(q.text)}">${esc(q.text)}</span>
+        <span class="qtrail">
+          ${q.derived ? '<span class="pill neutral" title="Follow-up Atlas raised itself while investigating">Atlas follow-up</span>' : ''}
+          ${disputed}${a.has_answer ? confPill(a.confidence) : ''}
+          <span class="pill ${statusClass}">${esc(q.status_label)}</span>
+          <span class="chev">${CHEVRON}</span>
+        </span>
+      </button>
+      <div class="qbody">
+        ${answerHtml}${gaps}${conflictsHtml}${supportHtml}
+        <div class="more">
+          <a href="questions.html?case=${encodeURIComponent(caseDir)}#${encodeURIComponent(q.id)}">Full detail in Questions →</a>
+        </div>
+      </div>
+    </div>`;
+}
+
+function wireQuestions() {
+  $app().querySelectorAll('.qrow .qhead').forEach(head =>
+    head.addEventListener('click', () => {
+      const row = head.closest('.qrow');
+      const isOpen = row.classList.toggle('expanded');
+      head.setAttribute('aria-expanded', String(isOpen));
+      if (isOpen) expandedQ.add(row.dataset.qid);
+      else expandedQ.delete(row.dataset.qid);
+    }));
+}
+
+// ── Page ──────────────────────────────────────────────────────────────────
+
+function render(ov, st) {
+  const cd = ov.case_dir;
+  const q = ov.questions || {};
+  const progress = q.progress || {};
+  const answered = progress.answered || 0;
+  const partial = progress.partial || 0;
+  const openQ = progress.open || 0;
+  const totalQ = answered + partial + openQ;
+  const act = ov.activity || {};
+  const claims = ov.claims || {};
+  const ev = ov.evidence || {};
+  const rep = ov.report || {};
+  const iocs = ov.iocs || {};
+  const resp = ov.response || {};
+  const questions = q.questions || [];
+
+  // The shell's activity chip is deliberately NOT written from here any
+  // more: act.busy is *this* case's state, while the chip reports every
+  // case (refreshBusy in assets/shell.js). A page-local write kept stamping
+  // "idle" over a run that was live in another case.
+  const working = act.busy;
+
+  const kindCounts = claims.active_by_kind || {};
+  const beliefBits = [];
+  if (kindCounts.conclusion) beliefBits.push(`${kindCounts.conclusion} conclusion${kindCounts.conclusion > 1 ? 's' : ''}`);
+  if (kindCounts.claim) beliefBits.push(`${kindCounts.claim} claims`);
+  if (claims.needs_review) beliefBits.push(`${claims.needs_review} need review`);
+
+  const iocGroups = (iocs.groups || []).map(g => `${g.title} ${g.count}`).join(' · ');
+  const strip = runStripHtml(st, act);
+  const band = `
+    <div class="band ${strip && strip.live ? 'live' : ''}">
+      ${strip ? strip.html : ''}
+      ${deltaHtml(ov.last_run)}
+      <div class="band-figures">
+        <div class="band-cell progress">
+          ${ringHtml(answered, partial, totalQ)}
+          <div>
+            <div class="f-v">${answered}<span class="f-of"> / ${totalQ}</span></div>
+            <div class="f-l">Questions answered</div>
+            <div class="f-sub">${partial} partial · ${openQ} open</div>
+          </div>
+        </div>
+        <div class="band-cell">
+          <div class="f-v">${act.finding_count || 0}</div>
+          <div class="f-l">Findings</div>
+          ${minibarHtml(act.finding_by_confidence || {}, act.finding_count || 0)
+            || '<div class="f-sub">nothing recorded yet</div>'}
+        </div>
+        <a class="band-cell" href="iocs.html?case=${encodeURIComponent(cd)}">
+          <div class="f-v">${iocs.total || 0}</div>
+          <div class="f-l">Indicators</div>
+          <div class="f-sub" title="${esc(iocGroups)}">${iocGroups
+            ? esc(iocGroups) : 'none attributed yet'}</div>
+        </a>
+        <a class="band-cell" href="recommendations.html?case=${encodeURIComponent(cd)}">
+          <div class="f-v" ${resp.open_now ? 'style="color:var(--bad)"' : ''}>${resp.open || 0}</div>
+          <div class="f-l">Response</div>
+          <div class="f-sub">${resp.open
+            ? `${resp.open_now || 0} to do now · ${resp.evidence_backed || 0} on evidence`
+            : 'no recommendations yet'}</div>
+        </a>
+        <a class="band-cell" href="claim_view.html?case=${encodeURIComponent(cd)}">
+          <div class="f-v" ${claims.open_conflict_count ? 'style="color:var(--bad)"' : ''}>${claims.open_conflict_count || 0}</div>
+          <div class="f-l">Open conflicts</div>
+          <div class="f-sub">${beliefBits.length ? esc(beliefBits.join(' · ')) : 'no recorded beliefs yet'}</div>
+        </a>
+        <div class="band-cell">
+          <div class="f-v">${ev.cataloged ? (ev.files || 0).toLocaleString() : '—'}</div>
+          <div class="f-l">Evidence files</div>
+          <div class="f-sub">${ev.cataloged
+            ? esc(AtlasShell.fmtBytes(ev.total_bytes)) : 'not cataloged yet'}</div>
+        </div>
+      </div>
+      ${ribbonHtml(act.finding_timeline, cd, act.trace)}
+    </div>`;
+
+  const questionsHtml = questions.length
+    ? questions.map(item => questionRow(cd, item)).join('')
+    : `<div class="state-empty">No investigation questions recorded.
+        <div class="hint">Add bullets under <code>## Investigation Requests</code>
+        in this case's <code>CASE.md</code>, then run <code>atlas run</code> or
+        <code>atlas rerun</code>.</div></div>`;
+
+  const findings = act.recent_findings || [];
+  const findingsHtml = findings.length
+    ? findings.map(f => `
+        <div class="finding">
+          <span class="fdot" style="background:${CONF_COLOR[f.confidence] || 'var(--fg-2)'}"
+                title="${esc(f.confidence || '')}"></span>
+          <span class="desc" title="${esc(f.description)}">${esc(f.description)}</span>
+          <span class="when">${esc(AtlasShell.timeAgo(f.ts))}</span>
+        </div>`).join('')
+    : '<div class="state-empty">No findings recorded yet.</div>';
+
+  const conflicts = claims.open_conflicts || [];
+  const conflictsHtml = conflicts.length
+    ? conflicts.map(c => `
+        <div class="conflict-item">
+          <span class="cid">${esc(c.id)}</span>
+          ${esc(c.statement || '(no statement)')}
+        </div>`).join('')
+      + (claims.open_conflict_count > conflicts.length
+         ? `<div class="dim small">+${claims.open_conflict_count - conflicts.length} more in Case Findings</div>` : '')
+    : '<div class="state-empty">No open conflicts.</div>';
+
+  const respRows = resp.top || [];
+  const respHtml = respRows.length
+    ? (resp.prior_only
+        ? `<div class="dim small" style="margin-bottom:8px;">Precautions from your intake — no evidence yet.</div>` : '')
+      + respRows.map(r => `
+        <div class="ioc-line">
+          <span class="val" style="font-family:inherit">${esc(r.action)}</span>
+          <span class="exp">${esc(r.phase)} · ${esc(r.scope)} · ${esc(r.urgency)}</span>
+          ${r.basis_confidence === 'PRIOR'
+            ? '<span class="pill" title="rests on your intake, not on evidence">PRIOR</span>'
+            : confPill(r.basis_confidence)}
+        </div>`).join('')
+      + ((resp.open || 0) > respRows.length
+         ? `<div class="dim small" style="margin-top:8px;">+${resp.open - respRows.length} more in the Response view</div>` : '')
+    : `<div class="state-empty">No recommendations yet.
+        <div class="hint">They rest on recorded findings, or on what you told
+        Atlas under "What you already know".</div></div>`;
+  const iocRows = iocs.top || [];
+  const iocHtml = iocRows.length
+    ? `<div class="chips">${(iocs.groups || []).map(g =>
+          `<span class="pill">${esc(g.title)} ${g.count}</span>`).join('')}</div>`
+      + iocRows.map(r => `
+        <div class="ioc-line">
+          <span class="val">${esc(r.value)}</span>
+          ${r.explanation ? `<span class="exp">${esc(r.explanation)}</span>` : ''}
+          ${confPill(r.confidence)}
+        </div>`).join('')
+      + ((iocs.total || 0) > iocRows.length
+         ? `<div class="dim small" style="margin-top:8px;">+${iocs.total - iocRows.length} more in the IOC view</div>` : '')
+    : `<div class="state-empty">No indicators attributed yet.
+        <div class="hint">Indicators come only from findings the investigation
+        recorded, never from raw tool output.</div></div>`;
+
+  // logs_stale: the agent process is confirmed alive (dashboard/read_models.py's
+  // agent_busy() now checks the recorded pid, not just transcript growth) but
+  // a long-running tool call (e.g. img_vmdk_export_raw's qemu-img convert,
+  // which can run for hours) hasn't written to the transcript/trace in a
+  // while. Showing the stale last_narration here (often a run-start URL)
+  // read as "the run is over" even though working is true — say what's
+  // actually happening instead.
+  // last_stop: why the most recent run ended, once it's no longer busy.
+  // Populated for every abnormal stop (agent/cli.py's finally block now
+  // persists this for llm_error / crashed / keyboard_interrupt, same as it
+  // already did for a clean finish) — a token/context-limit rejection from
+  // the LLM API is the common real case and used to leave zero trace of
+  // itself anywhere in the dashboard.
+  const STOP_REASON_LABELS = {
+    llm_error: 'Run stopped — LLM error',
+    crashed: 'Run stopped — unexpected error',
+    keyboard_interrupt: 'Run interrupted (Ctrl+C)',
+    turn_cap: 'Run stopped — turn limit reached',
+    wall_clock: 'Run stopped — time limit reached',
+    llm_deadline: 'Run stopped — LLM deadline reached',
+    token_cap: 'Run stopped — token budget reached',
+    gate_deadlock: 'Run stopped — every tool call was being refused (protocol deadlock)',
+    died: 'Run process ended without recording an exit',
+    quiet: 'Run stopped — no progress detected',
+    // Distinct from `quiet`: the model kept producing turns but never
+    // emitted the dair_assess call that re-opens the blocked forensic
+    // tools, so evidence work could not continue. Actionable — a rerun
+    // usually clears it; "no progress detected" read like "nothing left
+    // to do" and hid that.
+    stall: 'Run stopped — stalled on a protocol gate (DAIR re-engage)',
+  };
+  const stopLabel = act.last_stop ? STOP_REASON_LABELS[act.last_stop.reason] : null;
+  const lastStopHtml = stopLabel
+    ? `<div class="activity-line" style="color:var(--bad);">
+        <strong>${esc(stopLabel)}</strong>${act.last_stop.error
+          ? `<div class="small" style="color:var(--fg-1);margin-top:3px;">${esc(act.last_stop.error)}</div>` : ''}
+      </div>`
+    : '';
+  const activityHtml = `
+    ${working
+      ? (act.logs_stale
+          ? `<div class="activity-line"><strong>Run in progress</strong> — waiting on
+              <strong>${esc(act.current_tool || 'a tool call')}</strong>${act.tool_running_seconds != null
+                ? ` (running ${fmtDuration(act.tool_running_seconds)})` : ''}.
+              ${act.last_ts ? `No log update for ${esc(AtlasShell.timeAgo(act.last_ts))}.` : ''}</div>`
+          : `<div class="activity-line"><strong>Atlas is working on this case.</strong>${act.current_phase ? ` Currently in the <strong>${esc(act.current_phase)}</strong> phase.` : ''}${st && st.turns != null ? ` Turn ${esc(String(st.turns))}` : ''}${act.current_tool ? `, ${act.tool_running_seconds != null ? 'running' : 'last tool'} <strong>${esc(act.current_tool)}</strong>${act.tool_running_seconds != null ? ` (${fmtDuration(act.tool_running_seconds)})` : ''}` : ''}${st && st.updated_at ? `; status ${esc(AtlasShell.timeAgo(st.updated_at))}.` : '.'}</div>`)
+      : (lastStopHtml || `<div class="activity-line">No active run.${act.last_ts ? ` Last activity ${esc(AtlasShell.timeAgo(act.last_ts))}.` : ''}</div>`)}
+    ${(act.last_narration && !act.logs_stale)
+      ? `<div class="small muted narration" title="${esc(act.last_narration)}">${esc(act.last_narration)}</div>`
+      : ''}
+    ${act.trace ? `<div class="small dim" style="margin-top:10px;">
+        <a href="dashboard.html?case=${encodeURIComponent(cd)}&trace=${encodeURIComponent(act.trace)}">Open full process trace →</a>
+      </div>` : ''}
+    ${runLogHtml(st)}`;
+
+  const html = `
+    <div class="hero">
+      <h1 class="page-title">${esc(ov.case_id)}</h1>
+      <span class="meta">${esc(cd)}</span>
+    </div>
+    ${band}
+    <div class="card" style="--d:.16s; margin-bottom:16px;">
+      <div class="card-h">Investigation questions
+        <span class="h-trail">open a question to read its answer here ·
+          <a href="questions.html?case=${encodeURIComponent(cd)}">Questions tab →</a></span>
+      </div>
+      ${questionsHtml}
+    </div>
+    <div class="workspace">
+      <div class="wcol">
+        <div class="card" style="--d:.2s">
+          <div class="card-h">Recent findings
+            <span class="h-trail">${act.finding_count
+              ? `${findings.length} newest of ${act.finding_count}` : ''}</span>
+          </div>
+          ${findingsHtml}
+        </div>
+        <div class="card" style="--d:.22s">
+          <div class="card-h">Response
+            <span class="h-trail"><a href="recommendations.html?case=${encodeURIComponent(cd)}">the whole plan →</a></span>
+          </div>
+          ${respHtml}
+        </div>
+        <div class="card" style="--d:.24s">
+          <div class="card-h">Indicators of compromise
+            <span class="h-trail"><a href="iocs.html?case=${encodeURIComponent(cd)}">all indicators →</a></span>
+          </div>
+          ${iocHtml}
+        </div>
+      </div>
+      <div class="wcol rail">
+        <div class="card" style="--d:.28s">
+          <div class="card-h">Current activity</div>
+          ${activityHtml}
+        </div>
+        <div class="card" style="--d:.32s">
+          <div class="card-h">Open conflicts
+            <span class="h-trail">${beliefBits.length ? `<a href="claim_view.html?case=${encodeURIComponent(cd)}">${esc(beliefBits.join(' · '))} →</a>` : ''}</span>
+          </div>
+          ${conflictsHtml}
+        </div>
+        <div class="card" style="--d:.36s">
+          <div class="card-h">Report</div>
+          <div class="small">${rep.available
+            ? `<a href="report.html?case=${encodeURIComponent(cd)}">${esc(rep.name)}</a>
+               <div class="dim" style="margin-top:3px;">updated ${esc(AtlasShell.timeAgo(rep.mtime))}</div>
+               ${rep.report_label ? `<div style="margin-top:3px;color:var(--warn);">${esc(rep.report_label)}</div>` : ''}`
+            : '<span class="dim">No report written yet.</span>'}</div>
+        </div>
+      </div>
+    </div>`;
+
+  if (html === lastRenderedHtml) return false;
+  const firstPaint = lastRenderedHtml === null;
+  $app().innerHTML = html;
+  lastRenderedHtml = html;
+  if (firstPaint) markFirstPaint();
+  wireQuestions();
+  return true;
+}
+
+// A live run's elapsed time counts on by itself. render() rebuilds the page
+// only when its HTML changes, which keeps focus, scroll and open questions
+// in place; a figure that moved every second would rebuild it every poll.
+// The server says how long the run has been going, on its own clock, and
+// the page counts on from there between polls.
+let elapsedClock = null;   // {seconds, at} of the last status, or null
+function tickElapsed() {
+  const el = document.getElementById('rb-elapsed');
+  if (!el || !elapsedClock) return;
+  el.textContent = fmtDuration(elapsedClock.seconds + (Date.now() - elapsedClock.at) / 1000);
+}
+setInterval(tickElapsed, 1000);
+
+async function refresh() {
+  const cd = AtlasShell.activeCase();
+  if (!cd) { renderNoCase(); return; }
+  try {
+    const wantsRunStatus = AtlasShell.roleAtLeast('analyst');
+    const [ov, st] = await Promise.all([
+      AtlasShell.api('case_overview', { case: cd }),
+      wantsRunStatus ? AtlasShell.api('case/run/status', { case: cd }).catch(() => null)
+                     : Promise.resolve(null),
+    ]);
+    // Guard against a case switch racing the request.
+    if (AtlasShell.activeCase() !== cd) return;
+    // Only re-attach the run-controls click handlers when render() actually
+    // rebuilt the DOM (new button elements) — re-wiring the same, unchanged
+    // buttons every poll would stack a duplicate listener on each one, so a
+    // single click would fire the start/stop call once per elapsed poll.
+    elapsedClock = st && st.running && st.elapsed_seconds != null
+      ? { seconds: st.elapsed_seconds, at: Date.now() } : null;
+    if (render(ov, st)) wireRunControls(cd);
+    tickElapsed();
+  } catch (e) {
+    if (AtlasShell.activeCase() !== cd) return;
+    // A dropped request keeps whatever is on screen (the last good render or
+    // the loading state) and the next poll retries; only an answer we don't
+    // like, or a sustained outage, replaces the page with the error.
+    if (AtlasShell.isTransient(e)) return;
+    $app().innerHTML = `<div class="state-error">Could not load case overview.\n${esc(e.message)}</div>`;
+    lastRenderedHtml = null;
+  }
+}
+
+AtlasShell.init({
+  page: 'overview',
+  onCase: () => {
+    if (stopPoll) stopPoll();
+    $app().innerHTML = '<div class="state-loading">Loading</div>';
+    lastRenderedHtml = null;
+    lastNoCaseHtml = null;
+    expandedQ.clear();
+    stopPoll = AtlasShell.poll(refresh, 4000);
+  },
+});
+</script>
+</body>
+</html>

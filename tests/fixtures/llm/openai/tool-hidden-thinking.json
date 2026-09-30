@@ -1,0 +1,60 @@
+{
+ "stack": "openai",
+ "model": "example-model",
+ "scenario": "tool-hidden-thinking",
+ "source": "hand-written from the documented OpenAI response shape",
+ "status": 200,
+ "request": {
+  "model": "example-model",
+  "messages": [
+   {
+    "role": "user",
+    "content": "List the processes in m.img. Call the tool."
+   }
+  ],
+  "max_completion_tokens": 512
+ },
+ "response": {
+  "id": "chatcmpl-test0009",
+  "object": "chat.completion",
+  "created": 1924992000,
+  "model": "example-model",
+  "choices": [
+   {
+    "index": 0,
+    "message": {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_test0009",
+       "type": "function",
+       "function": {
+        "name": "vol_pslist",
+        "arguments": "{\"image\":\"m.img\"}"
+       }
+      }
+     ]
+    },
+    "finish_reason": "tool_calls"
+   }
+  ],
+  "usage": {
+   "prompt_tokens": 100,
+   "completion_tokens": 69,
+   "completion_tokens_details": {
+    "reasoning_tokens": 64
+   }
+  }
+ },
+ "expect": {
+  "content": "",
+  "reasoning_empty": true,
+  "reasoning_tokens": 64,
+  "tool_calls": 1,
+  "tool_name": "vol_pslist",
+  "finish_reason": "tool_calls",
+  "starved": false,
+  "thinking_observed": true
+ }
+}

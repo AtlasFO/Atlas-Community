@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Atlas analyst CLI — see `atlas --help`.
+set -euo pipefail
+# Resolve through symlinks so ~/.local/bin/atlas → ~/Atlas/bin/atlas still finds
+# the repo root (plain dirname on the symlink would point at ~/.local).
+SCRIPT="$(readlink -f "${BASH_SOURCE[0]}")"
+REPO_ROOT="$(cd "$(dirname "$SCRIPT")/.." && pwd)"
+if [ -x "$REPO_ROOT/.venv/bin/python" ]; then
+    PY="$REPO_ROOT/.venv/bin/python"
+elif [ -x "$HOME/.venv/bin/python" ]; then
+    # install.sh builds the venv at ~/.venv; prefer it over system python3 so
+    # the CLI picks up Atlas's deps even without a repo-local .venv.
+    PY="$HOME/.venv/bin/python"
+else
+    PY="$(command -v python3)"
+fi
+# Put the venv's bin/ on PATH: several tools resolve pip-installed console
+# scripts via shutil.which() (vol, capa, floss, olevba, mraptor, ...) — those
+# only exist here, and invoking $PY directly (rather than `source activate`)
+# does not add this to PATH on its own.
+export PATH="$(dirname "$PY")${PATH:+:$PATH}"
+export PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"
+exec "$PY" -m agent.cli "$@"

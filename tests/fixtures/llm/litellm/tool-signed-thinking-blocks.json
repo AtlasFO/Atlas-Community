@@ -1,0 +1,86 @@
+{
+ "stack": "litellm",
+ "model": "example-model",
+ "scenario": "tool-signed-thinking-blocks",
+ "source": "hand-written from the documented LiteLLM response shape for an Anthropic model",
+ "status": 200,
+ "request": {
+  "model": "example-model",
+  "messages": [
+   {
+    "role": "user",
+    "content": "List the processes in m.img. Call the tool."
+   }
+  ],
+  "max_tokens": 16384,
+  "reasoning_effort": "low"
+ },
+ "response": {
+  "id": "chatcmpl-test0004",
+  "object": "chat.completion",
+  "created": 1924992000,
+  "model": "example-model",
+  "choices": [
+   {
+    "index": 0,
+    "message": {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "toolu_test0004",
+       "type": "function",
+       "function": {
+        "name": "vol_pslist",
+        "arguments": "{\"image\": \"m.img\"}"
+       }
+      }
+     ],
+     "reasoning_content": "The user wants the process list of m.img, so I call vol_pslist.",
+     "thinking_blocks": [
+      {
+       "type": "thinking",
+       "thinking": "The user wants the process list of m.img, so I call vol_pslist.",
+       "signature": "AAAA"
+      }
+     ],
+     "provider_specific_fields": {
+      "thinking_blocks": [
+       {
+        "type": "thinking",
+        "thinking": "The user wants the process list of m.img, so I call vol_pslist.",
+        "signature": "AAAA"
+       }
+      ]
+     }
+    },
+    "finish_reason": "tool_calls"
+   }
+  ],
+  "usage": {
+   "prompt_tokens": 100,
+   "completion_tokens": 29,
+   "completion_tokens_details": {
+    "reasoning_tokens": 24
+   },
+   "prompt_tokens_details": {
+    "cached_tokens": 50
+   },
+   "cache_read_input_tokens": 50
+  }
+ },
+ "expect": {
+  "content": "",
+  "reasoning_prefix": "The user wants",
+  "reasoning_tokens": 24,
+  "tool_calls": 1,
+  "tool_name": "vol_pslist",
+  "finish_reason": "tool_calls",
+  "starved": false,
+  "thinking_observed": true,
+  "raw_keys": [
+   "thinking_blocks",
+   "provider_specific_fields"
+  ]
+ }
+}

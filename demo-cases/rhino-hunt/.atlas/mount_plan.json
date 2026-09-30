@@ -1,0 +1,27 @@
+{
+  "schema_version": "1.0",
+  "case_id": "RHINO-HUNT",
+  "updated_at": "2026-09-29T16:49:45Z",
+  "images": [
+    {
+      "path": "/home/analyst/cases/RHINO-HUNT/evidence/RHINOUSB.dd",
+      "basename": "RHINOUSB.dd",
+      "stem": "RHINOUSB",
+      "recommended_tool": "tsk.mmls",
+      "action": "plan_only",
+      "reason": "raw/container — open with tsk.* (avoid xmount/losetup as Triage default)",
+      "access_gated": true,
+      "media_role": "disk",
+      "image_type": "raw_or_container",
+      "mount_stem": "RHINOUSB",
+      "status": "opened",
+      "opened_tool": "tsk_fls",
+      "opened_at": "2026-09-29T16:49:45Z"
+    }
+  ],
+  "auto_mounted": [],
+  "errors": [],
+  "soft_notes": [],
+  "auto_mount_policy": "sudo_ok",
+  "note": "Auto-mount only for unambiguous E01/Ex01 under case/mnt/ when ATLAS_PLANE_A_AUTO_MOUNT allows and sudo is available (default auto). Hash preflight runs first. Non-NTFS → plan_only (soft). VMDK/ISO/raw/encrypted/non-disk remain plan-only/skip. case/mnt is a protected path segment."
+}

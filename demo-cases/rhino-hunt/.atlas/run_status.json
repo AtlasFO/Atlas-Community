@@ -1,0 +1,31 @@
+{
+  "finish_status": "incomplete_coverage",
+  "stopped_reason": "closed_out",
+  "turns": 112,
+  "duration_seconds": 3478.4,
+  "input_tokens": 10250014,
+  "output_tokens": 192236,
+  "cached_tokens": 5952000,
+  "tool_calls": 236,
+  "error_count": 0,
+  "recent_errors": [],
+  "refusal_count": 0,
+  "recent_refusals": [],
+  "info_count": 4,
+  "activity": "writing the reports",
+  "tool_started_at": "",
+  "evidence_items": {
+    "total": 4,
+    "examined": 4,
+    "blocked": 0,
+    "unseen": 0
+  },
+  "pid": 551584,
+  "started_at": "2026-09-29T16:46:16Z",
+  "updated_at": "2026-09-29T17:44:21Z",
+  "run_id": "20260929T164622Z",
+  "client_input_tokens": 10146868,
+  "client_output_tokens": 135660,
+  "client_cached_tokens": 5934400,
+  "error": ""
+}

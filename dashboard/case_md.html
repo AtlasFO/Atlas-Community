@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Atlas · Brief</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<link rel="stylesheet" href="assets/atlas.css" />
+<script src="assets/i18n.js"></script>
+<style>
+  /* View-specific layout only — all tokens/components come from atlas.css. */
+  .md-actions { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; }
+  .md-msg { font-size: var(--fs-small); margin-left: 4px; }
+  .md-msg.err { color: var(--bad); }
+  .md-msg.ok { color: var(--ok); }
+  .md-msg.dirty { color: var(--fg-2); }
+  #md-editor {
+    width: 100%; box-sizing: border-box; min-height: 60vh;
+    font-family: var(--mono); font-size: 13px; line-height: 1.6;
+    padding: 14px 16px; resize: vertical;
+  }
+  #md-editor[readonly] { color: var(--fg-1); background: var(--bg-2); }
+  #autofill-panel {
+    margin: 12px 0; padding: 12px 14px; border: 1px solid var(--border);
+    border-radius: 8px; background: var(--bg-2);
+  }
+  #autofill-panel table { width: 100%; border-collapse: collapse; font-size: var(--fs-small); }
+  #autofill-panel th, #autofill-panel td { text-align: left; padding: 4px 6px; vertical-align: top; }
+  #autofill-panel input[type="text"] { width: 100%; box-sizing: border-box; }
+  #autofill-panel textarea {
+    width: 100%; box-sizing: border-box; min-height: 96px; resize: vertical;
+    font-family: var(--mono); font-size: var(--fs-small); line-height: 1.5;
+  }
+  #autofill-panel details { margin: 6px 0; font-size: var(--fs-small); }
+  #autofill-panel details pre { white-space: pre-wrap; margin: 4px 0 0; color: var(--fg-1); }
+  .autofill-block { margin-top: 12px; }
+  .autofill-block h3 { font-size: var(--fs-body); margin: 0 0 6px; }
+  .autofill-question { color: var(--fg-1); font-style: italic; margin: 2px 0 4px; }
+  .autofill-actions { display: flex; gap: 8px; margin-top: 10px; }
+  /* Rows the AI asked a question about start unchecked (see renderAutofillPanel) —
+     without this, an unchecked row with a question buried in a text column
+     reads as "the AI didn't find this file" rather than "answer this first". */
+  tr.autofill-needs-review { background: rgba(240,179,78,.10); }
+  tr.autofill-needs-review td:first-child { border-left: 2px solid var(--warn); }
+  .autofill-review-banner {
+    color: var(--warn); font-size: var(--fs-small); margin: 0 0 8px;
+  }
+</style>
+</head>
+<body>
+<div class="page" id="app">
+  <div class="state-loading">Loading</div>
+</div>
+
+<script src="assets/shell.js"></script>
+<script>
+'use strict';
+const $app = () => document.getElementById('app');
+const esc = AtlasShell.esc;
+let savedContent = '';
+let currentCase = null;
+
+function setMsg(text, cls) {
+  const el = document.getElementById('md-msg');
+  if (el) { el.textContent = text; el.className = `md-msg ${cls || ''}`; }
+}
+
+function markDirty() {
+  const ta = document.getElementById('md-editor');
+  if (ta && ta.value !== savedContent) setMsg('Unsaved changes. Ctrl/Cmd+S to save.', 'dirty');
+  else setMsg('', '');
+}
+
+async function save() {
+  const ta = document.getElementById('md-editor');
+  setMsg('Saving…', 'dirty');
+  try {
+    await AtlasShell.apiPost('case/case_md/save', {
+      case: currentCase, content: ta.value,
+    });
+    savedContent = ta.value;
+    setMsg('Saved.', 'ok');
+  } catch (e) { setMsg(e.message, 'err'); }
+}
+
+function autofillRowHtml(r, i, prefix) {
+  return `<tr data-idx="${i}" data-prefix="${prefix}">
+    <td><input type="checkbox" class="af-include" checked></td>
+    <td>${esc(r.label)}</td>
+    <td>${esc(r.kind)}</td>
+    <td>${esc(r.path)}</td>
+    <td><input type="text" class="af-notes" value="${esc(r.notes || '')}"></td>
+  </tr>`;
+}
+
+function renderAutofillPanel(proposal) {
+  const panel = document.getElementById('autofill-panel');
+  if (!panel) return;
+  const rows = proposal.rows || [];
+  const unsure = proposal.unsure || [];
+  const pk = proposal.prior_knowledge || {};
+  if (!rows.length && !unsure.length && !proposal.investigation_requests_empty && !pk.original) {
+    panel.innerHTML = '<p class="field-hint">CASE.md already covers every evidence file found — nothing to add.</p>';
+    return;
+  }
+  const needsReviewCount = unsure.filter(u => u.question).length;
+  let html = '';
+  if (needsReviewCount) {
+    html += `<p class="autofill-review-banner">${needsReviewCount} item${needsReviewCount === 1 ? '' : 's'}
+      below ${needsReviewCount === 1 ? 'is' : 'are'} unchecked because the AI asked a question instead of
+      guessing — read the "AI:" note, fill in an answer, and check the box to include it.</p>`;
+  }
+  if (rows.length || unsure.length) {
+    html += `<table><thead><tr>
+      <th></th><th>Label</th><th>Kind</th><th>Path</th><th>Notes</th>
+    </tr></thead><tbody>`;
+    // Needs-review rows first — with rows.forEach appending after them,
+    // a long confident-classification list used to push these to the
+    // bottom of the table where they were easy to scroll past entirely.
+    unsure.forEach((u, i) => {
+      html += `<tr data-idx="${i}" data-prefix="unsure" class="${u.question ? 'autofill-needs-review' : ''}">
+        <td><input type="checkbox" class="af-include" ${u.question ? '' : 'checked'}></td>
+        <td><input type="text" class="af-label" value="${esc(u.label)}"></td>
+        <td><input type="text" class="af-kind" value="${esc(u.kind)}"></td>
+        <td>${esc(u.path)}</td>
+        <td>${u.question ? `<div class="autofill-question">AI: ${esc(u.question)}</div>` : ''}
+          <input type="text" class="af-notes" value="${esc(u.notes || '')}" placeholder="notes / answer"></td>
+      </tr>`;
+    });
+    rows.forEach((r, i) => { html += autofillRowHtml(r, i, 'row'); });
+    html += '</tbody></table>';
+  }
+  if (proposal.investigation_requests_empty) {
+    html += `<p class="field-hint" style="margin-top:8px;">
+      <label><input type="checkbox" id="af-add-request" checked>
+      Add standard Investigation Request: "${esc(proposal.standard_request)}"</label></p>`;
+  }
+  if (pk.original) html += priorKnowledgeHtml(pk);
+  html += `<div class="autofill-actions">
+    <button class="btn ok" id="af-apply-btn">Insert into editor</button>
+    <button class="btn" id="af-cancel-btn">Cancel</button>
+  </div>`;
+  panel.innerHTML = html;
+  document.getElementById('af-cancel-btn').addEventListener('click', () => { panel.innerHTML = ''; });
+  document.getElementById('af-apply-btn').addEventListener('click', () => applyAutofill(proposal));
+}
+
+// The "What you already know" block: the section as the model shaped it,
+// one bullet per line, editable, plus the sentences it moved out as
+// Investigation Requests. A rewrite that lost an indicator starts unchecked
+// — the analyst puts it back or keeps the section as written.
+function priorKnowledgeHtml(pk) {
+  const rw = pk.rewrite;
+  let html = '<div class="autofill-block"><h3>What you already know</h3>';
+  if (!rw) {
+    html += `<p class="field-hint">The connected LLM returned no usable rewrite of this section;
+      it is left as written.</p></div>`;
+    return html;
+  }
+  const dropped = rw.dropped || [];
+  if (dropped.length) {
+    html += `<p class="autofill-review-banner">The rewrite no longer names
+      ${esc(dropped.join(', '))}. Put them back below, or leave the box unchecked to keep the
+      section as written.</p>`;
+  }
+  html += `<p class="field-hint"><label><input type="checkbox" id="af-pk-include" ${dropped.length ? '' : 'checked'}>
+      Replace the section with these bullets (one per line, edit freely; comment blocks in the
+      section are kept)</label></p>
+    <textarea id="af-pk-bullets" spellcheck="false">${esc((rw.knowledge || []).join('\n'))}</textarea>`;
+  if ((rw.requests || []).length) {
+    html += `<p class="field-hint" style="margin-top:8px;">These sentences ask for work and belong
+      under Investigation Requests; they are appended there (one per line, edit freely):</p>
+      <textarea id="af-pk-requests" spellcheck="false">${esc(rw.requests.join('\n'))}</textarea>`;
+  }
+  html += `<details><summary>Section as written</summary><pre>${esc(pk.original)}</pre></details></div>`;
+  return html;
+}
+
+function priorKnowledgeSelection() {
+  const include = document.getElementById('af-pk-include');
+  if (!include || !include.checked) return null;
+  const lines = (id) => {
+    const el = document.getElementById(id);
+    return el ? el.value.split('\n').map(s => s.trim()).filter(Boolean) : [];
+  };
+  const bullets = lines('af-pk-bullets');
+  if (!bullets.length) return null;
+  return { bullets, requests: lines('af-pk-requests') };
+}
+
+async function applyAutofill(proposal) {
+  const panel = document.getElementById('autofill-panel');
+  const finalRows = [];
+  panel.querySelectorAll('tr[data-idx]').forEach((tr) => {
+    if (!tr.querySelector('.af-include').checked) return;
+    const idx = Number(tr.dataset.idx);
+    const notes = tr.querySelector('.af-notes').value;
+    if (tr.dataset.prefix === 'row') {
+      const r = proposal.rows[idx];
+      finalRows.push({ label: r.label, kind: r.kind, path: r.path, notes });
+    } else {
+      const u = proposal.unsure[idx];
+      finalRows.push({
+        label: tr.querySelector('.af-label').value,
+        kind: tr.querySelector('.af-kind').value,
+        path: u.path, notes,
+      });
+    }
+  });
+  const addRequest = document.getElementById('af-add-request');
+  setMsg('Applying…', 'dirty');
+  try {
+    const result = await AtlasShell.apiPost('case/case_md/autofill_preview', {
+      case: currentCase, rows: finalRows,
+      add_standard_request: addRequest ? addRequest.checked : false,
+      prior_knowledge: priorKnowledgeSelection(),
+    });
+    const ta = document.getElementById('md-editor');
+    ta.value = result.content;
+    markDirty();
+    panel.innerHTML = '';
+    setMsg('Review the changes below, then Save.', 'dirty');
+  } catch (e) { setMsg(e.message, 'err'); }
+}
+
+async function runAutofill() {
+  const panel = document.getElementById('autofill-panel');
+  // The model's answer has no bound the page could know (a thinking model
+  // takes minutes; the client behind the endpoint retries for up to half an
+  // hour), so this request carries no timeout — only a Cancel button.
+  const control = new AbortController();
+  panel.innerHTML = `<div class="state-loading">Scanning evidence and asking the connected LLM…
+    a thinking model can take a few minutes.
+    <button class="btn" id="af-abort-btn" style="margin-left:8px">Cancel</button></div>`;
+  document.getElementById('af-abort-btn').addEventListener('click', () => control.abort());
+  try {
+    const proposal = await AtlasShell.apiPost(
+      'case/case_md/autofill_propose', { case: currentCase }, { signal: control.signal });
+    renderAutofillPanel(proposal);
+  } catch (e) {
+    panel.innerHTML = e.cancelled ? '' : `<div class="state-error">${esc(e.message)}</div>`;
+  }
+}
+
+function render(cd, data, canEdit) {
+  savedContent = data.content || '';
+  $app().innerHTML = `
+    <h1 class="page-title">Brief</h1>
+    <p class="page-sub">${data.exists
+      ? 'The investigation brief for this case (CASE.md) — evidence paths, host list, and Investigation Requests.'
+      : 'This case has no brief (CASE.md) yet.'}</p>
+    <div class="md-actions">
+      ${canEdit ? `<button class="btn ok" id="md-save-btn" title="Writes the editor content to CASE.md. Shortcut: Ctrl/Cmd+S">Save</button>` : ''}
+      ${canEdit ? `<button class="btn" id="md-autofill-btn" title="Scans evidence/ for files not yet in the Evidence Links table, classifies them automatically where it can, and asks the connected LLM about anything ambiguous. Also asks it to shape 'What you already know' into one bullet per fact, moving any request written there to Investigation Requests, without dropping a fact. Opens a review list below — nothing is written until you apply it here and then click Save.">AI Autofill</button>` : ''}
+      <span class="md-msg" id="md-msg"></span>
+    </div>
+    ${canEdit ? '<p class="field-hint" style="margin:-4px 0 10px;">Shortcut: Ctrl/Cmd+S saves from anywhere in the editor.</p>' : ''}
+    ${canEdit ? '<div id="autofill-panel"></div>' : ''}
+    <textarea id="md-editor" spellcheck="false" ${canEdit ? '' : 'readonly'}>${esc(savedContent)}</textarea>
+    ${canEdit ? '' : '<p class="field-hint" style="margin-top:6px;">Viewer role — read only. Ask an analyst or admin to make changes.</p>'}`;
+  const ta = document.getElementById('md-editor');
+  if (canEdit) {
+    ta.addEventListener('input', markDirty);
+    document.getElementById('md-save-btn').addEventListener('click', save);
+    document.getElementById('md-autofill-btn').addEventListener('click', runAutofill);
+    // Ctrl/Cmd+S saves without leaving the textarea.
+    ta.addEventListener('keydown', (ev) => {
+      if ((ev.ctrlKey || ev.metaKey) && ev.key === 's') { ev.preventDefault(); save(); }
+    });
+  }
+}
+
+async function refresh() {
+  const cd = AtlasShell.activeCase();
+  currentCase = cd;
+  if (!cd) {
+    $app().innerHTML = `<h1 class="page-title">Brief</h1>
+      <div class="state-empty">Select a case to view its CASE.md.</div>`;
+    return;
+  }
+  $app().innerHTML = '<div class="state-loading">Loading</div>';
+  try {
+    const data = await AtlasShell.api('case/case_md', { case: cd });
+    if (AtlasShell.activeCase() !== cd) return;
+    const canEdit = AtlasShell.roleAtLeast('analyst');
+    render(cd, data, canEdit);
+  } catch (e) {
+    if (AtlasShell.activeCase() !== cd) return;
+    $app().innerHTML = `<div class="state-error">Could not load CASE.md.\n${esc(e.message)}</div>`;
+  }
+}
+
+AtlasShell.init({ page: 'casemd', onCase: refresh });
+</script>
+</body>
+</html>

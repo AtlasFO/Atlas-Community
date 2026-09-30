@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # Lint and test are independent jobs on purpose: as sequential steps in one
+  # job, a failed step aborts the rest, so a single lint nit (an undefined
+  # name) would hide the entire test result. Separate jobs report
+  # independently, so a lint failure never masks test health and vice versa.
+  # Lint needs no Python-version matrix.
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Lint (errors only)
+        run: |
+          python -m pip install --upgrade pip
+          pip install ruff
+          ruff check --select E9,F63,F7,F82 --output-format=github .
+
+  # Public-boundary leak gate: the knowledge-graph trees published to this
+  # (public) remote must be generalized — no case-specific identifiers, IOCs,
+  # or PII. Scoped to brain/wiki + brain/indexes on purpose: public case
+  # evidence legitimately contains IOCs and is excluded elsewhere. Mirrors the
+  # local pre-push guard so a leak is caught even if the hook was bypassed.
+  leak-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        # core.brain's package __init__ imports core.brain.store ->
+        # frontmatter -> yaml transitively, even though identifiers.py
+        # itself only needs the stdlib. Installing just the one pinned
+        # dependency (matching requirements.txt's constraint) rather than
+        # the full requirements.txt keeps this job fast — it doesn't need
+        # yara-python/flare-capa/volatility3 and the rest.
+        run: pip install "pyyaml>=6.0"
+      - name: Scan brain/wiki + brain/indexes for case-specific identifiers
+        run: |
+          files=$(find brain/wiki brain/indexes -type f -name '*.md' 2>/dev/null || true)
+          if [ -z "$files" ]; then
+            echo "no knowledge-graph files to scan"; exit 0
+          fi
+          python -m core.brain.identifiers --scan $files
+
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      # Hayabusa (tools/hayabusa.py) is provisioned by install.sh, not by
+      # CI — tests that need its binary/rules must skip when it is absent,
+      # not fail. See tests/tools/test_jobs.py.
+      - name: Run tests
+        run: python -m pytest -q

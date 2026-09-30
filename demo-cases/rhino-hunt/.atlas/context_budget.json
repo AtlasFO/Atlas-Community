@@ -1,0 +1,18 @@
+{
+  "schema_version": "1.0",
+  "updated_at": "2026-09-29T17:40:45Z",
+  "window_tokens": 262144,
+  "reserved_output_tokens": 4096,
+  "reserved_reasoning_tokens": 2048,
+  "fixed_context_tokens": 16216,
+  "conversation_tokens": 60033,
+  "conversation_included": true,
+  "available_for_evidence_tokens": 53925,
+  "available_for_tool_output_tokens": 98863,
+  "available_for_reasoning_tokens": 29011,
+  "detail_policy": "rich",
+  "disk_first": false,
+  "max_bulk_dir_files": 8,
+  "model": "Qwen3.8-27B-FP8-Preview",
+  "provider": "llmhub"
+}

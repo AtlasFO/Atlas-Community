@@ -1,0 +1,58 @@
+{
+ "stack": "openrouter",
+ "model": "example-model",
+ "scenario": "ok-details-without-text",
+ "source": "hand-written from the documented OpenRouter response shape for a Gemini model",
+ "status": 200,
+ "request": {
+  "model": "example-model",
+  "messages": [
+   {
+    "role": "user",
+    "content": "Reply with the single word: ok"
+   }
+  ],
+  "max_tokens": 512
+ },
+ "response": {
+  "id": "gen-test-0029",
+  "object": "chat.completion",
+  "created": 1924992000,
+  "model": "example-model",
+  "choices": [
+   {
+    "index": 0,
+    "finish_reason": "stop",
+    "message": {
+     "role": "assistant",
+     "content": "ok",
+     "reasoning": null,
+     "reasoning_details": [
+      {
+       "type": "reasoning.text",
+       "signature": "AAAA",
+       "format": "google-gemini-v1",
+       "index": 0
+      }
+     ]
+    }
+   }
+  ],
+  "usage": {
+   "prompt_tokens": 10,
+   "completion_tokens": 35,
+   "completion_tokens_details": {
+    "reasoning_tokens": 30
+   }
+  }
+ },
+ "expect": {
+  "content": "ok",
+  "reasoning_empty": true,
+  "reasoning_tokens": 30,
+  "tool_calls": 0,
+  "finish_reason": "stop",
+  "starved": false,
+  "thinking_observed": true
+ }
+}

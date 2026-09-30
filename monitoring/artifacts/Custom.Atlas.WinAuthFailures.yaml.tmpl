@@ -1,0 +1,28 @@
+name: Custom.Atlas.WinAuthFailures
+description: |
+  Atlas-managed (Windows): stream failed logons from Security Event ID 4625 via
+  watch_evtx, emitting the target account and source network address. Feeds the
+  Python-side Behavior.AuthBurst rule (N failures per source IP within a window
+  → password spray / brute force).
+
+  Requires the "Audit Logon" failure auditing policy (on by default for member
+  servers/DCs; may need enabling on workstations). No Sysmon dependency.
+
+type: CLIENT_EVENT
+
+parameters:
+  - name: SecurityChannel
+    description: Windows Security event-log channel.
+    default: Security
+
+sources:
+  - query: |
+      SELECT
+        System.TimeCreated.SystemTime AS timestamp_utc,
+        EventData.TargetUserName AS user,
+        EventData.IpAddress AS source_ip,
+        EventData.WorkstationName AS workstation,
+        EventData.LogonType AS logon_type
+      FROM watch_evtx(filename=SecurityChannel, accessor="event_log")
+      WHERE System.EventID.Value = 4625
+        AND source_ip != "" AND source_ip != "-"

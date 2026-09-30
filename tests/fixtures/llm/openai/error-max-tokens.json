@@ -1,0 +1,24 @@
+{
+ "stack": "openai",
+ "model": "example-model",
+ "scenario": "error-max-tokens",
+ "source": "hand-written in the OpenAI error format, inside a gateway's detail text",
+ "status": 400,
+ "request": {
+  "model": "example-model",
+  "messages": [
+   {
+    "role": "user",
+    "content": "Reply with the single word: ok"
+   }
+  ],
+  "max_tokens": 512
+ },
+ "response": {
+  "detail": "Error: 400 - Bad Request - {\"error\": {\"message\": \"Unsupported parameter: 'max_tokens'. Use 'max_completion_tokens' instead.\", \"type\": \"invalid_request_error\", \"param\": \"max_tokens\", \"code\": \"unsupported_parameter\"}}"
+ },
+ "expect": {
+  "error_contains": "max_completion_tokens",
+  "accepted_values": null
+ }
+}

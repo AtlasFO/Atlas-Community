@@ -1,0 +1,447 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Atlas · Brain</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<link rel="stylesheet" href="assets/atlas.css" />
+<script src="assets/i18n.js"></script>
+<style>
+  .tabs { display: flex; gap: 2px; margin-bottom: 18px; border-bottom: 1px solid var(--border); }
+  .tabs button {
+    font: inherit; font-size: 13px; padding: 8px 16px 10px; cursor: pointer;
+    background: transparent; border: 0; color: var(--fg-1);
+    border-bottom: 2px solid transparent;
+  }
+  .tabs button:hover { color: var(--fg-0); }
+  .tabs button.active { color: var(--fg-0); font-weight: 600; border-bottom-color: var(--accent); }
+  .tabs .count-pill { margin-left: 6px; }
+  .tabs .right { margin-left: auto; align-self: center; padding-bottom: 6px; }
+
+  .secret-row {
+    display: flex; align-items: center; gap: 10px; margin-bottom: 16px;
+    font-size: var(--fs-small); color: var(--fg-1);
+  }
+  .secret-row input { width: 240px; }
+
+  /* Inbox cards */
+  .cand.done { opacity: .45; }
+  .cand { margin-bottom: 14px; }
+  .cand .title { font-weight: 650; font-size: 14.5px; margin-bottom: 6px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 12px; }
+  .explain {
+    display: grid; gap: 8px; margin: 0 0 12px;
+    background: var(--bg-0); border: 1px solid var(--border);
+    border-radius: var(--radius-sm); padding: 11px 13px;
+  }
+  .explain .row { display: grid; grid-template-columns: 96px 1fr; gap: 8px; }
+  .explain .lbl {
+    font-size: 10px; text-transform: uppercase; letter-spacing: .05em;
+    color: var(--fg-2); padding-top: 2px;
+  }
+  .explain .val { font-size: 12.5px; }
+  .explain .val.dest { font-family: var(--mono); color: var(--accent); }
+  textarea.edit {
+    width: 100%; min-height: 110px; resize: vertical;
+    font: 12px/1.5 var(--mono);
+  }
+  .actions { display: flex; gap: 8px; margin-top: 10px; align-items: center; flex-wrap: wrap; }
+  .result { font-size: 12px; color: var(--fg-1); }
+  .result.ok { color: var(--ok); }
+  .result.err { color: var(--bad); }
+  .reject-row { display: none; gap: 8px; margin-top: 8px; width: 100%; }
+  .reject-row.open { display: flex; }
+  .reject-row input { flex: 1; }
+  .group-title {
+    margin: 20px 0 10px; font-size: var(--fs-label); font-weight: 650;
+    color: var(--fg-2); text-transform: uppercase; letter-spacing: .07em;
+  }
+
+  /* Knowledge browser */
+  .k-layout { display: grid; grid-template-columns: 320px 1fr; gap: 16px; }
+  @media (max-width: 900px) { .k-layout { grid-template-columns: 1fr; } }
+  .k-list { max-height: 70vh; overflow: auto; }
+  .k-item {
+    padding: 9px 12px; border-bottom: 1px solid var(--border); cursor: pointer;
+    border-left: 2px solid transparent;
+  }
+  .k-item:hover { background: var(--bg-3); }
+  .k-item.active { border-left-color: var(--accent); background: var(--bg-3); }
+  .k-item .kt { font-size: 13px; font-weight: 600; }
+  .k-item .km { font-size: 11px; color: var(--fg-2); margin-top: 2px; }
+  .k-detail .note-body {
+    font-size: 13.5px; line-height: 1.65; margin-top: 12px;
+  }
+  .k-detail .note-body pre {
+    background: var(--bg-0); border: 1px solid var(--border);
+    border-radius: var(--radius-sm); padding: 8px 10px; overflow: auto; font-size: 12px;
+  }
+  .k-detail .note-body h2, .k-detail .note-body h3 { margin: 14px 0 6px; font-size: 14px; }
+  .k-detail .note-body ul { padding-left: 20px; }
+</style>
+</head>
+<body>
+<div class="page" id="app">
+  <h1 class="page-title">Brain</h1>
+  <p class="page-sub">What Atlas has learned across investigations — pending lessons to review, and the durable knowledge it already uses.</p>
+
+  <div class="tabs">
+    <button data-tab="inbox" class="active">Inbox<span class="pill info count-pill" id="inbox-count" hidden></span></button>
+    <button data-tab="knowledge">Knowledge<span class="pill neutral count-pill" id="knowledge-count" hidden></span></button>
+    <button data-tab="impact">Case impact</button>
+    <span class="right"><a href="brain_globe.html" class="small">Brain Earth (3D) ↗</a></span>
+  </div>
+
+  <section id="tab-inbox">
+    <div class="secret-row">
+      <span>Approving stores a lesson permanently — requires the operator secret:</span>
+      <input id="secret" type="password" placeholder="approval secret" autocomplete="off"
+             title="0600 secret at ~/.config/atlas/dashboard_approval_secret" />
+    </div>
+    <div id="inbox-list"><div class="state-loading">Loading</div></div>
+  </section>
+
+  <section id="tab-knowledge" hidden>
+    <div class="k-layout">
+      <div>
+        <input type="search" id="k-search" placeholder="search knowledge…" style="width:100%;margin-bottom:10px;" />
+        <div class="card k-list" id="k-list" style="padding:0;"><div class="state-loading">Loading</div></div>
+      </div>
+      <div class="card k-detail" id="k-detail">
+        <div class="state-empty">Select an entry to read it.</div>
+      </div>
+    </div>
+  </section>
+
+  <section id="tab-impact" hidden>
+    <div class="card" id="impact-card"><div class="state-loading">Loading</div></div>
+  </section>
+</div>
+
+<script src="assets/shell.js"></script>
+<script>
+'use strict';
+const esc = AtlasShell.esc;
+const $ = (s) => document.querySelector(s);
+
+/* ── tabs ─────────────────────────────────────────────────────────────────── */
+document.querySelectorAll('.tabs button[data-tab]').forEach(b =>
+  b.addEventListener('click', () => {
+    document.querySelectorAll('.tabs button[data-tab]').forEach(x =>
+      x.classList.toggle('active', x === b));
+    for (const id of ['inbox', 'knowledge', 'impact']) {
+      document.getElementById(`tab-${id}`).hidden = id !== b.dataset.tab;
+    }
+    if (b.dataset.tab === 'knowledge') Knowledge.load();
+    if (b.dataset.tab === 'impact') Impact.load();
+  }));
+
+/* ── Inbox (pending review) — same security gates as before:
+      secret header + single-use nonce per action. ─────────────────────────── */
+const Inbox = {
+  secret() { return $('#secret').value.trim(); },
+
+  async nonce() {
+    const r = await fetch('/_dashboard/api/approval/nonce', {
+      cache: 'no-store',
+      headers: { 'X-Atlas-Approval-Secret': this.secret() },
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+    return d.nonce;
+  },
+
+  async load() {
+    let data;
+    try {
+      data = await AtlasShell.api('brain/candidates');
+    } catch (e) {
+      $('#inbox-list').innerHTML = `<div class="state-error">Failed to load candidates.\n${esc(e.message)}</div>`;
+      return;
+    }
+    const items = data.candidates || [];
+    const cnt = $('#inbox-count');
+    cnt.hidden = items.length === 0;
+    cnt.textContent = items.length;
+    if (!items.length) {
+      $('#inbox-list').innerHTML = `<div class="state-empty">Nothing waiting for review.
+        <div class="hint">After a finished <code>atlas run</code>, background learning may stage a few high-quality lessons here.</div></div>`;
+      return;
+    }
+    const groups = {};
+    for (const it of items) {
+      const key = it.knowledge_kind || it.candidate_type || 'other';
+      (groups[key] ||= []).push(it);
+    }
+    $('#inbox-list').innerHTML = Object.keys(groups).sort().map(type => `
+      <div class="group-title">${esc(type)} (${groups[type].length})</div>
+      ${groups[type].map(it => this.card(it)).join('')}
+    `).join('');
+    $('#inbox-list').querySelectorAll('.approve').forEach(b =>
+      b.addEventListener('click', ev => this.act(ev, 'approve')));
+    $('#inbox-list').querySelectorAll('.reject-open').forEach(b =>
+      b.addEventListener('click', ev => {
+        ev.target.closest('.cand').querySelector('.reject-row').classList.toggle('open');
+      }));
+    $('#inbox-list').querySelectorAll('.reject-confirm').forEach(b =>
+      b.addEventListener('click', ev => this.act(ev, 'reject')));
+    $('#inbox-list').querySelectorAll('.save').forEach(b =>
+      b.addEventListener('click', ev => this.save(ev)));
+  },
+
+  card(it) {
+    const chips = [
+      it.knowledge_kind && `<span class="pill partial">${esc(it.knowledge_kind)}</span>`,
+      it.candidate_type && `<span class="pill neutral">${esc(it.candidate_type)}</span>`,
+      it.confidence && `<span class="pill neutral">${esc(it.confidence)}</span>`,
+      it.case && `<span class="pill info">from ${esc(it.case)}</span>`,
+      it.likely_case_specific && `<span class="pill warn">case-specific?</span>`,
+      it.sensitive && `<span class="pill bad">sensitive</span>`,
+      it.contains_answer_key && `<span class="pill bad">answer-key</span>`,
+    ].filter(Boolean).join('');
+    const sources = (it.origin_sources || []).map(s => esc(s)).join(', ') || '—';
+    return `
+    <div class="card cand" data-name="${esc(it.name)}">
+      <div class="title">${esc(it.title)}</div>
+      <div class="chips">${chips}</div>
+      <div class="explain">
+        <div class="row"><div class="lbl">Why exists</div><div class="val">${esc(it.why_exists || '—')}</div></div>
+        <div class="row"><div class="lbl">Why useful</div><div class="val">${esc(it.why_reusable || '—')}</div></div>
+        <div class="row"><div class="lbl">Evidence</div><div class="val">${esc(it.supporting_evidence || '—')}</div></div>
+        <div class="row"><div class="lbl">Came from</div><div class="val">${sources}</div></div>
+        <div class="row"><div class="lbl">Stores as</div><div class="val dest">${esc(it.destination || '')}</div></div>
+      </div>
+      <label class="card-h">Proposed Brain entry</label>
+      <textarea class="edit">${esc(it.proposed_entry || '')}</textarea>
+      <div class="actions">
+        <button class="btn ok approve">Approve → Brain</button>
+        <button class="btn save">Save edit</button>
+        <button class="btn bad reject-open">Reject…</button>
+        <span class="result"></span>
+      </div>
+      <div class="reject-row">
+        <input type="text" class="reject-reason" placeholder="Rejection reason (required — audit record)" />
+        <button class="btn bad reject-confirm">Confirm reject</button>
+      </div>
+    </div>`;
+  },
+
+  async save(ev) {
+    const card = ev.target.closest('.cand');
+    const result = card.querySelector('.result');
+    if (!this.secret()) {
+      result.className = 'result err';
+      result.textContent = 'Paste the approval secret first.';
+      return;
+    }
+    result.textContent = 'saving…';
+    try {
+      const nonce = await this.nonce();
+      const r = await fetch('/_dashboard/api/brain/edit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json',
+                   'X-Atlas-Approval-Secret': this.secret() },
+        body: JSON.stringify({ candidate: card.dataset.name,
+                               proposed_entry: card.querySelector('textarea').value,
+                               nonce }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || d.success === false) throw new Error(d.error || `HTTP ${r.status}`);
+      result.className = 'result ok';
+      result.textContent = 'saved';
+    } catch (e) {
+      result.className = 'result err';
+      result.textContent = e.message;
+    }
+  },
+
+  async act(ev, decision) {
+    const card = ev.target.closest('.cand');
+    const name = card.dataset.name;
+    const result = card.querySelector('.result');
+    if (!this.secret()) {
+      result.className = 'result err';
+      result.textContent = 'Paste the approval secret first.';
+      return;
+    }
+    let reason = '';
+    if (decision === 'reject') {
+      reason = (card.querySelector('.reject-reason').value || '').trim();
+      if (!reason) {
+        result.className = 'result err';
+        result.textContent = 'A rejection reason is required (audit record).';
+        return;
+      }
+    }
+    if (decision === 'approve') {
+      // Persist any inline edit first so what you read is what gets stored.
+      try {
+        const nonce = await this.nonce();
+        const er = await fetch('/_dashboard/api/brain/edit', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json',
+                     'X-Atlas-Approval-Secret': this.secret() },
+          body: JSON.stringify({ candidate: name,
+                                 proposed_entry: card.querySelector('textarea').value,
+                                 nonce }),
+        });
+        const ed = await er.json().catch(() => ({}));
+        if (!er.ok || ed.success === false) throw new Error(ed.error || 'edit failed');
+      } catch (e) {
+        result.className = 'result err';
+        result.textContent = e.message;
+        return;
+      }
+    }
+    card.querySelectorAll('button').forEach(b => b.disabled = true);
+    result.className = 'result';
+    result.textContent = '…';
+    try {
+      const nonce = await this.nonce();
+      const r = await fetch('/_dashboard/api/brain/review', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json',
+                   'X-Atlas-Approval-Secret': this.secret() },
+        body: JSON.stringify({ candidate: name, decision, reason, nonce }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || d.success === false) throw new Error(d.error || `HTTP ${r.status}`);
+      card.classList.add('done');
+      result.className = 'result ok';
+      result.textContent = d.decision === 'approved'
+        ? `approved → ${d.destination}` : 'rejected & archived';
+      const cnt = $('#inbox-count');
+      const n = parseInt(cnt.textContent, 10);
+      if (!isNaN(n) && n > 0) { cnt.textContent = n - 1; cnt.hidden = n - 1 === 0; }
+    } catch (e) {
+      card.querySelectorAll('button').forEach(b => b.disabled = false);
+      result.className = 'result err';
+      result.textContent = e.message;
+    }
+  },
+};
+
+/* ── Knowledge (durable notes; confidential excluded server-side) ─────────── */
+const Knowledge = {
+  notes: [],
+  loaded: false,
+  filter: '',
+
+  async load() {
+    if (this.loaded) return;
+    let data;
+    try {
+      data = await AtlasShell.api('brain/knowledge');
+    } catch (e) {
+      $('#k-list').innerHTML = `<div class="state-error">Failed to load knowledge.\n${esc(e.message)}</div>`;
+      return;
+    }
+    this.notes = data.notes || [];
+    this.loaded = true;
+    const cnt = $('#knowledge-count');
+    cnt.hidden = this.notes.length === 0;
+    cnt.textContent = this.notes.length;
+    this.renderList();
+  },
+
+  renderList() {
+    const q = this.filter.trim().toLowerCase();
+    const notes = q
+      ? this.notes.filter(n =>
+          `${n.title} ${n.type} ${(n.tags || []).join(' ')} ${n.body}`
+            .toLowerCase().includes(q))
+      : this.notes;
+    if (!notes.length) {
+      $('#k-list').innerHTML = `<div class="state-empty">${
+        this.notes.length ? 'No matches.' : 'The Brain has no durable knowledge yet.'}</div>`;
+      return;
+    }
+    $('#k-list').innerHTML = notes.map((n, i) => `
+      <div class="k-item" data-i="${this.notes.indexOf(n)}">
+        <div class="kt">${esc(n.title)}</div>
+        <div class="km">${esc(n.type)}${n.case ? ` · from ${esc(n.case)}` : ''}${n.updated ? ` · ${esc(n.updated).slice(0, 10)}` : ''}</div>
+      </div>`).join('');
+    $('#k-list').querySelectorAll('.k-item').forEach(el =>
+      el.addEventListener('click', () => {
+        $('#k-list').querySelectorAll('.k-item').forEach(x => x.classList.remove('active'));
+        el.classList.add('active');
+        this.show(this.notes[parseInt(el.dataset.i, 10)]);
+      }));
+  },
+
+  show(n) {
+    $('#k-detail').innerHTML = `
+      <div class="card-h">${esc(n.type)}
+        <span class="h-trail mono">${esc(n.path)}</span></div>
+      <h2 style="margin:4px 0 2px;font-size:17px;">${esc(n.title)}</h2>
+      <div class="chips" style="margin:8px 0 0;">
+        ${(n.tags || []).map(t => `<span class="pill neutral">${esc(t)}</span>`).join('')}
+        ${n.case ? `<span class="pill info">learned from ${esc(n.case)}</span>` : ''}
+      </div>
+      <div class="note-body">${AtlasShell.renderMarkdown(n.body || '')}</div>`;
+  },
+};
+let kTimer = null;
+$('#k-search').addEventListener('input', (ev) => {
+  clearTimeout(kTimer);
+  kTimer = setTimeout(() => {
+    Knowledge.filter = ev.target.value;
+    Knowledge.renderList();
+  }, 150);
+});
+
+/* ── Case impact: what background learning did for the ACTIVE case ────────── */
+const Impact = {
+  async load() {
+    const cd = AtlasShell.activeCase();
+    const host = $('#impact-card');
+    if (!cd) {
+      host.innerHTML = '<div class="state-empty">Select a case to see how the Brain interacted with it.</div>';
+      return;
+    }
+    let d;
+    try {
+      d = await AtlasShell.api('brain/learn_status', { case: cd });
+    } catch (e) {
+      host.innerHTML = `<div class="state-error">${esc(e.message)}</div>`;
+      return;
+    }
+    if (!d || !d.status) {
+      host.innerHTML = `<div class="state-empty">No background learning has run for <strong>${esc(cd)}</strong> yet.
+        <div class="hint">Learning starts automatically after a completed <code>atlas run</code>.</div></div>`;
+      return;
+    }
+    const dropped = d.dropped && Object.keys(d.dropped).length
+      ? Object.entries(d.dropped).map(([k, v]) => `${esc(k)}: ${esc(v)}`).join(' · ')
+      : '—';
+    host.innerHTML = `
+      <div class="card-h">Background learning — ${esc(d.case_id || cd)}</div>
+      <div class="kv">
+        <span class="k">Status</span>
+        <span class="v"><span class="pill ${d.status === 'completed' ? 'ok' : d.status === 'failed' ? 'bad' : 'info'}">${esc(d.status)}</span></span>
+        <span class="k">Lessons considered</span><span class="v">${esc(d.lessons_considered != null ? d.lessons_considered : '—')}</span>
+        <span class="k">Candidates staged</span><span class="v">${esc(d.candidates != null ? d.candidates : '—')}</span>
+        <span class="k">Filtered out</span><span class="v">${dropped}</span>
+        <span class="k">Started</span><span class="v">${esc(d.started_at || '—')}</span>
+        <span class="k">Finished</span><span class="v">${esc(d.finished_at || '—')}</span>
+        ${d.error ? `<span class="k">Error</span><span class="v" style="color:var(--bad)">${esc(d.error)}</span>` : ''}
+      </div>
+      ${d.candidates > 0 ? '<hr class="divider"><div class="small muted">Staged lessons wait in the <strong>Inbox</strong> tab until you approve or reject them — nothing enters the Brain without review.</div>' : ''}`;
+  },
+};
+
+/* ── boot ─────────────────────────────────────────────────────────────────── */
+// Approval secret: sessionStorage (tab-scoped) — deliberately NOT localStorage.
+$('#secret').value = sessionStorage.getItem('atlas-approval-secret') || '';
+$('#secret').addEventListener('change', () =>
+  sessionStorage.setItem('atlas-approval-secret', $('#secret').value.trim()));
+
+AtlasShell.init({
+  page: 'brain',
+  requiresCase: false,
+  onCase: () => { Impact.load(); },
+});
+Inbox.load();
+</script>
+</body>
+</html>
