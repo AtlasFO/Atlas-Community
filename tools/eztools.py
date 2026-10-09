@@ -944,6 +944,34 @@ def _prefetch_files(path: str) -> list[str]:
     return out
 
 
+def _prefetch_row(pf, f: str) -> dict:
+    """One prefetch file's row in PECmd's shape, from an open pyscca file."""
+    runs: list[str] = []
+    for i in range(_PREFETCH_RUN_SLOTS):
+        try:
+            t = pf.get_last_run_time(i)
+        except Exception:  # noqa: BLE001 - no more run-time slots
+            break
+        if t and getattr(t, "year", 1601) > 1601:
+            runs.append(t.strftime("%Y-%m-%d %H:%M:%S"))
+    try:
+        loaded = [pf.get_filename(i) for i in range(int(pf.number_of_filenames))]
+    except Exception:  # noqa: BLE001
+        loaded = []
+    row = {
+        "SourceFilename": f,
+        "ExecutableName": getattr(pf, "executable_filename", "") or "",
+        "Hash": format(int(getattr(pf, "prefetch_hash", 0) or 0), "X"),
+        "Version": getattr(pf, "format_version", "") or "",
+        "RunCount": getattr(pf, "run_count", "") or "",
+        "LastRun": runs[0] if runs else "",
+    }
+    for i in range(_PREFETCH_RUN_SLOTS - 1):
+        row[f"PreviousRun{i}"] = runs[i + 1] if len(runs) > i + 1 else ""
+    row["FilesLoaded"] = ", ".join(loaded)
+    return row
+
+
 def _prefetch_fallback(prefetch_path: str, output_dir: str, output_file: str) -> dict:
     """Parse prefetch files with libscca into a CSV shaped like PECmd's
     (executable, hash, run count, last and previous run times, files loaded)."""
@@ -963,35 +991,12 @@ def _prefetch_fallback(prefetch_path: str, output_dir: str, output_file: str) ->
     rows: list[dict] = []
     failed: list[str] = []
     for f in files:
+        # One file libscca cannot read (a property of a corrupt file raises)
+        # is named in the note; the batch goes on.
         try:
-            pf = pyscca.open(f)
+            rows.append(_prefetch_row(pyscca.open(f), f))
         except Exception as exc:  # noqa: BLE001
             failed.append(f"{os.path.basename(f)}: {exc}")
-            continue
-        runs: list[str] = []
-        for i in range(_PREFETCH_RUN_SLOTS):
-            try:
-                t = pf.get_last_run_time(i)
-            except Exception:  # noqa: BLE001
-                break
-            if t and getattr(t, "year", 1601) > 1601:
-                runs.append(t.strftime("%Y-%m-%d %H:%M:%S"))
-        try:
-            loaded = [pf.get_filename(i) for i in range(int(pf.number_of_filenames))]
-        except Exception:  # noqa: BLE001
-            loaded = []
-        row = {
-            "SourceFilename": f,
-            "ExecutableName": getattr(pf, "executable_filename", "") or "",
-            "Hash": format(int(getattr(pf, "prefetch_hash", 0) or 0), "X"),
-            "Version": getattr(pf, "format_version", "") or "",
-            "RunCount": getattr(pf, "run_count", "") or "",
-            "LastRun": runs[0] if runs else "",
-        }
-        for i in range(_PREFETCH_RUN_SLOTS - 1):
-            row[f"PreviousRun{i}"] = runs[i + 1] if len(runs) > i + 1 else ""
-        row["FilesLoaded"] = ", ".join(loaded)
-        rows.append(row)
     out_path = os.path.join(output_dir, output_file)
     if rows:
         with open(out_path, "w", newline="", encoding="utf-8") as fh:

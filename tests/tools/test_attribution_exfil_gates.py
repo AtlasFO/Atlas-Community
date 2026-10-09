@@ -240,3 +240,34 @@ class TestQuotedThingNames:
     def test_a_quoted_person_is_still_an_accusation(self):
         out = nag.check(_ctx('The user "Jane Roe" exfiltrated the classified data.'))
         assert out is not None and out["gate"] == "named_actor_attribution_grounding"
+
+    def test_an_account_operated_by_a_quoted_job_binds_no_person(self):
+        for quoted in ('"Nightly Sync"', "'Nightly Sync'"):
+            desc = f"The account svc_backup is operated by the job {quoted}, which runs at 02:00."
+            assert pag.check(_ctx(desc)) is None, quoted
+
+    def test_a_single_quoted_job_title_is_not_a_person(self):
+        desc = ("The sync job 'Blue Harbor' mapped the Desktop, and the planning files "
+                "were uploaded to the bucket.")
+        assert nag.check(_ctx(desc)) is None
+
+    def test_a_quoted_name_after_a_people_noun_or_a_cue_is_still_an_accusation(self):
+        """The words between a thing-noun and a quotation may not hold a
+        noun for a person or an attribution cue: then the quotation names
+        whom the finding accuses, not the thing."""
+        for desc in (
+                'The sync job ran, and the user "Jane Roe" exfiltrated the classified data.',
+                "The sync job ran, and the user 'Jane Roe' exfiltrated the classified data.",
+                'The task ran as "Jane Doe" and Jane Doe uploaded the planning files to the bucket.',
+                'The scheduled task created by "Jane Doe" uploaded the planning files; '
+                'Jane Doe staged them.',
+                'The file of subject "Jane Doe" was uploaded by Jane Doe to the bucket.'):
+            out = nag.check(_ctx(desc))
+            assert out is not None and out["gate"] == "named_actor_attribution_grounding", desc
+        for desc in (
+                'The account svc_backup of the task owner "Jane Doe" is operated by Jane Doe.',
+                'The account svc_backup is operated by the job created by "Jane Doe".',
+                "The account svc_backup is operated by the job's owner 'Jane Doe'.",
+                'The account svc_backup is operated by "Jane Doe".'):
+            out = pag.check(_ctx(desc))
+            assert out is not None and out["gate"] == "principal_attribution_grounding", desc

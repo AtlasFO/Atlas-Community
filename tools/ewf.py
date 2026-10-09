@@ -59,39 +59,10 @@ def _oem_id_at(device: str, byte_offset: int) -> Optional[bytes]:
         return None
 
 
-def _sane_fat_bpb(boot: bytes) -> bool:
-    """A FAT BIOS parameter block whose fields make sense. The FAT type label
-    in the boot sector is informational and often blank on media formatted
-    outside Windows, so the parameters decide: a sector size, a power-of-two
-    cluster, reserved sectors, one or two FATs and a media descriptor."""
-    per_sector = int.from_bytes(boot[11:13], "little")
-    per_cluster = boot[13]
-    reserved = int.from_bytes(boot[14:16], "little")
-    return (per_sector in (512, 1024, 2048, 4096)
-            and per_cluster in (1, 2, 4, 8, 16, 32, 64, 128)
-            and reserved >= 1 and boot[16] in (1, 2) and boot[21] >= 0xF0)
-
-
-def _volume_type_at(device: str, byte_offset: int) -> Optional[str]:
-    """The file system whose boot sector sits at byte_offset: "ntfs",
-    "exfat" or "fat", or None. On-disk format facts: NTFS and exFAT name
-    themselves in the OEM field, and a FAT volume carries the 0x55AA boot
-    signature with a sane parameter block."""
-    try:
-        with open(device, "rb") as f:
-            f.seek(byte_offset)
-            boot = f.read(512)
-    except OSError:
-        return None
-    if len(boot) < 512:
-        return None
-    if boot[3:11] == b"NTFS    ":
-        return "ntfs"
-    if boot[3:11] == b"EXFAT   ":
-        return "exfat"
-    if boot[510:512] == b"\x55\xaa" and _sane_fat_bpb(boot):
-        return "fat"
-    return None
+# The boot-sector reader is shared with the evidence classifier, which
+# tells a disk image from a memory image by the same on-disk facts.
+from core.artifact_kind import sane_fat_bpb as _sane_fat_bpb  # noqa: E402,F401
+from core.artifact_kind import volume_type_at as _volume_type_at  # noqa: E402
 
 
 def _largest_mountable_volume(mmls_stdout: str, ewf_device: str

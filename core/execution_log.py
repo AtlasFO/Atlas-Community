@@ -311,6 +311,12 @@ def _case_dir_for_trace(path: str) -> str:
     return parent
 
 
+def case_dir_for_trace(path: str) -> str:
+    """The case directory a trace file belongs to (``_case_dir_for_trace``),
+    for callers outside this module."""
+    return _case_dir_for_trace(path)
+
+
 def _cwd_case_dir() -> Optional[str]:
     """The case directory the process runs in (a case brief is present), or
     None when it was launched from an arbitrary directory."""
@@ -318,6 +324,40 @@ def _cwd_case_dir() -> Optional[str]:
     if any(os.path.exists(os.path.join(cwd, n)) for n in ("CASE.md", "CLAUDE.md")):
         return cwd
     return None
+
+
+# One notice per process for each kind of guessed binding (below).
+_BINDING_NOTED: set[str] = set()
+
+
+def _beacon_is_unambiguous(trace_path: str) -> bool:
+    """Whether a process outside any case directory may follow the session
+    beacon. The beacon is one slot per host: with more than one run alive
+    it names only the run started last, so the restore does not guess and
+    says so once. With one run alive and it the beacon's case, the restore
+    binds but says that this process now writes into a live run's trace.
+    Inside a case directory the directory decides (_beacon_is_foreign)."""
+    if _cwd_case_dir():
+        return True
+    try:
+        from core.run_state import live_runs, run_status
+        live = live_runs()
+    except Exception:  # noqa: BLE001 - no answer is no reason to stop binding
+        return True
+    if len(live) > 1:
+        if "ambiguous" not in _BINDING_NOTED:
+            _BINDING_NOTED.add("ambiguous")
+            _warn(f"session beacon not followed: {len(live)} runs are live on this host "
+                  f"({', '.join(live)}); start_execution_log names the case this process "
+                  "writes to")
+        return False
+    case = os.path.realpath(_case_dir_for_trace(trace_path))
+    pid = run_status(case).get("pid") if any(os.path.realpath(c) == case for c in live) else None
+    if pid and str(pid) != str(os.getpid()) and "live" not in _BINDING_NOTED:
+        _BINDING_NOTED.add("live")
+        _warn(f"session beacon followed into {case}, whose run is live in pid {pid}: this "
+              "process now writes into that run's trace")
+    return True
 
 
 def _beacon_is_foreign(trace_path: str) -> bool:
@@ -407,16 +447,8 @@ def read_clear_marker_ts(case_dir: str) -> Optional[str]:
         return None
 
 
-def _pid_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True  # exists but owned by another user — still a live process
-    except OSError:
-        return False
-    return True
+# The one liveness test for a recorded pid (core.run_state).
+from core.run_state import pid_alive as _pid_alive  # noqa: E402
 
 
 def _check_and_write_beacon(case_dir: str, path: str) -> None:
@@ -1285,7 +1317,8 @@ class ExecutionLog:
                 # Reject stale sessions pointing to deleted directories
                 # (e.g. pytest temp dirs).
                 parent = os.path.dirname(os.path.abspath(path))
-                if os.path.isdir(parent) and not _beacon_is_foreign(path):
+                if (os.path.isdir(parent) and not _beacon_is_foreign(path)
+                        and _beacon_is_unambiguous(path)):
                     # save_session=False — we already read it from disk;
                     # rewriting under contention with another process can
                     # race on the file.
@@ -1306,14 +1339,9 @@ class ExecutionLog:
             cwd = _cwd_case_dir()
             if not cwd:
                 return
-            analysis_dir = os.path.join(cwd, "analysis")
-            if not os.path.isdir(analysis_dir):
+            trace_path = case_trace_document(cwd)
+            if not trace_path:
                 return
-            import glob as _glob
-            traces = sorted(_glob.glob(os.path.join(analysis_dir, "*_trace.json")))
-            if not traces:
-                return
-            trace_path = traces[0]
             basename = os.path.basename(trace_path)
             suffix = "_trace.json"
             if not basename.endswith(suffix):
@@ -2538,3 +2566,90 @@ class ExecutionLog:
 
 
 log = ExecutionLog()  # module-level singleton
+
+
+def case_trace_document(case_dir: str | os.PathLike,
+                        suffix: str = "_trace.json") -> Optional[str]:
+    """The case's trace document under analysis/: the one its case id names
+    (the name a run writes, core.paths.detect_case_id), else the newest
+    written. One choice for every reader that does not hold the live log,
+    so a second document beside it (another case id, a copy) is never read
+    as this case's trace. A case with no document of its own is read from
+    the newest one there is: one foreign run at most, never two merged."""
+    import glob
+    analysis = os.path.join(str(case_dir), "analysis")
+    docs = glob.glob(os.path.join(glob.escape(analysis), "*" + suffix))
+    if not docs:
+        return None
+    try:
+        from core.paths import detect_case_id
+        named = os.path.join(analysis, detect_case_id(case_dir) + suffix)
+        if os.path.isfile(named):
+            return named
+    except Exception:  # noqa: BLE001 - the newest document still answers
+        pass
+
+    def mtime(p: str) -> float:
+        try:
+            return os.path.getmtime(p)
+        except OSError:
+            return 0.0
+    # Equal times (a coarse clock, two writes in one tick) fall back to the
+    # name order, so the choice never depends on the order the file system
+    # lists the documents in.
+    return max(sorted(docs), key=mtime)
+
+
+def _trace_entries_on_disk(case_root: str) -> Optional[list[dict]]:
+    """The entries of the case's trace (case_trace_document), None when it
+    has none. The document (``<CASE>_trace.json``) is read rather than its
+    ``.jsonl`` mirror: the mirror journals each entry once, before the
+    annotations a call gets afterwards (its arguments, how much of its
+    result was shown)."""
+    doc = case_trace_document(case_root)
+    mirror = None if doc else case_trace_document(case_root, "_trace.jsonl")
+    if not doc and not mirror:
+        return None
+    out: list[dict] = []
+    if doc:
+        try:
+            with open(doc, encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return out
+        entries = data.get("entries") if isinstance(data, dict) else data
+        return [e for e in entries or [] if isinstance(e, dict)]
+    try:
+        with open(mirror, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                e = row.get("entry") if isinstance(row, dict) and isinstance(row.get("entry"), dict) else row
+                if isinstance(e, dict):
+                    out.append(e)
+    except OSError:
+        pass
+    return out
+
+
+def trace_tool_calls(case_dir: str | os.PathLike) -> Optional[list[dict]]:
+    """The tool calls a case's trace holds, oldest first; None when the case
+    has no trace. The live log when it is this case's (it holds the trace and
+    what this process recorded since), the trace on disk otherwise. Entries
+    from before the case's last clear belong to a dead run and are left out,
+    as configure() leaves them out."""
+    root = os.path.realpath(str(case_dir))
+    live = log.trace_path()
+    if live and os.path.realpath(_case_dir_for_trace(live)) == root:
+        with log._lock:
+            entries: Optional[list[dict]] = list(log._entries)
+    else:
+        entries = _trace_entries_on_disk(root)
+        if entries is None:
+            return None
+        marker = read_clear_marker_ts(root)
+        if marker:
+            entries = [e for e in entries if _ts_ge(e.get("ts"), marker)]
+    return [e for e in entries or [] if e.get("type") == "tool_call"]

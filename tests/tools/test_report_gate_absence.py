@@ -55,12 +55,13 @@ def test_a_negative_citing_a_search_of_the_wrong_sources_is_miscited():
     assert _miscited_finding_entries([entries[-1]], entries) == [entries[-1]]
 
 
-def test_the_blocker_names_the_search_that_would_ground_the_negative():
-    from tools.reasoning import _citation_blocker
+def test_the_blocker_names_the_repair_and_its_hint_the_search_that_would_ground_it():
+    from tools.reasoning import _citation_blocker, _citation_repair_hint
     info = _call(77, "vol -f evidence/host.mem windows.info", '[{"Variable": "Kernel Base"}]')
     entries = [QUERY, CUT_GREP, info, _finding(403, NEGATIVE, [77])]
-    text = _citation_blocker([entries[-1]], entries)
+    text = _citation_blocker([entries[-1]])
     assert "identifiers they rest on" in text
     assert "asserts an absence" in text
-    assert "206 (searched" in text and "214" not in text
-    assert "citation repair" in text
+    assert "supersedes=403" in text and "citation repair" in text
+    hint = _citation_repair_hint([entries[-1]], entries)
+    assert "206 (searched" in hint and "214" not in hint

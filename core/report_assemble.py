@@ -815,7 +815,6 @@ def assemble_client_report(
     narratives = parse_finding_narratives(detailed_prose)
     exec_prose = _narrative_section(root, "exec_summary")
     gaps_prose = _narrative_section(root, "gaps")
-    recs_prose = _narrative_section(root, "recommendations")
     scope_prose = _narrative_section(root, "scope_evidence")
 
     # Manifest titles (i18n)
@@ -963,19 +962,15 @@ def assemble_client_report(
             parts.append("")
     except Exception:  # noqa: BLE001 - the report stands without the block
         pass
-    # Analyst context
+    # The analyst's prior knowledge: each statement with the findings
+    # that name what it names.
     try:
-        from core.analyst_context import list_context
-        active = list_context(root, active_only=True)
-        if active:
-            parts.append("**Analyst-provided context (interpretation only):**")
+        from core.analyst_context import report_lines as _context_lines
+        _cl = _context_lines(root, findings, language)
+        if _cl:
+            parts.extend(_cl)
             parts.append("")
-            for e in active[:8]:
-                parts.append(
-                    f"- `{e.get('id')}`: {(e.get('text') or '')[:300]}"
-                )
-            parts.append("")
-    except Exception:
+    except Exception:  # noqa: BLE001 - the report stands without the block
         pass
     parts.append(
         "**Timezone:** timestamps rendered as recorded in source artifacts "
@@ -1208,37 +1203,18 @@ def assemble_client_report(
     # ---- 7. Recommendations ----
     parts.append(f"## {titles['recommendations']}")
     parts.append("")
-    if recs_prose:
-        parts.append(_demote_headings(recs_prose).strip())
-        parts.append("")
-    else:
-        if scope == "host":
-            parts.append(
-                "1. Preserve forensic image and relevant volatile artifacts "
-                "for this host."
-            )
-            parts.append(
-                "2. See Estate Report for estate-wide recommendations."
-            )
-        else:
-            parts.append(
-                "1. Containment/isolation decisions must follow confirmed "
-                "findings only — do not invent compromise evidence."
-            )
-            parts.append(
-                "2. Credential hygiene and backup integrity verification as "
-                "warranted by Detailed Findings."
-            )
-        parts.append("")
-        parts.append("Finding-tied actions:")
-        parts.append("")
-        for f in findings[:10]:
-            fid = f.get("finding_id") or f.get("id")
-            parts.append(
-                f"- **{fid}** ({f.get('confidence')}): "
-                f"{_md_inline(f.get('statement') or '')[:160]}"
-            )
-        parts.append("")
+    # The response plan the run recorded, read now: the section's stored body
+    # is the same projection (core.report_projection keeps it mechanical) as
+    # of its last regeneration, which a stopped or resumed run has outgrown.
+    # Every line names its basis; nothing here is advice written for the
+    # occasion.
+    from core.recommendations import (build_catalog as _plan_catalog,
+                                      hardening_references,
+                                      render_markdown as _render_plan)
+    parts.extend(_render_plan(_plan_catalog(root), language, host=host,
+                              report_scope=scope))
+    parts.extend(hardening_references(root, language))
+    parts.append("")
 
     # ---- Indicators (a pointer: the list itself is its own deliverable) ----
     try:

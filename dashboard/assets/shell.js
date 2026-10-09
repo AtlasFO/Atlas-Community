@@ -88,7 +88,7 @@ const AtlasShell = (() => {
     offlineShown: false,  // the chip currently says offline because of that
     leaving: false,       // set once we redirect to login, so nothing re-fires it
     working: false,
-    runningCases: [],   // [{case_dir, case_id, activity}] — every live run
+    runningCases: null, // [{case_dir, case_id, activity}] — every live run; null until fetched
 
     timelinePlugin: false,
     user: null,            // {id, username, email, role}
@@ -406,6 +406,7 @@ const AtlasShell = (() => {
     else u.searchParams.delete('case');
     history.replaceState(null, '', u.toString());
     syncHeader();
+    if (changed) renderBusy();
     if (changed || (opts && opts.force)) {
       Chat.onCaseChanged();
       for (const cb of S.caseListeners) {
@@ -623,6 +624,30 @@ const AtlasShell = (() => {
       `<div class="ap-head">${esc(running.length === 1 ? t('shell.runningOne') : t('shell.runningMany', { n: running.length }))}</div>${rows}`;
   }
 
+  /** The run pill and its hover card, from the cached run list and the case
+   *  on screen. Both inputs change: the list on every poll, the case when the
+   *  analyst picks another one, so both re-render it. Nothing is drawn before
+   *  the first list arrives. */
+  function renderBusy() {
+    const running = S.runningCases;
+    if (!running) return;
+    const el = document.getElementById('atlas-activity');
+    if (el) el.classList.toggle('has-runs', running.length > 0);
+    if (!running.length) {
+      setWorking(false, S.activeCase ? t('shell.idle') : t('shell.noCase'));
+    } else if (running.length === 1) {
+      const only = running[0];
+      // Name the case when the run is somewhere the analyst is not looking;
+      // a bare "Atlas working" would imply it is this case.
+      setWorking(true, only.case_dir === S.activeCase
+        ? t('shell.working')
+        : t('shell.workingElsewhere', { case: only.case_id || only.case_dir }));
+    } else {
+      setWorking(true, t('shell.workingN', { n: running.length }));
+    }
+    renderRunningPopover(running);
+  }
+
   async function refreshBusy() {
     // Case-wide, not scoped to the selected case: a run in any case has to
     // light this indicator up, including before a case has been picked at
@@ -630,23 +655,8 @@ const AtlasShell = (() => {
     // S.activeCase only, so a run elsewhere left the header reading "idle".
     try {
       const d = await api('runs/active');
-      const running = Array.isArray(d.running) ? d.running : [];
-      S.runningCases = running;
-      const el = document.getElementById('atlas-activity');
-      if (el) el.classList.toggle('has-runs', running.length > 0);
-      if (!running.length) {
-        setWorking(false, S.activeCase ? t('shell.idle') : t('shell.noCase'));
-      } else if (running.length === 1) {
-        const only = running[0];
-        // Name the case when the run is somewhere the analyst is not looking;
-        // a bare "Atlas working" would imply it is this case.
-        setWorking(true, only.case_dir === S.activeCase
-          ? t('shell.working')
-          : t('shell.workingElsewhere', { case: only.case_id || only.case_dir }));
-      } else {
-        setWorking(true, t('shell.workingN', { n: running.length }));
-      }
-      renderRunningPopover(running);
+      S.runningCases = Array.isArray(d.running) ? d.running : [];
+      renderBusy();
     } catch (_e) { /* fetchJson tracks the outage; the chip flips after OFFLINE_AFTER_MS */ }
   }
 

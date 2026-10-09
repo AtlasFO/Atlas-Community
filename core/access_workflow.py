@@ -80,37 +80,20 @@ def opened_media_with_winevt_work_order(
 
 
 def _trace_cmd_blobs(root: Path) -> list[dict[str, str]]:
-    analysis = root / "analysis"
-    if not analysis.is_dir():
-        return []
+    from core.execution_log import trace_tool_calls
     out: list[dict[str, str]] = []
-    for p in sorted(analysis.glob("*_trace.jsonl"))[-2:]:
-        try:
-            with p.open(encoding="utf-8", errors="replace") as fh:
-                for line in fh:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        row = json.loads(line)
-                    except Exception:
-                        continue
-                    e = row.get("entry") if isinstance(row.get("entry"), dict) else row
-                    if not isinstance(e, dict):
-                        continue
-                    blob = " ".join(
-                        str(e.get(k) or "")
-                        for k in ("cmd", "mcp_tool", "tool", "args")
-                    )
-                    if e.get("success") is False or e.get("failure_class"):
-                        continue      # a refused or failed call is not a listing
-                    if blob.strip():
-                        # What the call printed says which event-log layout
-                        # the media has; what it ran says what was searched.
-                        out.append({"cmd": blob,
-                                    "out": str(e.get("stdout_excerpt") or "")})
-        except Exception:
-            continue
+    for e in trace_tool_calls(root) or []:
+        if e.get("success") is False or e.get("failure_class"):
+            continue      # a refused or failed call is not a listing
+        blob = " ".join(
+            str(e.get(k) or "")
+            for k in ("cmd", "mcp_tool", "tool", "args")
+        )
+        if blob.strip():
+            # What the call printed says which event-log layout the media
+            # has; what it ran says what was searched.
+            out.append({"cmd": blob,
+                        "out": str(e.get("stdout_excerpt") or "")})
     return out
 
 

@@ -19,7 +19,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-SCHEMA_VERSION = "1.0"
+# 1.1: a file a disk or memory tool may read lists both in "classes" and
+# the profile names it under "ambiguous"; an older profile is rebuilt.
+SCHEMA_VERSION = "1.1"
 PROFILE_NAME = "evidence_profile.json"
 
 _LOCK = threading.RLock()
@@ -145,66 +147,120 @@ def _is_packet_capture(path: Path) -> bool:
         return False
 
 
-def classify_path(path: Path) -> str:
-    """Return the primary artifact class for a single file path."""
+# Folders of a collected Windows tree whose .bin/.raw/.img files are program
+# data (Defender, side-by-side store, system binaries), never an image.
+_RAW_NOISE_PARTS = frozenset({
+    "programdata", "program files", "program files (x86)",
+    "windows defender", "defender", "wdav", "support",
+    "winsxs", "system32", "syswow64",
+})
+_RAW_IMAGE_SUFFIXES = (".bin", ".raw", ".img")
+# A Windows crash dump and hibernation file hold memory whatever their
+# suffix says (public Windows file names); their header confirms it.
+_MEMORY_DUMP_NAMES = ("memory.dmp", "hiberfil.sys")
+
+# Evidence Links kinds (core.evidence_links) as profile classes. alias,
+# principal, live and other name no class of file.
+_DECLARED_CLASS = {
+    "disk": "disk", "memory": "memory", "pcap": "pcap", "tabular": "tabular",
+    "evtx": "windows_eventlog", "email": "email", "file": "file",
+}
+
+
+def declared_kinds(case_dir: str | os.PathLike) -> dict[str, str]:
+    """The class the analyst declared for single evidence files in the
+    brief's Evidence Links, by case-relative path. A row that names a folder
+    declares nothing here: a whole tree is not one kind of evidence."""
+    try:
+        from core.evidence_links import sync_evidence_links
+        entries = sync_evidence_links(case_dir, persist=False).get("entries") or []
+    except Exception:  # noqa: BLE001 - no brief, nothing declared
+        return {}
+    root = Path(case_dir).resolve()
+    out: dict[str, str] = {}
+    for e in entries:
+        cls = _DECLARED_CLASS.get(str(e.get("kind") or ""))
+        rel = str(e.get("path") or "").strip().rstrip("/")
+        if cls and rel and (root / rel).is_file():
+            out[rel] = cls
+    return out
+
+
+def path_classes(path: Path, declared: str = "") -> tuple[str, ...]:
+    """The classes a file may belong to, the primary one first.
+
+    A kind the analyst declared wins. A raw image or a dump is judged by its
+    first sectors (core.artifact_kind.head_signature): a memory format is
+    memory wherever it lies, a user-mode minidump is a file. A shallow raw
+    image the path calls a disk stays one when its bytes say so; with no
+    signature at all it may be either, and counts as both until a tool reads
+    it. A raw file deeper in a collected tree with no signature is a file
+    unless declared: depth or folder names are not guessed from.
+    """
+    if declared:
+        return (declared,)
     name = path.name
     if name in _SKIP_NAMES:
-        return "file"
+        return ("file",)
     lower = name.lower()
     # Multi-part E01: foo.E01, foo.E02, …
     if len(lower) > 4 and lower[-4] == "." and lower[-3] == "e" and lower[-2:].isdigit():
-        return "disk"
+        return ("disk",)
     suf = path.suffix.lower()
+    parts = {p.casefold() for p in path.parts}
+    # A collected tree carries thousands of program .bin files: they are not
+    # read, the noise folders settle them.
+    raw_noise = suf in _RAW_IMAGE_SUFFIXES and bool(parts & _RAW_NOISE_PARTS)
+    sig = ""
+    if not raw_noise and (suf in (*_RAW_IMAGE_SUFFIXES, ".dmp") or lower in _MEMORY_DUMP_NAMES):
+        from core.artifact_kind import head_signature
+        sig = head_signature(path)
+    if sig == "memory":
+        return ("memory",)
+    if sig == "minidump":
+        return ("file",)
     # Application DBs / dumps that reuse .raw/.bin (SRUM, EseDB, pagefile…).
     try:
         from core.artifact_kind import is_non_disk_container
         if is_non_disk_container(path):
-            return "file"
+            return ("file",)
     except Exception:
         pass
     # Ambiguous raw/bin extensions are often Windows/Defender noise inside
     # KAPE extracts — only treat as disk when the path looks like an image
     # intake (evidence root / images / ewf), not ProgramData/Defender Support.
-    if suf in (".bin", ".raw", ".img"):
-        parts = {p.casefold() for p in path.parts}
-        noise = {
-            "programdata", "program files", "program files (x86)",
-            "windows defender", "defender", "wdav", "support",
-            "winsxs", "system32", "syswow64",
-        }
-        if parts & noise:
-            return "file"
-        # Nested under a clearly-named image folder → disk
+    if suf in _RAW_IMAGE_SUFFIXES:
+        if raw_noise:
+            return ("file",)
+        # Nested under a clearly-named image folder, or top-level under
+        # evidence/ (few path parts) → disk; a deep tree → file.
         imagey = {"images", "disk", "ewf", "dd", "forensic_images"}
-        if parts & imagey or path.parent.name.lower().endswith(
-            (".e01", ".ex01", ".vmdk", ".dd")
-        ):
-            return "disk"
-        # Top-level under evidence/ (few path parts) → disk; deep tree → file
-        try:
-            # evidence/<name>.raw → disk; evidence/…/deep/foo.bin → file
-            rel_parts = path.parts
-            if "evidence" in [p.casefold() for p in rel_parts]:
-                idx = [p.casefold() for p in rel_parts].index("evidence")
-                depth = len(rel_parts) - idx - 1
-                if depth <= 2:
-                    return "disk"
-            return "file"
-        except Exception:
-            return "file"
+        shallow = False
+        rel_parts = [p.casefold() for p in path.parts]
+        if "evidence" in rel_parts:
+            shallow = len(rel_parts) - rel_parts.index("evidence") - 1 <= 2
+        if not (parts & imagey or shallow or path.parent.name.lower().endswith(
+                (".e01", ".ex01", ".vmdk", ".dd"))):
+            return ("file",)
+        return ("disk",) if sig == "disk" else ("disk", "memory")
     if suf in _EXT_CLASS:
-        return _EXT_CLASS[suf]
+        return (_EXT_CLASS[suf],)
     # An ambiguous suffix says nothing about structure: judge the bytes.
     # Packet capture first — a capture is binary, so the delimited check
     # below could never claim it, but it would otherwise land as "file".
     if suf in _SNIFF_SUFFIXES and _is_packet_capture(path):
-        return "pcap"
+        return ("pcap",)
     # A structured export is tabular whatever it is called — judged by its
     # first two lines, never by a vendor's choice of extension.
     if suf in _SNIFF_SUFFIXES and suf != ".dat" and _looks_delimited(path):
-        return "tabular"
+        return ("tabular",)
     # Compound suffixes (.tar.gz) — fall through to generic file
-    return "file"
+    return ("file",)
+
+
+def classify_path(path: Path, declared: str = "") -> str:
+    """Return the primary artifact class for a single file path."""
+    return path_classes(path, declared)[0]
 
 
 def _iter_evidence_files(evidence_root: Path) -> Iterable[Path]:
@@ -278,20 +334,32 @@ def build_evidence_profile(case_dir: str | os.PathLike) -> dict[str, Any]:
     counts: Counter[str] = Counter()
     samples: dict[str, list[str]] = {}
     files: list[dict[str, Any]] = []
+    declared = declared_kinds(case)
+    ambiguous: list[str] = []
+    maybe: set[str] = set()
 
     for path in _iter_evidence_files(evidence_root):
-        cls = classify_path(path)
-        counts[cls] += 1
         try:
             rel = str(path.relative_to(case))
         except ValueError:
             rel = str(path)
-        files.append({"path": rel, "class": cls, "size": path.stat().st_size})
-        bucket = samples.setdefault(cls, [])
-        if len(bucket) < 5:
-            bucket.append(rel)
+        classes = path_classes(path, declared.get(rel, ""))
+        cls = classes[0]
+        counts[cls] += 1
+        entry: dict[str, Any] = {"path": rel, "class": cls, "size": path.stat().st_size}
+        if len(classes) > 1:
+            # Counted under its primary class, present under every class a
+            # tool of which may read it.
+            entry["classes"] = list(classes)
+            ambiguous.append(rel)
+            maybe.update(classes)
+        files.append(entry)
+        for c in classes:
+            bucket = samples.setdefault(c, [])
+            if len(bucket) < 5:
+                bucket.append(rel)
 
-    present = sorted(c for c, n in counts.items() if n > 0)
+    present = sorted({c for c, n in counts.items() if n > 0} | maybe)
     if live_hosts_configured():
         present = sorted(set(present) | {"live"})
         counts["live"] = max(counts.get("live", 0), 1)
@@ -328,6 +396,7 @@ def build_evidence_profile(case_dir: str | os.PathLike) -> dict[str, Any]:
         "counts": dict(counts),
         "samples": samples,
         "files": files,
+        "ambiguous": ambiguous[:50],
         "derived_counts": dict(derived_counts),
         "derived_samples": derived_samples,
         "derived_file_count": int(sum(derived_counts.values())),
@@ -394,11 +463,22 @@ def _profile_is_stale(
 ) -> bool:
     """True when on-disk evidence likely drifted since the profile was saved."""
     root = Path(case_dir).resolve()
+    if str(profile.get("schema_version") or "") != SCHEMA_VERSION:
+        return True
     ppath = profile_path(root)
     try:
         profile_mtime = ppath.stat().st_mtime if ppath.is_file() else 0.0
     except OSError:
         profile_mtime = 0.0
+
+    # The kinds the analyst declares live in the brief's Evidence Links.
+    for name in ("CASE.md", "CLAUDE.md"):
+        brief = root / name
+        try:
+            if brief.is_file() and brief.stat().st_mtime > profile_mtime + 0.01:
+                return True
+        except OSError:
+            pass
 
     # Catalog is updated by Plane A on evidence change — authoritative signal.
     cat = root / ".atlas" / "evidence_catalog.json"
@@ -476,6 +556,14 @@ def format_profile_for_prompt(profile: dict[str, Any]) -> str:
         for cls in sorted(samples):
             for path in samples[cls]:
                 lines.append(f"  - [{cls}] {path}")
+    ambiguous = profile.get("ambiguous") or []
+    if ambiguous:
+        lines += ["",
+                  f"Raw image(s) with neither a disk nor a memory signature, listed under "
+                  f"both classes until a tool reads them: {', '.join(ambiguous[:5])}"
+                  + (" and more" if len(ambiguous) > 5 else "")
+                  + ". A raw file deeper in a collected tree is not guessed at: CASE.md's "
+                  "Evidence Links can declare its kind."]
     derived_counts = profile.get("derived_counts") or {}
     if derived_counts:
         lines += ["",

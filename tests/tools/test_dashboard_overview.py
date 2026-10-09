@@ -114,6 +114,22 @@ def _seed_full_case(cases_root: Path, name: str, case_id: str,
     return case
 
 
+def _write_reports(case: Path, ages: dict[str, int],
+                   latest: str | None = None) -> Path:
+    """reports/<rel> files last written ``ages[rel]`` seconds ago, and
+    reports/latest pointing at the ``latest`` snapshot folder."""
+    reports = case / "reports"
+    now = time.time()
+    for rel, age in ages.items():
+        p = reports / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(f"# {rel}\n", encoding="utf-8")
+        os.utime(p, (now - age, now - age))
+    if latest:
+        (reports / "latest").symlink_to(latest)
+    return case
+
+
 # ── answer derivation (the no-second-source-of-truth rule) ─────────────────
 
 GRAPH = {
@@ -223,13 +239,85 @@ class TestReportAndEvidence:
         assert st["available"] is True
         assert st["name"] == "X_report.md"
 
-    def test_latest_dir_wins(self, tmp_path):
-        case = tmp_path / "c"
-        (case / "reports" / "latest").mkdir(parents=True)
-        (case / "reports" / "old_report.md").write_text("old")
-        (case / "reports" / "latest" / "new_report.md").write_text("new")
+    # reports/latest names a rerun snapshot (core.report_snapshots): a pack the
+    # rerun moved out of reports/ and froze. Promotion moves every deliverable,
+    # so whatever reports/ holds was written after the snapshot. The ages
+    # below are set, and tied where the order must not come from the clock.
+
+    def test_reports_outranks_the_snapshot_at_equal_age(self, tmp_path):
+        case = _write_reports(tmp_path / "c", {
+            "rerun_0002/CASE-A_investigation_report.md": 60,
+            "CASE-A_report.md": 60,
+        }, latest="rerun_0002")
         st = rm.report_status(str(case))
-        assert "latest/new_report.md" in st["path"]
+        assert st["path"] == "/c/reports/CASE-A_report.md"
+        assert [f["path"] for f in st["files"]] == [
+            "/c/reports/CASE-A_report.md",
+            "/c/reports/rerun_0002/CASE-A_investigation_report.md"]
+
+    def test_the_snapshot_report_is_the_default_beside_newer_history(
+            self, tmp_path):
+        """After a rerun that changed the investigation state, reports/ keeps
+        only diff_report.md, rewritten last: listed, never the default."""
+        case = _write_reports(tmp_path / "c", {
+            "rerun_0002/CASE-A_report.md": 60,
+            "diff_report.md": 1,
+        }, latest="rerun_0002")
+        st = rm.report_status(str(case))
+        assert st["path"] == "/c/reports/rerun_0002/CASE-A_report.md"
+        assert "diff_report.md" in {f["name"] for f in st["files"]}
+
+    def test_a_name_in_reports_hides_the_snapshot_copy(self, tmp_path):
+        case = _write_reports(tmp_path / "c", {
+            "rerun_0002/CASE-A_report.md": 60,
+            "CASE-A_report.md": 60,
+        }, latest="rerun_0002")
+        files = rm.report_status(str(case))["files"]
+        assert [f["path"] for f in files] == ["/c/reports/CASE-A_report.md"]
+
+    def test_a_regenerated_report_outranks_the_snapshot_estate_report(
+            self, tmp_path):
+        case = _write_reports(tmp_path / "c", {
+            "rerun_0002/estate_report.md": 120,
+            "rerun_0002/host_CORP-DC01_report.md": 120,
+            "CASE-A_report.md": 60,
+        }, latest="rerun_0002")
+        assert rm.report_status(str(case))["path"] == \
+            "/c/reports/CASE-A_report.md"
+
+    def test_a_flat_case_defaults_to_its_report_not_a_newer_note(
+            self, tmp_path):
+        case = _write_reports(tmp_path / "c", {
+            "CASE-A_investigation_report.md": 60,
+            "CASE-A_run_review.md": 30,
+            "CASE-A_iocs.md": 20,
+            "diff_report.md": 10,
+        })
+        assert rm.report_status(str(case))["name"] == \
+            "CASE-A_investigation_report.md"
+
+    def test_an_estate_case_defaults_to_the_estate_report(self, tmp_path):
+        case = _write_reports(tmp_path / "c", {
+            "estate_report.md": 60,
+            "host_CORP-DC01_report.md": 30,
+            "CASE-A_run_review.md": 10,
+        })
+        assert rm.report_status(str(case))["name"] == "estate_report.md"
+
+    def test_a_case_id_containing_host_is_still_the_report(self, tmp_path):
+        """Host sections are told apart by the host_ prefix, not by those
+        letters anywhere in the name."""
+        case = _write_reports(tmp_path / "c", {
+            "ghost_hunt_report.md": 60,
+            "ghost_hunt_run_review.md": 10,
+        })
+        assert rm.report_status(str(case))["name"] == "ghost_hunt_report.md"
+
+    def test_a_name_with_url_syntax_has_a_usable_path(self, tmp_path):
+        """The path is a URL the tab fetches: a "#" must not cut it short."""
+        case = _write_reports(tmp_path / "c", {"host_USB#1_report.md": 60})
+        files = rm.report_status(str(case))["files"]
+        assert files[0]["path"] == "/c/reports/host_USB%231_report.md"
 
     def test_report_files_include_timeline_exclude_traces(self, tmp_path):
         case = tmp_path / "c"
@@ -353,6 +441,48 @@ class TestOverviewEndpoint:
         assert data["questions"][0]["text"] == "Q1?"
         assert "busy" in data
 
+    def test_every_listed_report_downloads_as_previewed(self,
+                                                        standalone_server):
+        """The Report tab previews a file by its listed path and downloads it
+        by name through report_export. For a case after a rerun, with the
+        first pack frozen behind reports/latest, every listed report must
+        answer both ways, with the same bytes."""
+        from urllib.parse import urlencode
+        root = standalone_server["cases_root"]
+        case = root / "snap-case"
+        reports = case / "reports"
+        (reports / "initial_report").mkdir(parents=True)
+        (case / "CASE.md").write_text("**Case ID**: CASE-A\n")
+        (reports / "initial_report" / "CASE-A_investigation_report.md") \
+            .write_bytes(b"# Frozen\r\n\r\nOn CORP-DC01.\r\n")
+        (reports / "initial_report" / "CASE-A_live_review.md") \
+            .write_text("# Review\n")
+        (reports / "initial_report" / "claim_snapshot.json").write_text("{}")
+        (reports / "latest").symlink_to("initial_report")
+        (reports / "CASE-A_report.md").write_text("# Regenerated\n")
+        (reports / "host_USB#1_report.md").write_text("# Host USB#1\n")
+        (reports / "diff_report.md").write_text("# History\n")
+        port = standalone_server["port"]
+
+        _, ov = _get(port, "/_dashboard/api/case_overview?case=snap-case")
+        listed = [f for f in ov["report"]["files"] if f["kind"] == "report"]
+        assert {f["name"] for f in listed} == {
+            "CASE-A_report.md", "CASE-A_investigation_report.md",
+            "CASE-A_live_review.md", "host_USB#1_report.md",
+            "diff_report.md"}
+        assert ov["report"]["name"] == "CASE-A_report.md"
+        for f in listed:
+            status, raw, _ = _get_raw(port, f["path"])
+            assert status == 200, f["path"]
+            for fmt in ("md", "html"):
+                q = urlencode({"case": "snap-case", "name": f["name"],
+                               "format": fmt})
+                status, body, _ = _get_raw(
+                    port, f"/_dashboard/api/report_export?{q}")
+                assert status == 200, (f["name"], fmt)
+                if fmt == "md":
+                    assert body == raw, f["name"]
+
     def test_capabilities_and_timeline_template(self, standalone_server,
                                                 monkeypatch):
         root = standalone_server["cases_root"]
@@ -385,6 +515,176 @@ class TestOverviewEndpoint:
         monkeypatch.setattr(rm, "timeline_template_tsv", lambda: None)
         status, data = _get(port, "/_dashboard/api/timeline_template")
         assert status == 404
+
+
+def _case_file_policy() -> str:
+    from dashboard.app import CASE_FILE_POLICY
+    return CASE_FILE_POLICY
+
+
+class TestCaseFilesAreData:
+    """A case holds evidence, and evidence can be a web page, a drawing with
+    a script in it, a script. Served from the dashboard's origin, none of it
+    may run there, while the pages that read case files keep working."""
+
+    @pytest.fixture
+    def case(self, standalone_server):
+        case = standalone_server["cases_root"] / "data-case"
+        (case / "evidence").mkdir(parents=True)
+        (case / "analysis").mkdir()
+        (case / "reports").mkdir()
+        (case / "CASE.md").write_text("**Case ID**: CASE-A\n")
+        return case
+
+    @pytest.mark.parametrize("name, content", [
+        ("page.html", b"<script>document.title='CORP-DC01'</script>"),
+        ("drawing.svg", b'<svg xmlns="http://www.w3.org/2000/svg" '
+                        b'onload="alert(1)"/>'),
+        ("loader.js", b"fetch('/_dashboard/api/config/users')"),
+        ("theme.css", b"body { background: url(https://203.0.113.9/) }"),
+    ])
+    def test_what_a_browser_would_run_comes_as_plain_text(
+            self, standalone_server, case, name, content):
+        (case / "evidence" / name).write_bytes(content)
+        status, body, headers = _get_raw(standalone_server["port"],
+                                         f"/data-case/evidence/{name}")
+        assert status == 200 and body == content
+        assert headers["content-type"].startswith("text/plain")
+        assert headers["x-content-type-options"] == "nosniff"
+        assert headers["content-security-policy"] == _case_file_policy()
+
+    @pytest.mark.parametrize("rel, content_type", [
+        ("reports/CASE-A_report.md", "application/octet-stream"),
+        ("reports/master_timeline.tsv", "application/octet-stream"),
+        ("analysis/CASE-A_trace.json", "application/json"),
+        ("evidence/screen.png", "image/png"),
+    ])
+    def test_what_the_pages_read_keeps_its_type(
+            self, standalone_server, case, rel, content_type):
+        """The Report and Timeline tabs fetch these and the trace viewer
+        parses the JSON; a fetch reads the bytes whatever the policy."""
+        (case / rel).write_bytes(b"{}" if rel.endswith(".json") else b"data")
+        status, _, headers = _get_raw(standalone_server["port"],
+                                      f"/data-case/{rel}")
+        assert status == 200
+        assert headers["content-type"].startswith(content_type)
+        assert headers["content-security-policy"] == _case_file_policy()
+
+    def test_the_dashboards_own_files_keep_their_types_and_policy(
+            self, standalone_server):
+        from dashboard.app import CONTENT_SECURITY_POLICY
+        port = standalone_server["port"]
+        for path, content_type in (("/_dashboard/report.html", "text/html"),
+                                   ("/_dashboard/assets/shell.js",
+                                    "application/javascript")):
+            status, _, headers = _get_raw(port, path)
+            assert status == 200
+            assert headers["content-type"].startswith(content_type)
+            assert headers["content-security-policy"] == \
+                CONTENT_SECURITY_POLICY
+
+    def test_the_policy_holds_however_the_file_is_asked_for(
+            self, standalone_server, case):
+        """A HEAD, a byte range and a compressed answer carry it too; a name
+        in capitals is the same type; a link is typed by what it points at."""
+        page = b"<script>alert(1)</script>" * 64
+        (case / "evidence" / "PAGE.HTML").write_bytes(page)
+        (case / "evidence" / "copy.png").symlink_to("PAGE.HTML")
+        port = standalone_server["port"]
+        for method, path, extra in (
+                ("HEAD", "/data-case/evidence/PAGE.HTML", {}),
+                ("GET", "/data-case/evidence/PAGE.HTML", {"Range": "bytes=0-9"}),
+                ("GET", "/data-case/evidence/PAGE.HTML",
+                 {"Accept-Encoding": "gzip"}),
+                ("GET", "/data-case/evidence/copy.png", {})):
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+            conn.request(method, path, headers={
+                "Cookie": f"atlas_session={_TOKEN}", **extra})
+            resp = conn.getresponse()
+            resp.read()
+            assert resp.status in (200, 206), (method, path, extra)
+            assert resp.getheader("content-type").startswith("text/plain")
+            assert resp.getheader("content-security-policy") == _case_file_policy()
+
+    @pytest.mark.parametrize("name", [
+        "a.html", "a.HTML", "a.htm", "a.xhtml", "a.xml", "a.xsl", "a.svg",
+        "a.svgz", "a.js", "a.mjs", "a.css", "a.mht", "a.shtml", "a.pdf",
+        "a.wasm", "a.json", "a.png", "a.JPG", "a.md", "a.tsv", "a", "a.html.",
+    ])
+    def test_every_name_maps_to_a_type_no_browser_runs(self, name):
+        from dashboard.app import _IMAGE_CONTENT_TYPES, _case_content_type
+        inert = {"application/json; charset=utf-8", "text/plain; charset=utf-8",
+                 "application/octet-stream", *_IMAGE_CONTENT_TYPES.values()}
+        assert _case_content_type(name) in inert
+
+
+def _status(port: int, path: str, *, signed_in: bool = True) -> int:
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+    conn.request("GET", path, headers={"Cookie": f"atlas_session={_TOKEN}"}
+                 if signed_in else {})
+    resp = conn.getresponse()
+    resp.read()
+    return resp.status
+
+
+class TestDashboardServesOnlyPagesAndStaticFiles:
+    """The dashboard's own directory holds its pages and static files next to
+    the server's Python. Only what the pages load is served: the top-level
+    pages and the files of assets/ and vendor/."""
+
+    @pytest.fixture
+    def decoy_server(self, tmp_path, monkeypatch, request):
+        """The dashboard served from a stand-in directory holding one decoy of
+        every kind of file that sits beside the pages."""
+        src = tmp_path / "dashboard_src"
+        for rel in ("overview.html", "trace_viewer.html", "login.html",
+                    "secret.py", "__init__.py", "__pycache__/secret.cpython-313.pyc",
+                    ".hidden.html", "sub/page.html", "notes.txt",
+                    "assets/ok.css", "assets/.env", "assets/deep/f.js", "vendor/ok.js"):
+            (src / rel).parent.mkdir(parents=True, exist_ok=True)
+            (src / rel).write_text("x")
+        from dashboard import app as dash_app
+        monkeypatch.setattr(dash_app, "DASHBOARD_SRC", str(src))
+        return request.getfixturevalue("standalone_server")
+
+    @pytest.mark.parametrize("rel", [
+        "secret.py", "__init__.py", "__pycache__/secret.cpython-313.pyc",
+        ".hidden.html", "sub/page.html", "notes.txt", "assets/.env",
+        "assets/deep/f.js", "./secret.py", "secret.py/",
+    ])
+    def test_anything_else_is_not_found_signed_in_or_not(self, decoy_server, rel):
+        port = decoy_server["port"]
+        assert _status(port, f"/_dashboard/{rel}") == 404
+        assert _status(port, f"/_dashboard/{rel}", signed_in=False) == 404
+
+    def test_the_pages_and_static_files_are_served(self, decoy_server):
+        port = decoy_server["port"]
+        for rel in ("", "dashboard.html", "overview.html", "assets/ok.css", "vendor/ok.js"):
+            assert _status(port, f"/_dashboard/{rel}") == 200, rel
+        assert _status(port, "/_dashboard/login.html", signed_in=False) == 200
+        assert _status(port, "/_dashboard/assets/ok.css", signed_in=False) == 200
+        assert _status(port, "/_dashboard/overview.html", signed_in=False) == 302
+
+    def test_every_page_and_everything_it_loads_is_served(self, standalone_server):
+        """Derived from the real pages: each one, every assets/ or vendor/
+        file a page or a style sheet names, and every file in those
+        directories."""
+        import re
+        port = standalone_server["port"]
+        pages = sorted(p.name for p in DASH_SRC.glob("*.html"))
+        loads = set()
+        for page in pages:
+            body = (DASH_SRC / page).read_text(encoding="utf-8")
+            loads.update(re.findall(r'(?:src|href)="((?:assets|vendor)/[^"?#]+)"', body))
+        for css in (DASH_SRC / "assets").glob("*.css"):
+            body = css.read_text(encoding="utf-8")
+            loads.update(f"assets/{u}" for u in re.findall(r'url\("?([^")]+)"?\)', body)
+                         if ":" not in u and not u.startswith("#"))
+        files = {f"{d}/{p.name}" for d in ("assets", "vendor")
+                 for p in (DASH_SRC / d).iterdir() if p.is_file()}
+        assert loads and loads <= files
+        for rel in ["", "dashboard.html", *pages, *sorted(files)]:
+            assert _status(port, f"/_dashboard/{rel}") == 200, rel
 
 
 class TestBrainKnowledgeEndpoint:

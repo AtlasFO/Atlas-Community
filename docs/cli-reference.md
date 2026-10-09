@@ -132,7 +132,11 @@ atlas review --live
 atlas review --live --trace path/to/trace.json
 ```
 
-Live review is read-only against the running process. Exit `3` = stalled.
+Both read the trace from disk and never touch the running process. Without
+`--live` the run is graded as it stands (`reports/<CASE>_run_review.md`, the
+review `atlas train` writes; exit `3` = NEEDS WORK); the TTP coverage figure
+comes from the trace's findings, as in a train review. Live review: exit `3`
+= stalled. The review goes to the case the trace belongs to.
 
 ---
 
@@ -257,7 +261,7 @@ atlas rerun --regenerate-sections
 | `--no-agent` | Plane A only (no AI session, no auto section regeneration) |
 | `--dry-run` | Scan/diff without writing catalog/journal/projection/context updates |
 | `--json` | Also print machine-readable JSON |
-| `--full-hash` | Force full-file hashes (even for large images) |
+| `--full-hash` | Read and hash every evidence file in full: large images, and files unchanged since the last scan (which otherwise keep their recorded hash) |
 | `--list-runs` | List investigation journal runs + milestones |
 | `--diff RUN_A..RUN_B` | Compare two journal runs (what/why) |
 | `--assemble-report` | Stitch deliverable from `.atlas/report_projection/` (no LLM) |

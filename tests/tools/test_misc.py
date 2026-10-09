@@ -2337,6 +2337,25 @@ class TestRecordFindingIndicators:
         from core.claim_graph import load_graph
         node = next(n for n in load_graph(l.case_dir())["nodes"].values() if n.get("kind") == "claim")
         assert {x["value"] for x in node["indicators"]} == {"198.51.100.7", "svc.exe"}
+        assert [d["value"] for d in node["indicators_dropped"]] == ["198.51.100.9"]
+
+    def test_a_malformed_hash_stays_on_its_claim_as_not_exported(self, tmp_path):
+        from core.claim_graph import load_graph
+        from core.ioc_catalog import build_catalog
+        from tools.misc import record_finding
+        digest = "ab" * 32
+        l = _seed_log_with_dair(tmp_path)
+        tid = l.record_tool_call("hash.hash_file", True, False, 0, 0,
+                                 stdout_excerpt=f"{digest}  C:\\Temp\\m.exe")
+        with patch("core.execution_log.log", l):
+            r = record_finding("m.exe on CORP-WS01 is the credential dumper", "SUSPECTED", "hash.hash_file",
+                               input_call_ids=[tid], host="CORP-WS01",
+                               indicators=[{"type": "sha256", "value": digest + "c", "side": "attacker"}])
+        assert r["success"] is True and "indicators_kept" not in r
+        node = next(n for n in load_graph(l.case_dir())["nodes"].values() if n.get("kind") == "claim")
+        drop = node["indicators_dropped"][0]
+        assert drop["type"] == "hash" and drop["suggested"] == digest
+        assert build_catalog(l.case_dir())["not_exported"][0]["value"] == digest + "c"
 
     def test_a_finding_without_rows_is_recorded_as_before(self, tmp_path):
         from tools.misc import record_finding
@@ -2344,3 +2363,30 @@ class TestRecordFindingIndicators:
         with patch("core.execution_log.log", l):
             r = record_finding("test finding", "SUSPECTED", "vol.netscan", input_call_ids=[1])
         assert r["success"] and "indicators_kept" not in r and "indicators_dropped" not in r
+
+
+class TestClearCaseRunLinks:
+    """reports/latest is a link to the newest snapshot: a reset removes the
+    link itself, in either listing order, and never follows one out of the
+    case."""
+
+    @pytest.mark.parametrize("order", [sorted, lambda xs: sorted(xs, reverse=True)])
+    def test_a_snapshot_link_is_removed_in_either_order(self, tmp_path, monkeypatch, order):
+        import glob as _glob
+        from tools.misc import clear_case_run
+        case = tmp_path / "cases" / "case-a"
+        (case / ".atlas").mkdir(parents=True)
+        snap = case / "reports" / "initial_report"
+        snap.mkdir(parents=True)
+        (snap / "CASE-A_investigation_report.md").write_text("# report\n", encoding="utf-8")
+        (case / "reports" / "latest").symlink_to("initial_report")
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "keep.txt").write_text("jane.doe", encoding="utf-8")
+        (case / "reports" / "elsewhere").symlink_to(outside)
+        real_glob = _glob.glob
+        monkeypatch.setattr(_glob, "glob", lambda pattern, **kw: order(real_glob(pattern, **kw)))
+        r = clear_case_run(str(case), clear_memory=False)
+        assert r["success"] is True and r["errors"] == []
+        assert list((case / "reports").iterdir()) == []
+        assert (outside / "keep.txt").is_file()

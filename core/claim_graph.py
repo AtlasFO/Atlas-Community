@@ -625,12 +625,48 @@ def merge_indicator_rows(node: dict[str, Any], rows: list[dict[str, Any]] | None
                            + (f"; {prev['note']}" if prev.get("note") else ""))
         by_key[key] = new
     node["indicators"] = list(by_key.values())
+    _resolve_dropped(node)
     return node["indicators"]
 
 
+def _resolve_dropped(node: dict[str, Any]) -> None:
+    """Forget a refused row once the node carries the value it stood for:
+    the same value or the digest it was suggested to be a slip of, under any
+    type, since the usual repair of a refused row re-types it (a hash
+    stated as a file name, a path as a file)."""
+    drops = [d for d in (node.get("indicators_dropped") or []) if isinstance(d, dict)]
+    if not drops:
+        return
+    have = {str(r.get("value") or "").lower()
+            for r in (node.get("indicators") or []) if isinstance(r, dict) and r.get("value")}
+    left = [d for d in drops
+            if str(d.get("value") or "").lower() not in have
+            and not (d.get("suggested") and str(d["suggested"]).lower() in have)]
+    if left:
+        node["indicators_dropped"] = left
+    else:
+        node.pop("indicators_dropped", None)
+
+
+def merge_dropped_rows(node: dict[str, Any], dropped: list[dict[str, Any]] | None) -> None:
+    """Keep the typed rows refused at record time on the claim node, one per
+    (type, value), so the indicator file can list what was not exported and
+    why; a later row for the same value replaces the earlier one."""
+    current = [d for d in (node.get("indicators_dropped") or []) if isinstance(d, dict)]
+    by_key = {(d.get("type"), str(d.get("value") or "").lower()): d for d in current}
+    for d in dropped or []:
+        if isinstance(d, dict) and d.get("value"):
+            by_key[(d.get("type"), str(d["value"]).lower())] = dict(d)
+    if by_key:
+        node["indicators_dropped"] = list(by_key.values())
+    _resolve_dropped(node)
+
+
 def set_claim_indicators(case_dir: str | os.PathLike, claim_id: str,
-                         rows: list[dict[str, Any]]) -> dict[str, Any]:
-    """Attach validated typed rows to a current claim or conclusion."""
+                         rows: list[dict[str, Any]],
+                         dropped: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """Attach validated typed rows to a current claim or conclusion, and the
+    rows refused on the way (``dropped``)."""
     with _LOCK:
         graph = load_graph(case_dir)
         node = get_node(graph, claim_id)
@@ -639,6 +675,7 @@ def set_claim_indicators(case_dir: str | os.PathLike, claim_id: str,
         if node.get("status") in ("superseded", "withdrawn"):
             return {"success": False, "error": f"{claim_id} is {node['status']}; attach to the current belief"}
         merged = merge_indicator_rows(node, rows)
+        merge_dropped_rows(node, dropped)
         node["updated_at"] = _utcnow()
         save_graph(case_dir, graph)
     return {"success": True, "claim_id": claim_id, "indicators": merged}
@@ -670,6 +707,7 @@ def upsert_claim_from_finding(
     scope: str = "host",
     fresh: bool = False,
     indicators: list[dict[str, Any]] | None = None,
+    indicators_dropped: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Create or update a ``claim`` node mirrored from a trace finding.
 
@@ -768,6 +806,8 @@ def upsert_claim_from_finding(
                 ]
             if indicators:
                 merge_indicator_rows(existing, indicators)
+            if indicators_dropped:
+                merge_dropped_rows(existing, indicators_dropped)
             graph["nodes"][cid] = existing
             path = save_graph(case_dir, graph)
             finding_id = None
@@ -822,6 +862,8 @@ def upsert_claim_from_finding(
         }
         if indicators:
             merge_indicator_rows(node, indicators)
+        if indicators_dropped:
+            merge_dropped_rows(node, indicators_dropped)
         if refines_id:
             node["refines"] = refines_id
             graph.setdefault("edges", []).append(
@@ -861,6 +903,7 @@ def mirror_finding_fail_open(
     case_id: str = "",
     fresh: bool = False,
     indicators: list[dict[str, Any]] | None = None,
+    indicators_dropped: list[dict[str, Any]] | None = None,
 ) -> Optional[dict[str, Any]]:
     """Best-effort claim mirror. Never raises.
 
@@ -897,6 +940,7 @@ def mirror_finding_fail_open(
             case_id=case_id or "",
             fresh=fresh,
             indicators=indicators,
+            indicators_dropped=indicators_dropped,
         )
     except Exception as e:
         return {"skipped": True, "reason": f"{type(e).__name__}: {e}"[:200]}
@@ -1933,6 +1977,14 @@ def supersede(
                     for r in (new.get("indicators") or []) if isinstance(r, dict)}
             merge_indicator_rows(new, [dict(r, carried_from=old_id) for r in carried
                                        if (r.get("type"), str(r.get("value") or "").lower()) not in have])
+        # So do the rows it was refused, unless the successor carries the
+        # value they stood for (merge_dropped_rows resolves those).
+        refused = [d for d in (old.get("indicators_dropped") or []) if isinstance(d, dict)]
+        if refused and new.get("kind") in ("claim", "conclusion"):
+            own = {(d.get("type"), str(d.get("value") or "").lower())
+                   for d in (new.get("indicators_dropped") or []) if isinstance(d, dict)}
+            merge_dropped_rows(new, [dict(d, carried_from=old_id) for d in refused
+                                     if (d.get("type"), str(d.get("value") or "").lower()) not in own])
         # A recommendation that rests on the revised belief rests on its
         # successor; the swap is recorded on the recommendation.
         for rid, rec in list(graph.get("nodes", {}).items()):

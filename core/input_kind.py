@@ -795,3 +795,45 @@ def refuse_non_evt(path: str) -> Optional[dict[str, Any]]:
             "error": f"{path!r} is not a legacy .evt event log (no LfLe header at offset 4).",
         })
     return None
+
+
+# ── NTFS directory index ($I30) ───────────────────────────────────────
+# A directory's index allocation stream is a run of 4 KiB records that each
+# start with "INDX" (a record never used is all zeros); an MFT record starts
+# with "FILE". Public NTFS on-disk format knowledge. INDXParse reads only the
+# former and fails on anything else.
+_EXTRACT_I30 = ("locate the directory with tsk.resolve_path or tsk.fls, extract its $I30 "
+                "index allocation with tsk.icat on the image with inode '<dir-inode>-160' "
+                "(and the volume's offset_sectors) into analysis/, then call this tool on "
+                "that file")
+
+
+def refuse_non_indx(path: str) -> Optional[dict[str, Any]]:
+    """Error dict unless ``path`` holds INDX records, a directory's $I30
+    index allocation stream, the only input INDXParse reads."""
+    def refuse(error: str, use_instead: str, **extra) -> dict[str, Any]:
+        return _with_gate({"success": False, "error": error + _EXTRACT_I30 + ".",
+                           "use_instead": use_instead, "summary": (
+                               "Wrong input kind - do not retry this tool on the same path; "
+                               "use use_instead."), **extra})
+
+    extract = "tsk.icat <image> '<dir-inode>-160', then this tool on the extracted file"
+    if not path or not os.path.exists(path):
+        return refuse(f"{path!r} does not exist; ", extract, failure_class="missing_input")
+    if os.path.isdir(path):
+        return refuse(f"{path!r} is a directory, not its index; ", extract)
+    try:
+        with open(path, "rb") as f:
+            head = f.read(4096)
+    except OSError as exc:
+        return refuse(f"{path!r} cannot be read ({exc}); ", extract)
+    if head[:4] == b"INDX" or (head and not any(head)):
+        return None
+    if head[:4] == b"FILE":
+        return refuse(f"{path!r} holds MFT records, not a directory index. Deleted MFT "
+                      "records are ez.mftecmd's job; for what a directory's index keeps "
+                      "in its slack, ", "ez.mftecmd, or " + extract)
+    from core.artifact_kind import head_signature
+    if head_signature(path) == "disk":
+        return refuse(f"{path!r} is a disk or volume image, not a directory index; ", extract)
+    return refuse(f"{path!r} does not start with an INDX record; ", extract)

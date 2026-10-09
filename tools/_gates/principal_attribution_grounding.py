@@ -50,13 +50,15 @@ def check(ctx) -> Optional[dict]:
     # binds to a program the cited evidence names ("Abel is Cain's companion
     # tool"), to another account or artifact noun ("used by local Windows
     # account 'jcloudy'"), to a token the text spells as a file, domain or
-    # path, or to nobody named at all ("used by the attacker") binds nothing
-    # to a person. When no binding in the description does, there is no
+    # path, a quoted name a thing-noun introduces (the job "Nightly Sync"),
+    # or to nobody named at all ("used by the attacker") binds nothing to a
+    # person. When no binding in the description does, there is no
     # attribution here.
-    from ._match import named_things_in_text, program_names_in_evidence
+    from ._match import labelled_quote_words, named_things_in_text, program_names_in_evidence
     from .named_actor_attribution_grounding import _NAME_STOPS
     programs = program_names_in_evidence(ctx)
-    things = named_things_in_text(desc) | named_things_in_text(lineage_evidence_text(ctx))
+    things = (named_things_in_text(desc) | named_things_in_text(lineage_evidence_text(ctx))
+              | labelled_quote_words(desc))
 
     def _binds_a_person(bound: str) -> bool:
         if not bound or bound in _NAME_STOPS:

@@ -134,7 +134,8 @@ class TestClosingPivots:
         save_ledger(case, ledger)
         blocked = mark_unit_blocked(
             case, target, reason="log truncated to 0 bytes",
-            trace_entries=[{"type": "tool_call", "cmd": f"grep x {target}"}])
+            trace_entries=[{"type": "tool_call", "cmd": f"grep x {target}",
+                            "mcp_tool": "strings_strings_grep", "success": False}])
         assert blocked["success"], blocked
         ip.refresh_pivots(case)
         assert not ip.open_pivots(case)

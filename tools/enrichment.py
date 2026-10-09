@@ -154,6 +154,14 @@ def _analysis_dir() -> Optional[str]:
     except Exception:
         trace_path = None
     if not trace_path:
+        # With more than one run alive the beacon names only the run started
+        # last: a lookup that names no case is persisted nowhere.
+        try:
+            from core.run_state import live_runs
+            if len(live_runs()) > 1:
+                return None
+        except Exception:  # noqa: BLE001 - no answer keeps the beacon fallback
+            pass
         try:
             with open(_SESSION_FILE) as fh:
                 trace_path = (json.load(fh) or {}).get("path")

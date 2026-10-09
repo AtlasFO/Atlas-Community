@@ -48,6 +48,7 @@ JOURNAL_REASONS = frozenset({
     "analyst_context_added",
     "analyst_context_withdrawn",
     "analyst_context_corrected",
+    "coverage_rederived",
 })
 
 # High-level milestones (advisory only — never gates investigation)

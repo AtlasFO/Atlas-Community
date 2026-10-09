@@ -123,6 +123,15 @@ def test_rerun_objective_comes_from_the_work_when_nothing_is_open():
     assert "still hold" in rerun_objective(None, {})
 
 
+def test_rerun_objective_names_the_delivered_evidence_no_call_has_read():
+    from agent.prompts import rerun_objective
+    unread = [f"evidence/images/CORP-WS{i:02d}.dd" for i in range(1, 8)]
+    text = rerun_objective(None, {"unexamined_items": unread})
+    assert "no call has read yet" in text
+    assert "evidence/images/CORP-WS01.dd" in text and "and 2 more" in text
+    assert "evidence/images/CORP-WS07.dd" not in text
+
+
 def test_rerun_message_names_the_change_and_the_objective():
     from agent.prompts import initial_rerun_message
     msg = initial_rerun_message(
@@ -137,3 +146,93 @@ def test_rerun_message_names_the_change_and_the_objective():
     assert "- IP 10.0.0.5 is the print server." in msg
     assert "USE THIS CASE ID: RR" in msg and "# Rerun Brief" in msg
     assert "misc_inventory_evidence" in msg and "atlas_finish" in msg
+
+
+PRIOR = '{"stopped_reason": "finished", "finish_status": "complete", "turns": 41}\n'
+
+
+def _status(case: Path) -> dict:
+    return json.loads((case / ".atlas" / "run_status.json").read_text(encoding="utf-8"))
+
+
+def test_a_rerun_that_starts_no_session_puts_the_previous_record_back(tmp_path):
+    """The intake record (pid, activity) stands while the evidence is
+    fingerprinted; a rerun that then starts no investigator must not leave a
+    'running' record behind, which the dashboard would show as a dead run."""
+    import os
+    case = _case(tmp_path)
+    (case / ".atlas" / "run_status.json").write_text(PRIOR, encoding="utf-8")
+    for args, plane in ((_args(), _plane(False)), (_args(no_agent=True), _plane(True)),
+                        (_args(regenerate_sections=True), _plane(True))):
+        _run_cmd_rerun(case, args, plane, MagicMock())
+        assert (case / ".atlas" / "run_status.json").read_text(encoding="utf-8") == PRIOR
+    _run_cmd_rerun(case, _args(), _plane(True), MagicMock(return_value={"regenerated": []}))
+    st = _status(case)
+    assert st["stopped_reason"] == "running" and st["pid"] == os.getpid()
+    assert st["activity"].startswith("Intake") and st["finish_status"] == ""
+
+
+def test_a_failed_rerun_scan_records_why(tmp_path):
+    case = _case(tmp_path)
+    (case / ".atlas" / "run_status.json").write_text(PRIOR, encoding="utf-8")
+    with pytest.raises(SystemExit):
+        _run_cmd_rerun(case, _args(), {"success": False, "error": "case directory not found"},
+                       MagicMock())
+    st = _status(case)
+    assert st["stopped_reason"] == "crashed" and st["finish_status"] == "error"
+    assert "case directory not found" in st["error"]
+
+
+def test_a_dry_run_writes_no_record(tmp_path):
+    case = _case(tmp_path)
+    (case / ".atlas" / "run_status.json").write_text(PRIOR, encoding="utf-8")
+    _run_cmd_rerun(case, _args(dry_run=True), _plane(True), MagicMock())
+    assert (case / ".atlas" / "run_status.json").read_text(encoding="utf-8") == PRIOR
+
+
+def test_the_intake_record_reports_progress_and_yields_to_a_session(tmp_path, capsys):
+    from agent.cli import _IntakeStatus
+    case = _case(tmp_path)
+    intake = _IntakeStatus(case)
+    intake.progress(2, 4, 1_500_000_000, 6_000_000_000)
+    assert _status(case)["activity"] == "Intake: fingerprinting evidence 2/4 (1.5 of 6.0 GB)"
+    assert "Intake: fingerprinting evidence 2/4" in capsys.readouterr().err
+    intake.settle(KeyboardInterrupt())
+    assert _status(case)["stopped_reason"] == "keyboard_interrupt"
+    # A session's own record is never replaced.
+    intake = _IntakeStatus(case)
+    (case / ".atlas" / "run_status.json").write_text('{"stopped_reason": "running", "turns": 3}\n',
+                                                     encoding="utf-8")
+    intake.settle()
+    assert _status(case)["turns"] == 3
+
+
+def test_a_stop_during_the_evidence_stage_is_recorded_as_a_stop(tmp_path):
+    """The dashboard's Stop sends SIGTERM. During the evidence stage no
+    session exists yet; routed through an interrupt, the stop still ends in
+    a record that says it was stopped, not in a 'running' record of a dead
+    process."""
+    import os
+    import signal
+    import time
+    from agent import cli as cli_mod
+    case = _case(tmp_path)
+    (case / ".atlas" / "run_status.json").write_text(PRIOR, encoding="utf-8")
+
+    def stopped_mid_scan(*_a, **_k):
+        os.kill(os.getpid(), signal.SIGTERM)
+        time.sleep(5)                                  # the handler interrupts this
+        raise AssertionError("SIGTERM was not routed")
+    def unrouted(*_a):
+        raise RuntimeError("SIGTERM reached no interrupt route")
+    before = signal.signal(signal.SIGTERM, unrouted)   # fails cleanly without the route
+    try:
+        with patch("core.run_lock.acquire", return_value=None), \
+             patch("core.incremental.plane_a_scan", side_effect=stopped_mid_scan), \
+             patch.object(cli_mod, "_open_trace_before_plane_a"), \
+             pytest.raises(KeyboardInterrupt):
+            cli_mod.cmd_rerun(_args(case=str(case)))
+    finally:
+        signal.signal(signal.SIGTERM, before)
+    st = _status(case)
+    assert st["stopped_reason"] == "keyboard_interrupt" and st["finish_status"] == "interrupted"

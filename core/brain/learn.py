@@ -175,7 +175,10 @@ def build_investigation_digest(
     mem = _read_json(case_dir / ".atlas" / "investigation_memory.json")
     if isinstance(mem, dict):
         parts.append("## Investigation memory (summary keys)")
-        for key in ("open_questions", "analyst_context", "working_theory",
+        # Not the analyst's context: the hosts, accounts and addresses of
+        # this case's estate are no cross-case lesson, and nothing the
+        # brief states is promoted into the brain (core.case_knowledge).
+        for key in ("open_questions", "working_theory",
                     "key_findings", "summary"):
             val = mem.get(key)
             if val:

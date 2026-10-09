@@ -82,6 +82,9 @@ class ProviderPreset:
     thinking_control: str = "reasoning_effort"
     effort_values: tuple[str, ...] = ()
     echo_fields: tuple[str, ...] = ()
+    # False where the vendor documents a sampling temperature as refused by
+    # its current models, so the first request does not pay the 400.
+    send_temperature: bool = True
     # How the shape was verified: "live" (checked against a running
     # endpoint), "docs" (the vendor's documentation only) or "" (no fixed
     # endpoint to check: the shape is learned from the server in use).
@@ -145,8 +148,12 @@ PRESETS: tuple[ProviderPreset, ...] = (
         needs_api_key=True,
         notes="Anthropic calls this layer test-grade; for production, reach Claude "
               "through OpenRouter or the LLM Hub. reasoning_effort is ignored here, "
-              "so the thinking level is sent as a thinking budget.",
+              "so a thinking level is sent as a thinking budget, which only Haiku 4.5 "
+              "takes: the newer models refuse a budget and any temperature, Atlas "
+              "stops sending one after their first refusal, and they think at their "
+              "own default.",
         thinking_control="thinking_budget",
+        send_temperature=False,
         evidence="docs",
     ),
     ProviderPreset(
@@ -280,6 +287,8 @@ def preset_profile(preset_id: str) -> dict:
         fields["effort_values"] = tuple(p.effort_values)
     if p.echo_fields:
         fields["echo_fields"] = tuple(p.echo_fields)
+    if not p.send_temperature:
+        fields["send_temperature"] = False
     return fields
 
 

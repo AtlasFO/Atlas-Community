@@ -620,21 +620,23 @@ _DAIR_PROSE_RE = re.compile(
 _RAW_MESSAGE_LOG_CAP = 2000
 
 
-# Turns the director may sit in Report without a new claim before the loop
-# asks for the report itself. Behaviour-based: a Report phase that keeps
-# collecting and records nothing is finished in all but name.
+# Turns the director may sit in Report without moving towards the report
+# (Agent._report_moved) before the loop asks for the report itself.
+# Behaviour-based: a Report phase that keeps collecting and gets no closer is
+# finished in all but name.
 REPORT_STALL_TURNS = env_int("ATLAS_AGENT_REPORT_STALL_TURNS", 12)
 # Syntheses in Report before the loop asks for the report: each synthesis
 # names new gaps, and chasing every one keeps a finished investigation open.
 REPORT_STALL_SYNTHESES = env_int("ATLAS_AGENT_REPORT_STALL_SYNTHESES", 3)
-# Report-phase pushes in a row with no new claim between them before the
-# run wraps up. Each push is a whole stall's worth of turns; a run that
-# collects through three of them without recording anything has stopped
+# Report-phase pushes in a row with no move towards the report between them
+# before the run wraps up. Each push is a whole stall's worth of turns; a run
+# that collects through three of them without getting closer has stopped
 # producing, and the report it can write now is the report it will write.
 REPORT_STALL_WRAPUP_FIRES = env_int("ATLAS_AGENT_REPORT_STALL_WRAPUP_FIRES", 3)
 _REPORT_STALL_WRAPUP_MSG = (
-    "[report phase] Several requests for the report have passed without a "
-    "new finding. The run is wrapping up now. Do not collect further: run "
+    "[report phase] Several requests for the report have passed with no "
+    "evidence read for the first time and no blocking issue resolved. The run "
+    "is wrapping up now. Do not collect further: run "
     "reason.reason_pre_report_check (open gaps become documented "
     "limitations), then write the report from the findings recorded. "
     "misc.current_investigation_state reads them back in full."
@@ -646,8 +648,12 @@ _REPORT_DONE_MSG = (
     "then call atlas_finish."
 )
 _REPORT_STALL_MSG = (
-    "[report phase] The director has been in Report for a long stretch: "
-    "several syntheses or many turns without a new finding. Stop collecting. "
+    "[report phase] The director has been in Report for a long stretch "
+    "without getting closer to the report: several syntheses, or many turns in "
+    "which no evidence was read for the first time and the report gate's "
+    "blocking issues did not go down (a further variant of a finding does not "
+    "count). Reading evidence the gate lists as unexamined is work towards the "
+    "report; beyond that, stop collecting. "
     "Gaps no available tool can close are limitations, not blockers: state "
     "each as 'UNRESOLVABLE: <what> — <why it cannot be closed>' so "
     "reason.pre_report_check records it, then run reason.pre_report_check and "
@@ -1270,21 +1276,115 @@ class Agent:
         except Exception:  # noqa: BLE001
             return -1
 
-    def _pre_report_checks(self) -> int:
-        """Times the report gate has been consulted in this run."""
+    @staticmethod
+    def _last_call_id() -> int:
+        """The highest call id the execution log holds."""
         try:
             from core.execution_log import log
-            return sum(1 for e in log._entries
-                       if e.get("type") == "reason_call"
-                       and e.get("tool") == "reason_pre_report_check")
+            return max((int(e.get("call_id") or 0) for e in log._entries), default=0)
         except Exception:  # noqa: BLE001
-            return -1
+            return 0
+
+    def _report_blockers(self) -> int | None:
+        """Blocking issues the newest report-gate verdict of this run named;
+        None before its first. A rerun's log holds the previous run's
+        verdicts (configure() resumes the trace), so the ones recorded before
+        this run started (``_run_since``) are not its own."""
+        try:
+            from core.execution_log import log
+            from core.progress_signature import report_gate_blockers
+            return report_gate_blockers(log._entries,
+                                        since_call_id=getattr(self, "_run_since", 0))
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _report_done(self) -> frozenset:
+        """What the report gate's own sources count as discharged, by
+        identity: coverage-ledger units and delivered evidence items no
+        longer unseen, disk media no longer waiting for an open, requests no
+        longer actionable (or blocked on missing evidence) and request parts
+        no longer open. A first read, open, block or close adds a member; a
+        re-read, a finding, a variant of one, a refused close, a reopened and
+        re-closed part, or a unit registered unseen adds none, and a unit a
+        ledger rebuild drops takes nothing away from what was already seen.
+
+        Producing never-read artefacts out of the evidence (an extraction)
+        and reading them adds members, so such a run is not stalled: reading
+        what nobody has read is examination. No count can tell a thorough run
+        from a wasteful one; repeated calls and refusals are the deadlock
+        breaker's and the runaway guard's to end, not this ladder's."""
+        done: set = set()
+        try:
+            from core.coverage_ledger import load_ledger
+            ledger = load_ledger(self.case_dir)
+            done.update(("unit", str(u.get("path"))) for u in (ledger.get("units") or {}).values()
+                        if isinstance(u, dict) and str(u.get("status") or "unseen") != "unseen")
+            done.update(("item", str(i.get("path"))) for i in (ledger.get("items") or {}).values()
+                        if isinstance(i, dict) and i.get("status") in ("examined", "blocked"))
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            from core.evidence_access import media_entries, pending_media_open
+            pending = {str(e.get("path")) for e in pending_media_open(self.case_dir)}
+            done.update(("media", str(e.get("path"))) for e in media_entries(self.case_dir)
+                        if str(e.get("path")) not in pending)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            from core.investigation_tasks import ACTIONABLE_STATUSES, load_tasks
+            for task in load_tasks(self.case_dir).get("tasks") or []:
+                if not isinstance(task, dict):
+                    continue
+                tid, status = str(task.get("id") or ""), str(task.get("status") or "")
+                if status not in ACTIONABLE_STATUSES or status == "blocked_missing_evidence":
+                    done.add(("task", tid))
+                done.update(("part", tid, str(part.get("id") or ""))
+                            for part in task.get("parts") or []
+                            if isinstance(part, dict) and part.get("status") != "open")
+        except Exception:  # noqa: BLE001
+            pass
+        return frozenset(done)
+
+    def _report_moved(self, attr: str, *, claims: bool) -> bool:
+        """Has the run moved towards the report since the mark stored under
+        ``attr``? Movement is a member of _report_done never seen before
+        under this mark (something the gate counts as open read, opened,
+        blocked or closed for the first time), a new low of the blocking
+        issues of this run's newest gate verdict (its first verdict is one),
+        or, before that verdict and when ``claims``, any change of the claim
+        graph. A finding recorded while nothing new was discharged and the
+        same blockers stand (a variant of a finding the gate objects to) is
+        no movement, nor are blockers that rise and fall back. The mark keeps
+        every member seen and the low; a check without movement leaves it.
+
+        The trade this accepts: after the gate's first verdict, a deep dive
+        inside evidence already read that closes no request part and lowers
+        no blocking issue wraps up after REPORT_STALL_WRAPUP_FIRES stalls
+        (36 Report turns at the defaults): it is the collection the ladder
+        exists to end."""
+        blockers = self._report_blockers()
+        done = self._report_done()
+        count = self._claim_count() if claims and blockers is None else None
+        last = getattr(self, attr, None)
+        if last is None:
+            setattr(self, attr, (blockers, count, done))
+            return True
+        low, last_count, seen = last
+        moved = (bool(done - seen)
+                 or (blockers is not None and (low is None or blockers < low))
+                 or (count is not None and count != last_count))
+        if moved:
+            setattr(self, attr, (
+                low if blockers is None else blockers if low is None else min(blockers, low),
+                count, seen | done))
+        return moved
 
     def _push_report_phase(self, turn: int, *, reason: str) -> bool:
         """Ask for the report with the gaps named. After
-        REPORT_STALL_WRAPUP_FIRES pushes with no new claim between them the
-        run wraps up: it has stopped producing, and asking again would only
-        extend the collection it is asked to end. Returns True on wrap-up."""
+        REPORT_STALL_WRAPUP_FIRES pushes with no move towards the report
+        between them the run wraps up: it has stopped producing, and asking
+        again would only extend the collection it is asked to end. Returns
+        True on wrap-up."""
         self._nudge("report_phase_stall", _REPORT_STALL_MSG)
         self._log({"event": "report_phase_stall", "turn": turn,
                    "quiet_turns": REPORT_STALL_TURNS, "reason": reason})
@@ -1296,16 +1396,14 @@ class Agent:
         self._record_budget_wrapup_marker("report_stall", turn,
                                           allow_synthesize_escape=True)
         self.ui.warn(f"report phase pushed {self._report_stall_fires} times "
-                     "without a new finding — wrapping up")
+                     "without getting closer to the report — wrapping up")
         return True
 
     def _report_stall_exhausted(self, turn: int) -> bool:
         """Has the report-phase push fired REPORT_STALL_WRAPUP_FIRES times
-        in a row with no claim added in between? Called once per push."""
-        count = self._claim_count()
-        last = getattr(self, "_report_stall_claims", None)
-        if last is None or count != last:
-            self._report_stall_claims = count
+        in a row with no move towards the report in between
+        (:meth:`_report_moved`)? Called once per push."""
+        if self._report_moved("_report_stall_mark", claims=True):
             self._report_stall_fires = 1
         else:
             self._report_stall_fires = getattr(self, "_report_stall_fires", 0) + 1
@@ -1326,36 +1424,24 @@ class Agent:
 
     def _report_phase_stalled(self, turn: int) -> bool:
         """True once the director has sat in Report for REPORT_STALL_TURNS
-        turns without a new claim; fires once per stall."""
+        turns without moving towards the report; fires once per stall."""
         if getattr(self, "_dair_phase", "") != "Report" or not self.case_dir:
             return False
         if getattr(self, "_report_synth_calls", 0) >= REPORT_STALL_SYNTHESES:
             self._report_synth_calls = 0                 # re-arm
             return True
-        # Progress in Report means moving towards a report. The claim clock
-        # below restarts on any new belief, which is the right reading once
-        # the run has asked whether it may report: it is then answering the
-        # gate. Before it has ever asked, a belief is not closing out, and a
-        # run recording one occasionally can collect here for the length of a
-        # whole phase without the question ever being put. Until the first
-        # consultation, then, only turns count.
-        checks = self._pre_report_checks()
-        entered = getattr(self, "_report_entered_turn", None)
-        if entered is None:
-            self._report_entered_turn = entered = turn
-        if checks == 0:
-            if turn - entered < REPORT_STALL_TURNS:
-                return False
-            self._report_entered_turn = turn            # re-arm
-            return True
-        count = self._claim_count()
-        last = getattr(self, "_report_progress", None)
-        if last is None or count != last[0]:
-            self._report_progress = (count, turn)
+        # Progress in Report means moving towards a report: a first read of
+        # evidence the gate counts as open, or fewer blocking issues once
+        # this run has asked the gate (_report_moved). A belief alone never
+        # buys time here: a run recording one now and then could otherwise
+        # sit in Report for a whole phase without ever being asked to finish.
+        last = getattr(self, "_report_progress_turn", None)
+        if self._report_moved("_report_progress_mark", claims=False) or last is None:
+            self._report_progress_turn = turn
             return False
-        if turn - last[1] < REPORT_STALL_TURNS:
+        if turn - last < REPORT_STALL_TURNS:
             return False
-        self._report_progress = (count, turn)          # re-arm after firing
+        self._report_progress_turn = turn              # re-arm after firing
         return True
 
     def _note_repeated_refusal(self, tc, result: str, turn: int) -> str:
@@ -2264,13 +2350,17 @@ class Agent:
         except Exception:
             open_tasks = []
         self._finish_coverage_deferred = True
+        try:
+            from core.coverage_ledger import open_units_read_hint
+            how = open_units_read_hint(self.case_dir)
+        except Exception:  # noqa: BLE001
+            how = ""
         lines = [
             "atlas_finish deferred — this is NOT a hard stop, but high-value "
             "evidence is still unexamined. There is no turn limit: keep "
             "investigating as long as the evidence yields work.",
-            "Unseen high-value units (probe with table.table_query / a "
-            "single-file parse, or document a failed attempt with "
-            "coverage.mark_blocked):",
+            "Unseen high-value units (read each" + (f" - {how}" if how else "")
+            + "; coverage.mark_blocked records a read that failed):",
         ]
         lines += [f"  - {g}" for g in gaps]
         try:
@@ -2456,6 +2546,8 @@ class Agent:
         blocked_turns = 0
         run_start = time.monotonic()
         self._tool_stats = []
+        # The report ladder reads this run's own gate verdicts only.
+        self._run_since = self._last_call_id()
         stopped_reason = "finished"
         turn = 0
         wrapped_up = False
@@ -2611,12 +2703,23 @@ class Agent:
                 # director keeps prescribing collection: ask for the report with
                 # the gaps named, before the wrap-up guards have any reason to.
                 try:
-                    if (not wrapped_up and not self._report_written()
-                            and self._report_phase_stalled(turn)
-                            and self._push_report_phase(turn, reason="stalled")):
-                        wrapped_up = True
-                        wrapup_rationed = True
-                        report_wrapup_turn = turn
+                    if ((not wrapped_up or report_wrapup_turn is None)
+                            and not self._report_written()
+                            and self._report_phase_stalled(turn)):
+                        if not wrapped_up:
+                            if self._push_report_phase(turn, reason="stalled"):
+                                wrapped_up = True
+                                wrapup_rationed = True
+                                report_wrapup_turn = turn
+                        else:
+                            # Wrapped up by another trigger and stalled in
+                            # Report all the same: start the close-out clock
+                            # below, with no second wrap-up message.
+                            self._nudge("report_phase_stall", _REPORT_STALL_MSG)
+                            self._log({"event": "report_phase_stall", "turn": turn,
+                                       "quiet_turns": REPORT_STALL_TURNS,
+                                       "reason": "stalled_after_wrapup"})
+                            report_wrapup_turn = turn
                     # After the report-stall wrap-up, still no report a
                     # stall's worth of turns later: the loop consults the
                     # gate itself. Ready, it writes the reports and ends
@@ -2695,7 +2798,7 @@ class Agent:
                         if (_pivots and turn % IOC_PIVOT_NUDGE_EVERY == 0
                                 and not wrapped_up):
                             self._nudge("ioc_pivot_nudge",
-                                        format_pivot_nudge(_pivots))
+                                        format_pivot_nudge(_pivots, case_dir=self.case_dir))
                             self._log({"event": "ioc_pivot_nudge",
                                        "turn": turn,
                                        "open": len(_pivots),
@@ -3908,7 +4011,12 @@ class Agent:
                         if self._report_written():
                             self._nudge("report_done", _REPORT_DONE_MSG)
                         elif wrapped_up:
+                            # Wrapped up already: the close-out clock starts
+                            # here if nothing started it, and no second
+                            # wrap-up message is appended.
                             self._nudge("report_phase_stall", _REPORT_STALL_MSG)
+                            if report_wrapup_turn is None:
+                                report_wrapup_turn = turn
                         elif self._push_report_phase(turn, reason="director_reask"):
                             wrapped_up = True
                             wrapup_rationed = True

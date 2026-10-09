@@ -80,6 +80,23 @@ def _ready_to_report_from_trace(entries: list[dict]) -> bool:
             return bool(m and m.group(1).lower() == "true")
     return False
 
+
+_BLOCKING_COUNT_RE = re.compile(r"BLOCKING_ISSUES\s*\((\d+)\)", re.IGNORECASE)
+
+
+def report_gate_blockers(entries: list[dict], since_call_id: int = 0) -> int | None:
+    """How many blocking issues the most recent reason.pre_report_check
+    verdict named, or None if none has run yet. With ``since_call_id`` only
+    a verdict recorded after that call counts: a resumed log holds the
+    verdicts of the run before."""
+    for e in reversed(entries):
+        if e.get("type") == "reason_call" and e.get("tool") == "reason_pre_report_check":
+            if int(e.get("call_id") or 0) <= since_call_id:
+                return None
+            m = _BLOCKING_COUNT_RE.search(e.get("conclusion") or "")
+            return int(m.group(1)) if m else None
+    return None
+
 # ── IOC hint patterns ─────────────────────────────────────────────────────────
 # Heuristic only (see module docstring). Deliberately narrow: IPv4 + hex-hash
 # shapes are unambiguous and case-agnostic. Scanned over already-authored

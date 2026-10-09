@@ -12,6 +12,7 @@ workbooks and the stdlib for csv/tsv/jsonl — no pandas.
 from __future__ import annotations
 
 import csv
+import heapq
 import json
 import os
 import re
@@ -26,8 +27,12 @@ from core.paths import MAX_TOOL_OUTPUT_LINES, OUTPUT_CAP
 
 mcp = FastMCP("table")
 
-# Bounded work per call: rows scanned, rows returned, payload size.
-MAX_SCAN_ROWS = env_int("ATLAS_TABLE_MAX_SCAN_ROWS", 200_000)
+# Bounded work per call: rows returned, payload size. A scan reads every row
+# unless an operator sets ATLAS_TABLE_MAX_SCAN_ROWS (0 or unset: no bound): a
+# scan stopped on volume would report part of a file as the whole of it, and
+# a search of a timeline longer than the bound would come back empty for what
+# lies past it.
+MAX_SCAN_ROWS = env_int("ATLAS_TABLE_MAX_SCAN_ROWS", 0)
 MAX_RETURN_ROWS = MAX_TOOL_OUTPUT_LINES
 _CELL_CAP = 512  # per-cell chars in returned rows
 
@@ -242,7 +247,8 @@ _ITERATORS = {"xlsx": _iter_xlsx, "csv": _iter_csv, "jsonl": _iter_jsonl}
 
 
 def _iter_rows(path: str, sheet: Optional[str]) -> Iterator[tuple[str, dict]]:
-    """Yields (sheet_name, {column: str_value}) with a scan-row bound."""
+    """Yields (sheet_name, {column: str_value}); stops at the scan-row
+    bound when an operator set one."""
     kind = _kind(path)
     if kind is None:
         base = os.path.basename(path)
@@ -270,7 +276,7 @@ def _iter_rows(path: str, sheet: Optional[str]) -> Iterator[tuple[str, dict]]:
     scanned = 0
     for sheet_name, header, values in _ITERATORS[kind](path, sheet):
         scanned += 1
-        if scanned > MAX_SCAN_ROWS:
+        if MAX_SCAN_ROWS and scanned > MAX_SCAN_ROWS:
             raise _ScanCapReached(scanned - 1)
         values = _repair_unquoted_timestamp(values, len(header))
         row = {header[i] if i < len(header) else f"col{i+1}": _cell(v)
@@ -281,6 +287,20 @@ def _iter_rows(path: str, sheet: Optional[str]) -> Iterator[tuple[str, dict]]:
 class _ScanCapReached(Exception):
     def __init__(self, scanned: int):
         self.scanned = scanned
+
+
+def _scan_fields(scanned: int, capped: bool, found: int) -> dict:
+    """How much of the file a scan read. A scan stopped at the bound that
+    found nothing says nothing about the rows past it."""
+    out = {"rows_scanned": scanned, "scanned_rows": scanned,
+           "scan_capped": capped,
+           "scan_capped_at": MAX_SCAN_ROWS if capped else None}
+    if capped and not found:
+        out["inconclusive"] = True
+        out["note"] = (f"Only the first {scanned} rows were scanned "
+                       "(ATLAS_TABLE_MAX_SCAN_ROWS); nothing found there says "
+                       "nothing about the rest of the file.")
+    return out
 
 
 # Kibana/Elastic CSV exports leave the human-readable timestamp UNQUOTED
@@ -1121,33 +1141,54 @@ def table_query(
             columns = _canonicalize_names(columns, headers)
         if sort_by:
             sort_by = _resolve_column_name(sort_by, headers) or sort_by
-    matched: list[dict] = []
+    limit = max(1, min(limit, MAX_RETURN_ROWS))
+    offset = max(0, offset)
+    total = scanned = 0
     scan_capped = False
+
+    def matches():
+        nonlocal total, scanned, scan_capped
+        try:
+            for sheet_name, row in _iter_rows(path, sheet):
+                scanned += 1
+                if _matches(row, preds):
+                    total += 1
+                    row["_sheet"] = sheet_name
+                    yield row
+        except _ScanCapReached:
+            scan_capped = True
+
+    def key(r):
+        v = r.get(sort_by, "")
+        n = _to_num(v)
+        return (0, n, "") if n is not None else (1, 0.0, v.lower())
+
+    # Every match is held only when all of them are written out. Otherwise
+    # the requested window is, or under sort_by the head of the order up to
+    # it: a broad query over a long file costs counting, not memory.
+    keep = offset + limit
     try:
-        for sheet_name, row in _iter_rows(path, sheet):
-            if _matches(row, preds):
-                row["_sheet"] = sheet_name
-                matched.append(row)
-    except _ScanCapReached:
-        scan_capped = True
+        if output_csv:
+            matched = list(matches())
+            if sort_by:
+                matched.sort(key=key, reverse=descending)
+        elif sort_by:
+            pick = heapq.nlargest if descending else heapq.nsmallest
+            matched = pick(keep, matches(), key=key)
+        else:
+            matched = []
+            for row in matches():
+                if len(matched) < keep:
+                    matched.append(row)
     except Exception as e:
         return {"success": False, "error": f"{type(e).__name__}: {e}"}
 
-    if sort_by:
-        def key(r):
-            v = r.get(sort_by, "")
-            n = _to_num(v)
-            return (0, n, "") if n is not None else (1, 0.0, v.lower())
-        matched.sort(key=key, reverse=descending)
-
-    total = len(matched)
     spilled = None
     if output_csv:
         try:
             spilled = _spill_csv(matched, output_csv)
         except Exception as e:
             return {"success": False, "error": f"output_csv write failed: {e}"}
-    limit = max(1, min(limit, MAX_RETURN_ROWS))
     requested = matched[offset:offset + limit]
     window = [_clip_row(r, columns) for r in requested]
     window, payload_overflow = _payload_capped(window)
@@ -1157,10 +1198,10 @@ def table_query(
         "returned_rows": len(window),
         "offset": offset,
         "rows": window,
-        "scan_capped_at": MAX_SCAN_ROWS if scan_capped else None,
+        **_scan_fields(scanned, scan_capped, total),
         "payload_capped": payload_overflow or len(window) < len(requested),
         "output_csv": spilled,
-        "valid_zero": total == 0,
+        "valid_zero": total == 0 and not scan_capped,
         "schema_columns": list(headers) if headers else None,
         "hint": ("All matches written to output_csv." if spilled else
                  "Pass output_csv=<analysis path> to spill all matches "
@@ -1247,8 +1288,8 @@ def table_pivot(
     ]
     result = {
         "success": True, "path": path, "group_by": group_by,
-        "distinct_groups": len(counts), "rows_scanned": scanned,
-        "scan_capped_at": MAX_SCAN_ROWS if scan_capped else None,
+        "distinct_groups": len(counts),
+        **_scan_fields(scanned, scan_capped, len(counts)),
         "groups": groups,
         "schema_columns": list(headers) if headers else None,
     }
@@ -1302,8 +1343,7 @@ def table_grep(
     except Exception as e:
         return {"success": False, "error": f"{type(e).__name__}: {e}"}
     hits, _ = _payload_capped(hits)
-    return {"success": True, "path": path, "pattern": pattern,
-            "rows_scanned": scanned, "hits": hits,
-            "hit_count": len(hits),
+    return {"success": True, "path": path, "pattern": pattern, "hits": hits,
+            "hit_count": len(hits), "max_hits": max_hits,
             "hit_cap_reached": len(hits) >= max_hits,
-            "scan_capped_at": MAX_SCAN_ROWS if scan_capped else None}
+            **_scan_fields(scanned, scan_capped, len(hits))}

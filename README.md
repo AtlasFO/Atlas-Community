@@ -132,7 +132,8 @@ Everything in detail: [docs/llm.md](docs/llm.md).
 cp -r case-template ~/cases/<CASE_ID>
 cp /path/to/evidence.E01 ~/cases/<CASE_ID>/evidence/
 # edit ~/cases/<CASE_ID>/CASE.md: the investigation requests, and optionally
-# what you already know (a theory, indicators from an alert, a time window)
+# what you already know (a theory, indicators from an alert, a time window,
+# facts about your environment)
 cd ~/cases/<CASE_ID>
 atlas run
 ```
@@ -147,6 +148,7 @@ Atlas writes a structured report to `reports/` and keeps a live, click-through a
 | `./dashboard.sh` | Browse cases, the live trace and reports in the dashboard |
 | `atlas chat` | Interactive session: you drive, Atlas runs the tools |
 | `atlas review --live` | Is a running investigation stuck? A read-only diagnosis |
+| `atlas review --case <dir>` | Grade a run as it stands, as `atlas train`'s reviewer does |
 | `atlas train -q "..."` | A clean run, then graded by an independent reviewer |
 | `atlas doctor` | Which backend and model is each role actually using? |
 | `atlas provider setup` | Add or repoint an LLM backend |

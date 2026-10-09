@@ -50,6 +50,44 @@ class TestClassification:
             "Standard Windows artifacts are absent from CORP-SRV01") == syn.ABSENCE
 
 
+class TestAGapIsReadInTheLeadClause:
+    """The lead clause carries the assertion: a caveat after "; " is no gap,
+    unless the lead reports the examination that left it open."""
+
+    @pytest.mark.parametrize("statement, kind", [
+        ("Encryption of the share began at 2031-01-01 10:00 UTC; the ransom note could not be recovered.",
+         syn.AFFIRMATIVE),
+        ("Rclone copied the share to 203.0.113.9; the browser history was not parsed.", syn.AFFIRMATIVE),
+        ("The attacker mounted the share; the SMB logs were not reviewed.", syn.AFFIRMATIVE),
+        ("The System hive was mounted; its ShimCache could not be parsed.", syn.GAP),
+        ("Three categories were examined; two remain unexamined.", syn.GAP),
+        ("No evidence of exfiltration was found; the proxy logs were not examined.", syn.GAP),
+        ("No evidence of exfiltration was found; the proxy logs were read in full.", syn.ABSENCE),
+        ("The host was scanned from 10.0.0.5; the scanner binary could not be recovered.", syn.AFFIRMATIVE),
+    ])
+    def test_the_lead_decides(self, statement, kind):
+        assert syn.classify_statement(statement) == kind
+
+    @pytest.mark.parametrize("statement", [
+        "The registry has not been examined.", "The pagefile was never inspected.",
+        "The origin cannot be determined from the logs.", "The browser history couldn't be read.",
+        "The deleted files were not recovered.", "Analysis of the pagefile is pending.",
+        "Review of the pagefile is still pending.",
+        "Pending further analysis, the account is treated as compromised.",
+        "Die Herkunft konnte nicht ermittelt werden.", "Der Speicherauszug wurde noch nicht ausgewertet.",
+        "Die Auswertung der Browserdaten steht noch aus.",
+    ])
+    def test_an_examination_left_undone_is_a_gap(self, statement):
+        assert syn.classify_statement(statement) == syn.GAP
+
+    @pytest.mark.parametrize("statement", [
+        "A scheduled task with a pending reboot was created.", "The document was not opened.",
+        "Die Analyse aus dem Image zeigt einen Dienst.",
+    ])
+    def test_an_act_or_a_bare_pending_is_no_gap(self, statement):
+        assert syn.classify_statement(statement) != syn.GAP
+
+
 class TestAnswerSynthesis:
     def test_a_gap_never_leads_the_answer(self):
         a = syn.synthesize_answer(
@@ -655,3 +693,101 @@ class TestAnswerPointsKeepTheFacts:
     def test_a_gap_listed_under_an_answer_names_what_went_unexamined(self):
         a = syn.synthesize_answer("Any exfiltration?", [GAP_CLAIM])
         assert any("(1) CORP-DC01 System and Application EVTX" in g for g in a["gaps"])
+
+
+def _belief(i, statement, host="CORP-WS01", confidence="LIKELY"):
+    return {"id": f"C{i:04d}", "statement": statement, "host": host,
+            "confidence": confidence, "kind": "claim", "status": "new"}
+
+
+_LATERAL = [
+    _belief(1, "Lateral movement to other hosts by jane.doe: RDP from CORP-WS01 to CORP-DC01 at 10:02 UTC on 2031-03-04."),
+    _belief(2, "Lateral movement to other hosts by jane.doe: SMB from CORP-WS01 to CORP-FS01 at 10:05 UTC on 2031-03-04."),
+    _belief(3, "Lateral movement to other hosts by jane.doe: PsExec from CORP-WS01 to CORP-SQL01 at 10:09 UTC on 2031-03-04."),
+]
+
+
+class TestAnswerPointsFoldOnlyTheSameFact:
+    """A point folds into a kept one only when it restates it; a series of
+    facts under one label stays a series."""
+
+    def test_three_destinations_under_one_label_stay_three(self):
+        a = syn.synthesize_answer("Which hosts did the attacker move to laterally?", _LATERAL)
+        assert len(a["points"]) == 3
+        assert any("CORP-FS01" in p for p in a["points"])
+        assert any("CORP-SQL01" in p for p in a["points"])
+
+    def test_a_reworded_variant_on_the_same_host_folds_in_either_order(self):
+        pair = [_belief(1, "Mimikatz was executed on CORP-WS01 from C:\\Temp\\m.exe at 10:02 UTC."),
+                _belief(2, "Mimikatz was run on CORP-WS01 from C:\\Temp\\m.exe at 10:02 UTC, "
+                           "dumping credentials from LSASS memory.")]
+        for claims in (pair, pair[::-1]):
+            assert len(syn.synthesize_answer("What ran on CORP-WS01?", claims)["points"]) == 1
+
+    def test_the_same_text_on_two_hosts_names_each_host(self):
+        text = "Credential dumping: mimikatz.exe was executed from C:\\Temp\\m.exe."
+        a = syn.synthesize_answer("Which hosts ran mimikatz?",
+                                  [_belief(1, text, "CORP-WS01"), _belief(2, text, "CORP-WS02")])
+        assert len(a["points"]) == 2
+        assert any(p.endswith("on CORP-WS01") for p in a["points"])
+        assert any(p.endswith("on CORP-WS02") for p in a["points"])
+
+    def test_the_yes_no_list_folds_a_variant(self):
+        variant = _belief(4, _LATERAL[0]["statement"].rstrip(".") + ", using the account's cached password.")
+        a = syn.synthesize_answer("Was there lateral movement?", _LATERAL + [variant])
+        assert len(a["points"]) == 3
+
+    def test_an_overview_tells_each_kind_of_event_once(self):
+        logons = [_belief(i, f"Logon by jane.doe to CORP-WS01 at 0{i}:00 UTC on 2031-03-04.") for i in range(1, 6)]
+        others = [_belief(8, "A scheduled task Updater was created on CORP-WS01 at 09:30 UTC on 2031-03-04."),
+                  _belief(9, "Data was staged in C:\\Temp\\out.7z on CORP-WS01 at 09:45 UTC on 2031-03-04.")]
+        a = syn.synthesize_answer("What happened on CORP-WS01?", logons + others,
+                                  chronological=True, max_points=4)
+        assert sum("Logon by jane.doe" in p for p in a["points"]) == 1
+        assert any("Updater" in p for p in a["points"]) and any("out.7z" in p for p in a["points"])
+
+    def test_switching_the_record_time_guard_off_does_not_change_answers(self, monkeypatch):
+        monkeypatch.setenv("ATLAS_FINDING_NEAR_DUPLICATE_MIN", "off")
+        pair = [_belief(1, "Mimikatz was executed on CORP-WS01 from C:\\Temp\\m.exe at 10:02 UTC."),
+                _belief(2, "Mimikatz was run on CORP-WS01 from C:\\Temp\\m.exe at 10:02 UTC, "
+                           "dumping credentials from LSASS memory.")]
+        assert len(syn.synthesize_answer("What ran on CORP-WS01?", pair)["points"]) == 1
+
+
+def test_record_number_twins_are_one_point():
+    a = syn.synthesize_answer("Who logged on to CORP-DC01?", [
+        _belief(1, "jane.doe logged on to CORP-DC01 (RecordNumber 1201) at 10:02 UTC on 2031-03-04."),
+        _belief(2, "jane.doe logged on to CORP-DC01 (RecordNumber 1202) at 10:02 UTC on 2031-03-04.")])
+    assert len(a["points"]) == 1
+
+
+def test_a_series_alone_in_an_overview_is_not_folded():
+    logons = [_belief(i, f"Logon by jane.doe to CORP-WS01 at 0{i}:00 UTC on 2031-03-04.") for i in range(1, 4)]
+    a = syn.synthesize_answer("What happened on CORP-WS01?", logons, chronological=True, max_points=4)
+    assert len(a["points"]) == 3
+
+
+class TestTheOverviewLeadSaysWhereAndWhen:
+    """An overview opens with when and where as far as they are known, in
+    the answer's language, the preposition once."""
+
+    EVENTS = [_belief(1, "A scheduled task Updater was created on CORP-WS01."),
+              _belief(2, "Data was staged in C:\\Temp\\out.7z on CORP-WS01.")]
+
+    @pytest.mark.parametrize("language, opening", [("en", "On CORP-WS01: "), ("de", "Auf CORP-WS01: ")])
+    def test_without_a_time_span_the_host_leads(self, language, opening):
+        a = syn.synthesize_answer("What happened on CORP-WS01?", self.EVENTS, chronological=True,
+                                  max_points=4, language=language)
+        assert a["text"].startswith(opening)
+
+    def test_a_time_span_leads_and_the_host_follows(self):
+        a = syn.synthesize_answer("What happened on CORP-WS01?",
+                                  [_belief(1, "A scheduled task Updater was created at 2031-03-04 09:30:00 UTC.")],
+                                  chronological=True, max_points=4)
+        assert a["text"].startswith("2031-03-04 09:30:00 UTC on CORP-WS01: ")
+
+    def test_twin_points_name_their_host_in_the_answers_language(self):
+        twins = [_belief(1, "A scheduled task Updater was created.", host="CORP-WS01"),
+                 _belief(2, "A scheduled task Updater was created.", host="CORP-WS02")]
+        a = syn.synthesize_answer("What happened?", twins, chronological=True, max_points=4, language="de")
+        assert a["text"].startswith("Auf CORP-WS01, CORP-WS02: ") and "created auf CORP-WS02" in a["text"]

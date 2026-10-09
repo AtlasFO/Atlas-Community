@@ -235,6 +235,19 @@ SOLUTION_BASENAMES = frozenset(
 
 _PATH_SPLIT_RE = re.compile(r"[/\\]+")
 
+# A ground truth in another language or version is the same key
+# (ground_truth.en.json, ground_truth.v2.json).
+_GT_VARIANT = r"ground_truth(?:\.[\w-]+)?\.json"
+_GT_VARIANT_RE = re.compile(_GT_VARIANT, re.IGNORECASE)
+
+
+def is_answer_key_name(name: str) -> bool:
+    """Whether a file name is an answer key's: one of SOLUTION_BASENAMES or
+    a ground-truth variant. The one name test the basename gate, the
+    realpath registry and the stash share (core.brain.answer_key)."""
+    n = (name or "").lower()
+    return n in SOLUTION_BASENAMES or bool(_GT_VARIANT_RE.fullmatch(n))
+
 
 # ── Positive-identifier answer-key gate ──────────────────────────────────────
 # SOLUTION_BASENAMES/SOLUTION_SEGMENTS above is a fixed denylist that only
@@ -336,7 +349,7 @@ def is_solution_path(value: str) -> bool:
     v = value.strip().strip("'\"")
     if _is_registered_answer_key(v):
         return True
-    if os.path.basename(v.rstrip("/\\")).lower() in SOLUTION_BASENAMES:
+    if is_answer_key_name(os.path.basename(v.rstrip("/\\"))):
         return True
     if _under_mounted_evidence(v):
         return False  # only the folder-segment heuristic is mount-exempt
@@ -363,7 +376,7 @@ _BASENAME_ALT = "|".join(re.escape(b) for b in sorted(SOLUTION_BASENAMES))
 _SEGMENT_ALT = "|".join(re.escape(s) for s in sorted(SOLUTION_SEGMENTS))
 # A known answer-key basename anywhere in the text — blocked even under a
 # mount (see is_solution_path).
-_SOLUTION_BASENAME_RE = re.compile(r"\b(?:" + _BASENAME_ALT + r")\b",
+_SOLUTION_BASENAME_RE = re.compile(r"\b(?:" + _BASENAME_ALT + "|" + _GT_VARIANT + r")\b",
                                    re.IGNORECASE)
 # A blocked segment adjacent to a path separator: "Solution/answers",
 # "cases/x/Solution/", "cat cases/x/Solution". Mount-exempt.

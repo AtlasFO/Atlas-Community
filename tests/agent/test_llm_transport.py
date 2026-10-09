@@ -861,3 +861,66 @@ def test_a_required_tool_choice_reaches_the_wire(wire):
     c.chat(MSGS, tools=tools, tool_choice="required")
     assert wire.sent[0]["tool_choice"] == "auto"
     assert wire.sent[1]["tool_choice"] == "required"
+
+
+_REFUSED_BUDGET = ('{"type":"error","error":{"type":"invalid_request_error","message":'
+                   '"\\"thinking.type.enabled\\" is not supported for this model. Use '
+                   '\\"thinking.type.adaptive\\" and \\"output_config.effort\\" to control '
+                   'thinking behavior."}}')
+_REFUSED_DISABLED = _REFUSED_BUDGET.replace("thinking.type.enabled", "thinking.type.disabled")
+
+
+class TestARefusedThinkingObject:
+    """A model that refuses the thinking object itself (the vendor's documented
+    400) is driven without one from then on; a cap below the budget is a
+    different 400 and still raises the cap."""
+
+    def test_a_refused_budget_is_dropped_and_remembered(self, wire):
+        llm.remember_api_compat("default", "m", ApiCompatProfile(
+            thinking_control=THINKING_BUDGET), persist=False)
+        wire.replies[:] = [_Reply({}, 400, _REFUSED_BUDGET)]
+        c = _client()
+        assert c.chat(MSGS, role="reason_cite_check").content == "ok"
+        assert wire.sent[0]["thinking"] == {"type": "enabled", "budget_tokens": 2048}
+        assert "thinking" not in wire.sent[1]
+        assert c.profile.thinking_control == THINKING_NONE
+        assert c.profile.needs_explicit_cap is False
+        c.chat(MSGS, role="reason_cite_check")
+        assert "thinking" not in wire.sent[2]
+
+    def test_a_refused_disabled_object_is_dropped(self):
+        payload = {"model": "m", "messages": MSGS, "thinking": {"type": "disabled"}}
+        out, prof = llm.adapt_payload_for_400(payload, _REFUSED_DISABLED)
+        assert "thinking" not in out and prof.thinking_control == THINKING_NONE
+
+    def test_a_cap_below_the_budget_keeps_the_thinking(self):
+        payload = {"model": "m", "messages": MSGS, "max_tokens": 512,
+                   "thinking": {"type": "enabled", "budget_tokens": 2048}}
+        out, prof = llm.adapt_payload_for_400(
+            payload, '{"error":{"message":"`max_tokens` must be greater than '
+                     '`thinking.budget_tokens`."}}')
+        assert out["thinking"] == payload["thinking"] and out["max_tokens"] == EXPLICIT_CAP
+        assert prof.thinking_control != THINKING_NONE
+
+    def test_a_payload_without_thinking_is_left_alone(self):
+        assert llm.adapt_payload_for_400({"model": "m", "messages": MSGS}, _REFUSED_BUDGET) is None
+
+    def test_the_learned_control_survives_the_cache_round_trip(self):
+        prof = ApiCompatProfile.from_dict(ApiCompatProfile(thinking_control=THINKING_NONE).to_dict())
+        assert prof.thinking_control == THINKING_NONE
+
+    def test_the_anthropic_preset_sends_no_temperature(self, wire):
+        body = build_chat_payload(model="example-model", messages=MSGS, provider="anthropic")
+        assert "temperature" not in body
+
+    def test_no_level_rungs_for_a_model_without_a_thinking_control(self, wire):
+        llm.remember_api_compat("default", "m", ApiCompatProfile(
+            thinking_control=THINKING_NONE), persist=False)
+        wire.replies[:] = [_Reply(_starved("stop"))]
+        c = _client()
+        try:
+            c.chat(MSGS, role="reason_synthesize", max_tokens=8192)
+        except llm.LLMError:
+            pass
+        assert "lower_level" not in [e["rung"] for e in c.ladder_events]
+        assert len(wire.sent) == 1

@@ -24,6 +24,8 @@ class TestIsSolutionPath:
         "C:\\case\\Solution\\answers.json",
         "'cases/x/Solution/answers.json'",
         "ground_truth.json",
+        "ground_truth.de.json",
+        "cases/CASE-A/.atlas/ground_truth.en.json",
     ])
     def test_blocked(self, path):
         assert is_solution_path(path)
@@ -37,6 +39,8 @@ class TestIsSolutionPath:
         "/media/e01/solution/x.txt",     # inside mounted evidence
         "",
         "cases/foo/resolutions/x.txt",   # segment only matches exactly
+        "notes/ground_truths_overview.md",
+        "analysis/ground_truth_schema.json",
     ])
     def test_allowed(self, path):
         assert not is_solution_path(path)
@@ -144,6 +148,7 @@ class TestContainsSolutionReference:
         "with open(\"cases/x/Solution/answers.json\") as f: print(f.read())",
         "for f in Solution/*.json: cat $f",
         "GROUND_TRUTH.JSON",  # case-insensitive
+        "grep -r beacon .atlas/ground_truth.en.json",
     ])
     def test_command_payloads_flagged(self, payload):
         from core.paths import contains_solution_reference

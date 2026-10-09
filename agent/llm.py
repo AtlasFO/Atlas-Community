@@ -89,6 +89,11 @@ _HUB_CLASSIC_MODEL_RE = re.compile(
 _COMPAT_SCHEMA = 1
 _MAX_ADAPT_ROUNDS = 4
 
+# A refused thinking object, as opposed to a cap below its budget.
+_THINKING_FIELD_RE = re.compile(r"(?i)\bthinking\b|budget_tokens")
+_REFUSAL_PHRASES = ("not supported", "unsupported", "no longer supported", "not permitted")
+_CAP_RELATION_PHRASES = ("must be", "greater", "less than")
+
 # How an endpoint takes a thinking level. Every vendor's OpenAI-compatible
 # endpoint spells it one of these ways; the preset says which, a 400 can
 # correct it, and the payload builder is the only place that knows the
@@ -745,9 +750,22 @@ def adapt_payload_for_400(
         base = replace(base, reasoning_effort=None)
         changed = True
 
+    # A thinking object the model refuses outright: the body names the field
+    # ('"thinking.type.enabled" is not supported for this model', a budget
+    # "not permitted") beside a refusal and states no cap relation, which is
+    # the other 400 a budget earns. Stop sending one: the model thinks at its
+    # own default from then on, remembered for this model.
+    if ("thinking" in out and _THINKING_FIELD_RE.search(text)
+            and any(s in text_l for s in _REFUSAL_PHRASES)
+            and not any(s in text_l for s in _CAP_RELATION_PHRASES)):
+        out.pop("thinking", None)
+        base = replace(base, thinking_control=THINKING_NONE)
+        handled.add("thinking")
+        changed = True
+
     # A cap below the endpoint's thinking budget (Anthropic through LiteLLM):
     # the answer is a cap large enough, remembered for this model.
-    if "budget_tokens" in text_l and "max_tokens" in text_l:
+    if "thinking" not in handled and "budget_tokens" in text_l and "max_tokens" in text_l:
         limit_key = "max_completion_tokens" if "max_completion_tokens" in out else "max_tokens"
         if int(out.get(limit_key) or 0) < EXPLICIT_CAP:
             out[limit_key] = EXPLICIT_CAP
@@ -818,7 +836,7 @@ def adapt_payload_for_400(
         )
     ) and any(
         s in text_l
-        for s in ("not supported", "unsupported", "invalid", "cannot")
+        for s in ("not supported", "unsupported", "invalid", "cannot", "not permitted")
     ):
         out.pop("temperature", None)
         changed = True
@@ -1842,7 +1860,9 @@ class LLMHubClient:
                 # is more thinking than most endpoints' default: a cut
                 # reply is re-asked with less thinking, never more.
                 below = tuple(v for v in below if v != "high")
-            next_level = next(
+            # A model that takes no thinking control would get the same
+            # request again: a level rung changes nothing there.
+            next_level = None if profile.thinking_control == THINKING_NONE else next(
                 (v for v in below
                  if not profile.effort_values or v in profile.effort_values),
                 None)

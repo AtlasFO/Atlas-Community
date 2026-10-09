@@ -262,3 +262,38 @@ def test_a_dotted_stem_keeps_its_last_label_as_the_extension():
     from core.entities import extract
     assert extract("setupapi.dev.log was read") == {"file:setupapi.dev.log"}
     assert extract("file.tar.gz, v1.2.3 and a.roe") == {"file:file.tar.gz"}
+
+
+class TestDelimitersAroundAPath:
+    """Prose wraps a path in a code span, quotes or brackets; the delimiter
+    is not part of the path, and the file name stays an entity."""
+
+    def test_a_code_span_path_keeps_its_file(self):
+        ents = extract("The dropper `C:\\Users\\jane.doe\\AppData\\evil.exe` ran on CORP-WS01.")
+        assert {"path:c:/users/jane.doe/appdata/evil.exe", "file:evil.exe"} <= ents
+
+    def test_unc_registry_and_url_in_code_spans(self):
+        assert {"path://corp-fs01/share/tool.exe", "file:tool.exe"} <= extract(
+            "Copied `\\\\CORP-FS01\\share\\tool.exe` at noon.")
+        assert "reg:hklm/software/run" in extract("Key `HKLM\\Software\\Run` was set.")
+        assert "url:https://example.com/a/b.zip" in extract("Fetched `https://example.com/a/b.zip` then.")
+        assert "url:http://evil.example/p.php" in extract("Visited http://evil.example/p.php\u201d once.")
+
+    def test_brackets_and_quotes_nest(self):
+        for text in ("Ran (C:\\Temp\\b.exe) once.", "(see C:\\Temp\\b.exe.)",
+                     "(\u201cC:\\Temp\\b.exe\u201d)", "[C:\\Temp\\b.exe]"):
+            assert {"path:c:/temp/b.exe", "file:b.exe"} <= extract(text), text
+
+    def test_brackets_the_path_opened_stay(self):
+        assert "path:c:/program files (x86)/app.exe" in extract("(C:\\Program Files (x86)\\app.exe)")
+        assert "path:c:/temp/report(1).pdf" in extract("Saved C:\\Temp\\report(1).pdf there.")
+        assert "reg:hklm/software/classes/clsid/{0000-1111}" in extract(
+            "Key HKLM\\Software\\Classes\\CLSID\\{0000-1111} set.")
+
+    def test_a_segment_stops_at_a_code_span(self):
+        ents = extract("copied `C:\\Temp` by `CORP\\jdoe` at noon")
+        assert {"path:c:/temp", "account:corp/jdoe"} <= ents
+
+    def test_artifact_tokens_name_the_bare_file(self):
+        from core.entities import artifact_tokens
+        assert "b.exe" in artifact_tokens("Ran (C:\\Temp\\b.exe) once.")

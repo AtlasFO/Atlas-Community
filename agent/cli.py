@@ -3,6 +3,7 @@
     atlas run   --case ~/Atlas/demo-cases/nitroba --question "who sent the email?"
     atlas train --case DIR -q "..."  fresh full run + independent run review
     atlas review --live [--trace P]  review an in-flight (stuck?) investigation
+    atlas review [--case DIR]    grade a run as it stands, as train's reviewer does
     atlas chat  [--case DIR]     interactive analyst session
     atlas models                 list model ids available on the LLM Hub
     atlas doctor                 show resolved backend configuration
@@ -180,6 +181,24 @@ def _stop_tool_children() -> None:
         terminate_active_children()
     except Exception:  # noqa: BLE001
         pass
+
+
+def _route_sigterm() -> None:
+    """Route SIGTERM through KeyboardInterrupt. The dashboard's Stop sends
+    SIGTERM (then SIGKILL after its grace period,
+    dashboard.run_manager.STOP_GRACE_SECONDS); Python's default for it kills
+    the process with no exit record and no report. Raised as an interrupt,
+    the stop reaches the code that records it: the session's finally, or
+    the evidence stage's settle (_IntakeStatus) before any session exists."""
+    try:
+        import signal as _signal
+
+        def _on_sigterm(_signum, _frame):
+            _stop_tool_children()
+            raise KeyboardInterrupt
+        _signal.signal(_signal.SIGTERM, _on_sigterm)
+    except (ValueError, OSError):
+        pass    # not the main thread / unsupported platform: keep the default
 
 
 def _make_agent(args, case_dir: Path | None, command: str = "run"):
@@ -414,6 +433,30 @@ def _objective_source(args, case_dir: Path) -> str:
     return "tasks"
 
 
+def _check_brief_fences(args, case_dir: Path, *, refuse: bool) -> None:
+    """A ``` line that is never closed turns the rest of CASE.md into code:
+    say where and what it hides. With ``refuse``, a start whose requests it
+    hides stops here, before anything is cleared, unless -q names the
+    objective: otherwise the run would spend its hours on the standard
+    objective while the brief's own questions sit unread."""
+    try:
+        from core.investigation_tasks import read_case_markdown, unclosed_fence
+        fence = unclosed_fence(read_case_markdown(case_dir))
+    except Exception:  # noqa: BLE001 - the parsers' own reading stands
+        return
+    if not fence:
+        return
+    shown = "; ".join(fence["hidden"][:4]) + (" …" if len(fence["hidden"]) > 4 else "")
+    message = (f"CASE.md line {fence['line']} opens a code block (```) that is never "
+               f"closed, so everything after it reads as code and is not read: {shown}. "
+               "Close the block with a ``` line of its own.")
+    if (refuse and fence.get("hidden_requests")
+            and not (getattr(args, "question", None) or "").strip()):
+        sys.exit(f"atlas: {message} {fence['hidden_requests']} investigation request(s) "
+                 "are hidden by it; nothing was started.")
+    print(f"atlas: warning: {message}", file=sys.stderr)
+
+
 def _run_investigation(args, case_dir: Path, command: str = "run",
                        lock_fd: int | None = None):
     """Shared body of `run` and `train`: build the agent, run the full
@@ -466,14 +509,22 @@ def _run_investigation(args, case_dir: Path, command: str = "run",
     # the analyst's start_execution_log then resumes this file.
     _trace_path = _open_trace_before_plane_a(case_dir)
     from core.incremental import plane_a_scan
-    plane = plane_a_scan(
-        case_dir,
-        persist=True,
-        trigger=f"cli-{command}",
-        write_journal=True,
-        no_agent=True,
-    )
+    _route_sigterm()        # a Stop during the evidence stage is recorded as one
+    intake = _IntakeStatus(case_dir)
+    try:
+        plane = plane_a_scan(
+            case_dir,
+            persist=True,
+            trigger=f"cli-{command}",
+            write_journal=True,
+            no_agent=True,
+            progress=intake.progress,
+        )
+    except BaseException as e:
+        intake.settle(e)
+        raise
     if not plane.get("success"):
+        intake.settle(error=f"Plane A failed: {plane.get('error')}")
         sys.exit(f"atlas: Plane A failed: {plane.get('error')}")
 
     # What the analyst already knows earns the first precautions before the
@@ -580,19 +631,9 @@ def _run_agent_session(args, case_dir: Path, agent, system: str, user: str, *,
     """
     from agent.llm import LLMError
     interrupted = False
-    # The dashboard's Stop sends SIGTERM (then SIGKILL after 10 s). Python
-    # has no default handler for it, so the run died mid-turn with no exit
-    # record and no report. Route it through the
-    # interrupt path, which persists the status and writes the report.
-    try:
-        import signal as _signal
-
-        def _on_sigterm(_signum, _frame):
-            _stop_tool_children()
-            raise KeyboardInterrupt
-        _signal.signal(_signal.SIGTERM, _on_sigterm)
-    except (ValueError, OSError):
-        pass    # not the main thread / unsupported platform: keep the default
+    # A stop mid-turn goes through the interrupt path, which persists the
+    # status and writes the report.
+    _route_sigterm()
     llm_error: Exception | None = None
     try:
         agent.run(system, user)
@@ -700,6 +741,10 @@ def _ensure_report_on_exit(case_dir: Path, agent, *,
         print(f"atlas: no final report was written ({reason}) — wrote "
               f"{res['path']} from {res['findings']} finding(s) "
               f"({res['source']})", file=sys.stderr)
+        if not res.get("upgraded"):
+            print(f"atlas: its narrative sections were not written; `atlas write-report "
+                  f"--case {case_dir}` adds them from the recorded findings without "
+                  "reading the evidence again", file=sys.stderr)
     except Exception as e:  # noqa: BLE001 - never mask the run's own exit
         print(f"atlas: could not auto-assemble a report: {e}", file=sys.stderr)
 
@@ -775,6 +820,72 @@ def _persist_run_status(case_dir: Path, stats: dict) -> None:
         os.replace(tmp, p)
     except Exception:
         pass
+
+
+class _IntakeStatus:
+    """The run's record while the evidence is fingerprinted, before any
+    session writes one. The dashboard reads .atlas/run_status.json for
+    whether a run is alive (its pid) and what it is doing (``activity``), and
+    the first fingerprinting of a large case takes many minutes. ``progress``
+    is the scan's listener (core.evidence_catalog.scan_evidence); ``settle``
+    records why the run ended, or puts the previous record back when no
+    session followed, unless a session has written its own record since."""
+
+    def __init__(self, case_dir: Path):
+        self.path = Path(case_dir) / ".atlas" / "run_status.json"
+        try:
+            self.prior: str | None = self.path.read_text(encoding="utf-8")
+        except OSError:
+            self.prior = None
+        self.written = ""
+        self.said_at = 0.0
+        self._write("Intake: listing the evidence")
+
+    def _write(self, activity: str, **ending) -> None:
+        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        record = {"stopped_reason": "running", "finish_status": "", "turns": 0,
+                  "activity": activity, **ending, "pid": os.getpid(),
+                  "started_at": os.environ.get("ATLAS_RUN_STARTED_AT") or now,
+                  "updated_at": now}
+        self._put(json.dumps(record, indent=2, ensure_ascii=False) + "\n")
+
+    def _put(self, text: str | None) -> None:
+        try:
+            if text is None:
+                self.path.unlink(missing_ok=True)
+                return
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.path.with_suffix(".json.tmp")
+            tmp.write_text(text, encoding="utf-8")
+            os.replace(tmp, self.path)
+            self.written = text
+        except OSError:
+            pass
+
+    def progress(self, done: int, total: int, done_bytes: int, total_bytes: int) -> None:
+        line = (f"Intake: fingerprinting evidence {done}/{total} "
+                f"({done_bytes / 1e9:.1f} of {total_bytes / 1e9:.1f} GB)")
+        self._write(line)
+        now = time.monotonic()
+        if done in (0, total) or now - self.said_at >= 30:
+            self.said_at = now
+            print(f"atlas: {line}", file=sys.stderr)
+
+    def settle(self, exc: BaseException | None = None, error: str = "") -> None:
+        try:
+            current = self.path.read_text(encoding="utf-8")
+        except OSError:
+            current = None
+        if not self.written or current != self.written:
+            return                      # a session's record stands
+        if exc is None and not error:
+            self._put(self.prior)
+            return
+        interrupted = isinstance(exc, KeyboardInterrupt)
+        self._write("Intake", stopped_reason="keyboard_interrupt" if interrupted else "crashed",
+                    finish_status="interrupted" if interrupted else "error",
+                    duration_seconds=0.0,
+                    error=error or f"{type(exc).__name__}: {exc}")
 
 
 def _teardown_local_mounts(case_dir: Path, ui) -> None:
@@ -1016,6 +1127,7 @@ def cmd_run(args) -> None:
 
 def _run_locked(args, case_dir: Path, lock_fd: int) -> None:
     _require_sudo_preflight(args, case_dir)
+    _check_brief_fences(args, case_dir, refuse=True)
     _apply_report_language(args, case_dir)
     # With --output-dir the isolation clears the mirror, never the real case;
     # _run_investigation resolves the same mirror again (the call is idempotent).
@@ -1122,36 +1234,94 @@ def _build_reviewer_client(args, analyst_model: str = "", ui=None):
     return client
 
 
+def _case_of_trace(trace: Path) -> Path | None:
+    """The case a trace belongs to: the directory above the analysis/,
+    exports/ or reports/ folder holding it, or the folder holding it when
+    that is a case (a brief or .atlas/). None for a trace copied anywhere
+    else, and for the Atlas source tree, which is no case."""
+    from core.execution_log import case_dir_for_trace
+    path = Path(trace).expanduser().resolve()
+    case = Path(case_dir_for_trace(str(path)))
+    in_layout = path.parent.name in CASE_OUTPUT_SUBDIRS
+    if not (in_layout or any((case / m).exists() for m in ("CASE.md", "CLAUDE.md", ".atlas"))):
+        return None
+    if case.resolve() == Path(__file__).resolve().parents[1]:
+        return None
+    return case
+
+
 def cmd_review(args) -> None:
-    """Independent review of an investigation. With --live, review an in-flight
-    run from its on-disk trace and emit unstick recommendations; otherwise a
-    stall pre-check + review of the trace as it stands. Read-only, never
-    mutates the trace. Exit: 0 healthy, 3 stalled."""
+    """Independent, read-only review of an investigation from its on-disk
+    trace; it never mutates the trace and never binds the process log.
+
+    --live: is the run stuck? A deterministic stall pre-check, then unstick
+    steps in reports/<CASE_ID>_live_review.md. Exit 0 healthy, 3 stalled.
+    Without --live: the grade `atlas train` gives, for the run as it stands,
+    in reports/<CASE_ID>_run_review.md (replacing one a train run wrote).
+    Exit 0, 3 NEEDS WORK. The review goes to the case the trace belongs to;
+    --case names it."""
     from agent.llm import LLMError
-    from agent.review import Reviewer, resolve_review_trace
+    from agent.review import (Reviewer, load_trace_from_disk, resolve_review_trace,
+                              run_stats_from_disk)
     from agent.tui import UI
 
-    case_dir = _resolve_case(args.case) or Path.cwd()
+    named = _resolve_case(args.case) if args.case else None
     ui = UI(quiet=getattr(args, "json", False))
     if args.trace:
         trace = Path(args.trace).expanduser()
     else:
-        trace, warn = resolve_review_trace(case_dir,
-                                           case_explicit=bool(args.case))
+        if named is None:
+            # The session beacon names only the run started last.
+            from core.run_state import live_runs
+            live = live_runs()
+            if len(live) > 1:
+                sys.exit(f"atlas: {len(live)} runs are live on this host ({', '.join(live)}): "
+                         "name the one to review with --case DIR.")
+        trace, warn = resolve_review_trace(named or Path.cwd(),
+                                           case_explicit=named is not None)
         if warn:
             ui.warn(warn)
     if trace is None:
         sys.exit("atlas: no active investigation trace found — pass --trace "
                  "PATH (or start one so ~/.cache/atlas/session.json points at "
                  "it).")
+    # The case is the trace's, never the directory the command ran in.
+    case_dir = named or _case_of_trace(trace)
+    if case_dir is None:
+        sys.exit(f"atlas: cannot tell which case the trace {trace} belongs to — "
+                 "pass --case DIR.")
+    if named is not None and named.resolve() not in Path(trace).expanduser().resolve().parents:
+        ui.warn(f"the trace {trace} lies outside --case {named}; the review is "
+                f"written to {named}/reports/")
     # Name the trace up front — a review of the wrong case must be obvious
     # before the reviewer spends minutes on it, not after.
     print(f"atlas: reviewing trace: {trace}", file=sys.stderr)
     _configure_usage(case_dir, "review")
     client = _build_reviewer_client(args, ui=ui)
+    question = getattr(args, "question", "") or ""
+    if not args.live:
+        try:
+            _case_id, entries = load_trace_from_disk(Path(trace))
+            graded = Reviewer(client, case_dir, ui).review(
+                run_stats_from_disk(case_dir, entries), question=question,
+                trace_path=Path(trace))
+        except (OSError, ValueError) as e:
+            sys.exit(f"atlas: cannot read the trace {trace}: {e}")
+        except LLMError as e:
+            sys.exit(f"atlas: reviewer failed: {e}")
+        ui.info(f"run review ({graded['verdict']}): {graded['path']}")
+        ui.markdown(graded["review"])
+        if getattr(args, "json", False):
+            import json
+            print(json.dumps({k: graded[k] for k in
+                              ("verdict", "needs_work", "path", "reviewer_model")},
+                             ensure_ascii=False))
+        if graded["needs_work"]:
+            sys.exit(3)
+        return
     try:
         review = Reviewer(client, case_dir, ui).review_live(
-            trace_path=trace, question=getattr(args, "question", "") or "")
+            trace_path=trace, question=question)
     except LLMError as e:
         sys.exit(f"atlas: live reviewer failed: {e}")
     if review.get("error"):
@@ -1198,6 +1368,7 @@ def cmd_train(args) -> None:
 def _train_locked(args, case_dir: Path, lock_fd: int) -> None:
     # Before clear — do not wipe the case if sudoers is missing.
     _require_sudo_preflight(args, case_dir)
+    _check_brief_fences(args, case_dir, refuse=True)
     _apply_report_language(args, case_dir)
 
     # An objective always resolves now (the standard one when the case names
@@ -1375,17 +1546,18 @@ def _open_trace_before_plane_a(case_dir: Path, *, save_session: bool = True) -> 
 
 
 def _trace_case_id(case_dir: Path) -> str:
-    """The case ID as the execution log knows it, falling back to the
-    newest trace filename, then the directory name."""
+    """The case ID as the execution log knows it, falling back to the case's
+    trace document (core.execution_log.case_trace_document), then the
+    directory name."""
     try:
-        from core.execution_log import log
+        from core.execution_log import case_trace_document, log
         if log._case_id:
             return log._case_id
+        doc = case_trace_document(case_dir)
+        if doc:
+            return os.path.basename(doc)[:-len("_trace.json")]
     except Exception:
         pass
-    traces = sorted(case_dir.glob("analysis/*_trace.json"))
-    if traces:
-        return traces[-1].name[:-len("_trace.json")]
     return case_dir.name
 
 
@@ -1584,17 +1756,35 @@ def cmd_rerun(args) -> None:
         else:
             fp_before = prior_fingerprint(case)
 
-    result = plane_a_scan(
-        case,
-        persist=persist,
-        force_full_hash=bool(getattr(args, "full_hash", False)),
-        trigger="cli",
-        write_journal=persist,
-        no_agent=True,
-        analyst_feedback=analyst_q,
-        withdraw_context_id=withdraw_id,
-        correct_context_id=correct_id,
-    )
+    _check_brief_fences(args, Path(case), refuse=False)
+    if persist:
+        _route_sigterm()    # a Stop during the evidence stage is recorded as one
+    intake = _IntakeStatus(Path(case)) if persist else None
+    try:
+        result = plane_a_scan(
+            case,
+            persist=persist,
+            force_full_hash=bool(getattr(args, "full_hash", False)),
+            trigger="cli",
+            write_journal=persist,
+            no_agent=True,
+            analyst_feedback=analyst_q,
+            withdraw_context_id=withdraw_id,
+            correct_context_id=correct_id,
+            progress=intake.progress if intake else None,
+        )
+    except BaseException as e:
+        if intake:
+            intake.settle(e)
+        raise
+    # The intake record stands for the session that follows; without one,
+    # the previous run's record comes back.
+    if intake and not (result.get("success") and (result.get("work") or {}).get("pending")
+                       and not args.no_agent
+                       and not getattr(args, "regenerate_sections", False)
+                       and not getattr(args, "assemble_report", False)):
+        intake.settle(error="" if result.get("success")
+                      else f"rerun scan failed: {result.get('error')}")
     text = format_plane_a_report(result)
     print(text)
     if args.json:
@@ -1897,6 +2087,7 @@ def cmd_case_autofill(args) -> None:
     _configure_usage(case, "autofill")
 
     proposal = case_autofill.build_proposal(case)
+    _check_brief_fences(args, Path(case), refuse=False)
     rows = list(proposal["rows"])
     unsure = proposal["unsure"]
     add_request = proposal["investigation_requests_empty"]
@@ -3392,27 +3583,32 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_review = sub.add_parser(
         "review",
-        help="independent review of a run; --live for an in-flight, "
-             "possibly-stalled investigation",
+        help="independent review of a run: a grade of the run as it stands; "
+             "--live for an in-flight, possibly-stalled investigation",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description=_wrap("Read-only review of an investigation from its on-disk "
-                    "trace — safe to point at a live run. A deterministic "
-                    "stall detector (no LLM) scores it first; a healthy, "
-                    "progressing run is never flagged. If it looks stuck, "
-                    "the reviewer writes concrete unstick steps to "
-                    "reports/<CASE_ID>_live_review.md."),
+                    "trace — safe to point at a live run. Without --live the "
+                    "reviewer grades the run as it stands, the review `atlas "
+                    "train` writes, in reports/<CASE_ID>_run_review.md (it "
+                    "replaces one a train run wrote). With --live a "
+                    "deterministic stall detector (no LLM) scores it first; a "
+                    "healthy, progressing run is never flagged. If it looks "
+                    "stuck, the reviewer writes concrete unstick steps to "
+                    "reports/<CASE_ID>_live_review.md. The review goes to the "
+                    "case the trace belongs to."),
         epilog=_examples(
+            "atlas review --case ~/cases/mycase     # grade the case's run",
             "atlas review --live                    # the active run "
             "(session beacon)",
             "atlas review --live --trace analysis/CASE_trace.json",
             "atlas review --live --json             # babysitter loops: "
             "exit 3 = stalled",
-        ) + "\nexit codes: 0 healthy, 3 stalled")
+        ) + "\nexit codes: 0 healthy / graded OK, 3 stalled / NEEDS WORK")
     p_review.add_argument("--live", action="store_true",
                           help="review an in-flight run from its on-disk trace "
                                "and emit unstick recommendations")
-    p_review.add_argument("--case", help="case directory (for the output "
-                                         "reports/ dir; default: cwd)")
+    p_review.add_argument("--case", help="case directory (default: the case the "
+                                         "trace belongs to)")
     p_review.add_argument("--trace", help="path to the trace JSON (default: "
                                           "the active session's trace)")
     p_review.add_argument("--question", "-q", help="the case question, for "
@@ -3853,7 +4049,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_rerun.add_argument("--json", action="store_true",
                          help="also print machine-readable JSON result")
     p_rerun.add_argument("--full-hash", action="store_true",
-                         help="force full-file hashes even for large images")
+                         help="read and hash every evidence file in full, large images "
+                              "and files unchanged since the last scan included")
     p_rerun.add_argument("--diff", default=None, metavar="RUN_A..RUN_B",
                          help="compare two journal runs (what/why)")
     p_rerun.add_argument("--list-runs", action="store_true",

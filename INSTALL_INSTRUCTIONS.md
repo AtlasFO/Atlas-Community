@@ -46,11 +46,13 @@ Two ways to install Atlas — pick one:
      - An LLM backend — the Telekom LLM Hub, OpenAI, a local server, or any
        other OpenAI-compatible endpoint (required for investigations; see
        `docs/llm.md`)
-     - `apt` / GitHub (the installer downloads the tools no distribution
-       packages — Chainsaw, Hayabusa, RegRipper, EZ Tools, INDXParse,
-       DensityScout, the Didier Stevens PDF tools, Detect It Easy,
-       Velociraptor, jphide — at the versions pinned in
-       `install-versions.env`)
+     - `apt` / GitHub and the tools' own download sites (the installer
+       downloads the tools no distribution packages: Chainsaw, Hayabusa,
+       RegRipper, INDXParse, odl.py, Detect It Easy, Velociraptor and jphide
+       at the versions pinned in `install-versions.env`, DensityScout at a
+       fixed build, and the EZ Tools, the SigmaHQ rule set, the Didier
+       Stevens PDF tools, bulk_extractor and radare2 at their current
+       upstream version)
 
    **Self-hosting a local LLM** (e.g. `vllm serve
    fdtn-ai/Foundation-Sec-8B-Reasoning`, see the README's closing note) has
@@ -114,11 +116,13 @@ What it does (idempotent — safe to re-run):
   ssdeep, hashdeep, steghide, outguess, qemu-utils, tcpdump, ngrep, …)
 - Installs Volatility 3 (pip) and Plaso (GIFT PPA on Ubuntu, pip elsewhere) — the two big
   pieces a SIFT box would otherwise have provided
-- Installs the tools no distribution packages, at the versions pinned in
-  `install-versions.env`: Chainsaw with the SigmaHQ rule set and its own event-log and
-  $MFT rules, Hayabusa with its rule set, RegRipper,
-  the EZ Tools (with SrumECmd; needs the .NET 9 runtime), INDXParse (pip, into the venv), DensityScout, the
-  Didier Stevens PDF tools, Detect It Easy, Velociraptor's client binary, jphide/jpseek.
+- Installs the tools no distribution packages. At the versions pinned in
+  `install-versions.env`: Chainsaw with its own event-log and $MFT rules, Hayabusa with
+  its rule set, RegRipper, INDXParse (pip, into the venv), odl.py, Detect It Easy,
+  Velociraptor's client binary, jphide/jpseek. DensityScout at a fixed build. At their
+  current upstream version, not pinned: the EZ Tools (with SrumECmd; needs the .NET 9
+  runtime), the SigmaHQ rule set Chainsaw hunts with, the Didier Stevens PDF tools, and
+  bulk_extractor and radare2, which are built from the upstream source.
   Every one of these is download-and-warn — a failed download never stops the install
 - Optional network monitoring (zeek, suricata): `--with-network-tools`
 - Copies the MITRE ATT&CK tables (techniques, groups, software, mitigations) to

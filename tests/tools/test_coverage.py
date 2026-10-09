@@ -94,3 +94,24 @@ def test_coverage_markdown_includes_summary(log):
     r = coverage_report()
     assert "Detection Coverage Report" in r["markdown"]
     assert "T1003" in r["markdown"]
+
+
+def test_a_trace_file_gives_the_coverage_the_live_log_gives(log, tmp_path):
+    # atlas review grades a run from its trace file and must not bind the
+    # process log: the coverage it reads from the file is the run's own.
+    import json
+    from tools.coverage import coverage_report, trace_coverage
+    _seed_finding(log, "Used T1003.001 to dump LSASS")
+    _seed_finding(log, "Beacon to 203.0.113.7 every 60 s", confidence="LIKELY",
+                  validated_techniques=[{"technique_id": "T1071.001", "tactic": "Command and Control"}])
+    log._entries.append({"call_id": log._next_id(), "type": "dair_call",
+                         "recommended_actions": ["Sweep T1021.001 RDP logons"]})
+    log._index_version += 1
+    log._flush()
+    live = coverage_report()
+    entries = json.loads((tmp_path / "trace.json").read_text(encoding="utf-8"))["entries"]
+    disk = trace_coverage([e for e in entries if e.get("type") == "finding"],
+                          [e for e in entries if e.get("type") == "dair_call"])
+    for key in ("summary", "checked", "found", "skipped", "gaps", "finding_mapping"):
+        assert disk[key] == live[key], key
+    assert "T1071.001" in disk["found"] and "T1021.001" in disk["skipped"]

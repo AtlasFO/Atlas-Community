@@ -63,8 +63,16 @@ _SECTION_HEADINGS = frozenset({
     "requests",
 })
 
+# A thematic break: three or more of one of -, * or _, spaces or tabs between
+# (the CommonMark rule, which also gives a break precedence over a list
+# item), at any indentation: an indented run of one break character is a code
+# line or a nested break, never a request. A separator, never a bullet. The
+# pattern has no group, so group(1) of _BULLET_RE stays the bullet's text.
+_THEMATIC_BREAK = r"\s*(?:(?:-[ \t]*){3,}|(?:\*[ \t]*){3,}|(?:_[ \t]*){3,})"
+_THEMATIC_BREAK_RE = re.compile(rf"^{_THEMATIC_BREAK}$")
+
 _BULLET_RE = re.compile(
-    r"^\s*(?:[-*+]|\d+[.)])\s+(.+?)\s*$"
+    rf"^(?!{_THEMATIC_BREAK}$)\s*(?:[-*+]|\d+[.)])\s+(.+?)\s*$"
 )
 _HEADING_RE = re.compile(r"^#{1,6}\s+(.+?)\s*$")
 _CASE_ID_LINE_RE = re.compile(
@@ -226,8 +234,18 @@ def _strip_noncontent_markdown(markdown: str) -> str:
     This runs before any section/bullet parsing so documentation can never
     leak into the task store regardless of which section it sits in.
     """
-    # HTML comments (string scan — regex with DOTALL can't express the
-    # "unterminated comment swallows the rest" rule cleanly).
+    lines = strip_html_comments(markdown).splitlines()
+    return "\n".join(line for line, fenced in zip(lines, fenced_flags(lines))
+                     if not fenced)
+
+
+def strip_html_comments(markdown: str) -> str:
+    """``markdown`` without HTML comments (``<!-- … -->``, multi-line; an
+    unterminated comment is stripped to end-of-file). A brief's comments
+    document the template for the analyst; no parser and no prompt reads
+    them as the analyst's input."""
+    # String scan — regex with DOTALL can't express the "unterminated
+    # comment swallows the rest" rule cleanly.
     parts: list[str] = []
     rest = markdown
     while True:
@@ -240,25 +258,83 @@ def _strip_noncontent_markdown(markdown: str) -> str:
         if end == -1:
             break  # unterminated comment: drop everything after it
         rest = rest[end + 3:]
-    text = "".join(parts)
+    return "".join(parts)
 
-    # Fenced code blocks.
-    out_lines: list[str] = []
-    in_fence = False
-    fence_char = ""
-    for line in text.splitlines():
-        m = re.match(r"^\s{0,3}(`{3,}|~{3,})", line)
-        if m:
-            char = m.group(1)[0]
-            if not in_fence:
-                in_fence = True
-                fence_char = char
-            elif char == fence_char:
-                in_fence = False
-            continue
-        if not in_fence:
-            out_lines.append(line)
-    return "\n".join(out_lines)
+
+_FENCE_RE = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
+
+
+def _fence_walk(lines: list[str]):
+    """Per line: whether it belongs to a fenced code block (``` / ~~~),
+    the fence lines included, and the character of the block open after
+    it. A block closes on a fence of its own character; an unclosed one
+    runs to the end, as Markdown renders it."""
+    open_char = ""
+    for line in lines:
+        m = _FENCE_RE.match(line)
+        if m and not open_char:
+            open_char = m.group(1)[0]
+            yield True, open_char
+        elif m and m.group(1)[0] == open_char:
+            open_char = ""
+            yield True, open_char
+        else:
+            yield bool(open_char), open_char
+
+
+def fenced_flags(lines: list[str]) -> list[bool]:
+    """Per line, whether it belongs to a fenced code block."""
+    return [fenced for fenced, _ in _fence_walk(lines)]
+
+
+def open_fence(lines: list[str]) -> str:
+    """The character of a fenced block still open after ``lines``; ""
+    when every block is closed. A text cut inside a block closes it."""
+    char = ""
+    for _, char in _fence_walk(lines):
+        pass
+    return char
+
+
+# Lines the parsers would read if they were not inside a block: a heading, a
+# bullet or numbered item, a table row.
+_PARSED_SHAPE_RE = re.compile(r"^\s{0,3}#{1,6}\s|^\s*(?:[-*+]|\d+[.)])\s+\S|^\s*\|")
+
+
+def unclosed_fence(markdown: str) -> dict[str, Any] | None:
+    """Where a fenced block that never closes opens in a brief, and what it hides.
+
+    An unclosed block runs to the end, as Markdown renders it, so every
+    request, Evidence Links row and fact after its opening line reads as
+    code and no parser sees it. Returns ``{"line": <1-based line of the
+    opening fence>, "hidden": [<lines after it shaped like headings,
+    bullets or table rows>], "hidden_requests": <requests the brief would
+    hold if the block were closed, less those it holds>}``, or None when
+    every block closes or nothing of that shape follows. HTML comments are
+    blanked as the parsers drop them, keeping the file's own numbering.
+    Like the parsers, a block closes on any fence of its own character.
+    """
+    from core.case_knowledge import comment_line_indexes
+
+    lines = (markdown or "").splitlines()
+    commented = comment_line_indexes(lines)
+    view = ["" if i in commented else line for i, line in enumerate(lines)]
+    opener, char = None, ""
+    for i, line in enumerate(view):
+        m = _FENCE_RE.match(line)
+        if m and not char:
+            opener, char = i, m.group(1)[0]
+        elif m and m.group(1)[0] == char:
+            opener, char = None, ""
+    if opener is None:
+        return None
+    hidden = [view[i].strip() for i in range(opener + 1, len(view))
+              if _PARSED_SHAPE_RE.match(view[i])]
+    if not hidden:
+        return None
+    closed = "\n".join(view[:opener] + view[opener + 1:])
+    gained = len(parse_case_requests(closed)) - len(parse_case_requests(markdown))
+    return {"line": opener + 1, "hidden": hidden, "hidden_requests": max(0, gained)}
 
 
 _EMPHASIS_PAIR_RE = re.compile(r"(\*\*|__)(.+?)\1")
@@ -359,7 +435,9 @@ def parse_case_request_items(markdown: str) -> list[dict[str, Any]]:
                 in_section = False
                 in_skip = title in skip_headings or title.startswith("case:")
             continue
-        if not line.strip():
+        if not line.strip() or _THEMATIC_BREAK_RE.match(line):
+            # A break ends the item above as a blank line does: CommonMark
+            # lets it interrupt a list item, so it is never its continuation.
             _close()
             continue
         bm = _BULLET_RE.match(line)
@@ -654,11 +732,12 @@ def _limitation_refusal(case_dir, part: dict[str, Any], basis: str, reason: str,
             known = known_artifacts(case_dir)
         except Exception:  # noqa: BLE001
             known = {}
-        for key in known:
-            base = str(key).rsplit("/", 1)[-1].lower()
+        for v in known.values():
+            base = str(v.get("name") or "").lower()
             stem = base.rsplit(".", 1)[0]
             if base in named or stem in named:
-                return (f"'{key}' is present in this case (see the listing or path it was seen in); "
+                where = v.get("lpath") or v.get("path") or v.get("name")
+                return (f"'{where}' is present in this case (see the listing or path it was seen in); "
                         "a source the case holds cannot be called absent: examine it and limit the "
                         "part on what the examination gave, or answer it")
         return None
@@ -863,6 +942,34 @@ def update_task(
                 part["status"] = "open"
                 assign(found, nodes, ids, known_hosts=hosts, explicit={str(pid): ids}, lenient=True)
                 if part.get("status") != "answered":
+                    from core.answer_values import VALUE_TYPES, explicit_candidates
+                    from core.request_parts import _typed_values
+                    typ = str(part.get("type") or "")
+                    # A belief that states several values of the kind, none
+                    # beside the part's words: which one is meant is the
+                    # analyst's call, not the first one's.
+                    stated = list(dict.fromkeys(
+                        v for n in _current(nodes, ids)
+                        for v in explicit_candidates(str(part.get("text") or ""), typ, str(n.get("statement") or ""),
+                                                     question=str(found.get("text") or ""), known_hosts=hosts,
+                                                     prefer=_typed_values(n, typ))
+                    )) if part.get("kind") == "value" and typ in VALUE_TYPES and part.get("typed_by") != "default" else []
+                    if len(stated) > 1:
+                        typed = {v.lower() for n in _current(nodes, ids) for v in _typed_values(n, typ)}
+                        # Typing helps only while one of them is untyped.
+                        how = ("each of them is already typed on the belief, so link a belief whose clause "
+                               "names the part beside its value, or limit the part"
+                               if all(v.lower() in typed for v in stated) else
+                               "type the one meant on its belief with claim.add_indicators(claim_id, "
+                               "[{type, value, side}]) and link it again, link a belief whose clause names "
+                               "the part beside its value, or limit the part")
+                        return {"success": False, "gate": "task_part_unsupported",
+                                "error": (f"part {pid} ({part.get('text')!r}) is not answered by {ids}: "
+                                          f"{'it states' if len(ids) == 1 else 'they state'} "
+                                          f"{len(stated)} {typ} values ({', '.join(stated[:6])}) and no clause names "
+                                          "the part's words beside one, so which one it asks for is not stated: "
+                                          f"{how}; {PARTS_HOW}"),
+                                "parts": summary_lines(found)}
                     if part.get("kind") == "relation":
                         need = "a stated relation naming a term from each side"
                     elif str(part.get("type")) in STRICT_VALUE_TYPES:
@@ -875,7 +982,10 @@ def update_task(
                     return {"success": False, "gate": "task_part_unsupported",
                             "error": (f"part {pid} ({part.get('text')!r}) is not answered by {ids}: "
                                       f"none of them carries {need}. Link the belief that does, limit "
-                                      f"the part, or record the belief that states it first; {PARTS_HOW}"),
+                                      f"the part, or record the belief that states it first; when that "
+                                      f"belief sharpens one of {ids}, record it with supersedes=<that "
+                                      f"id>, which replaces it instead of adding a variant beside it; "
+                                      f"{PARTS_HOW}"),
                             "parts": summary_lines(found)}
             elif spec.get("limitation"):
                 lim = spec["limitation"] if isinstance(spec["limitation"], dict) else {}
@@ -1436,7 +1546,20 @@ def reconcile_case_md(
     # shipped case briefs parse to zero or to prose. So reconciliation only
     # removes work when the brief actually produced work to compare against.
     dropped: list[str] = []
-    if requests:
+    # An unclosed fenced block hides every request after it: what parsed is
+    # then not the brief, and dropping on it would remove the hidden requests'
+    # tasks with their claim links. A request removed for real lingers until
+    # the block is closed, the cheaper error.
+    fence = unclosed_fence(md)
+    drops_skipped = bool(requests and fence)
+    if drops_skipped:
+        import logging
+        logging.getLogger(__name__).warning(
+            "reconcile_case_md: CASE.md under %s opens a fenced block at line %s "
+            "that never closes; no task dropped until it is closed.",
+            root, fence["line"],
+        )
+    elif requests:
         for t in store.get("tasks") or []:
             fp = fingerprint_text(t.get("text") or "")
             if fp in seen_fps or t.get("status") not in _DROPPABLE:
@@ -1479,6 +1602,8 @@ def reconcile_case_md(
         "matched": matched,
         "dropped": dropped,
         "withdrawn": dropped,  # deprecated alias (task status is "dropped")
+        "unclosed_fence": fence,
+        "drops_skipped": drops_skipped,
         "repaired_access": repaired,
         "tasks": list(store.get("tasks") or []),
         "counts": {

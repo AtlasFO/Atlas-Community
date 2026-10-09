@@ -74,9 +74,12 @@ topic, e.g. `atlas guide brain`).
 >
 > **Prior knowledge** goes under an optional `## What you already know` section:
 > a working theory, indicators seen elsewhere (an address from the firewall, a
-> hash from an alert), a time window. Atlas seeds its searches from the
-> indicators there and reads the theory as a lead — nothing in that section
-> becomes a finding by itself, and a miss is never taken as proof of absence.
+> hash from an alert), a time window, and facts about your environment (the
+> admin jump host, a service account). A pasted list in a code fence counts too.
+> Atlas seeds its searches from the indicators there and shows the model each
+> statement with its id: a theory is a lead to test, an environment fact is
+> context, never an allowlist. Nothing in that section becomes a finding by
+> itself, and a miss is never taken as proof of absence.
 > On a graded case (one shipping `ground_truth.json`) the indicators are not
 > seeded, so the run stays comparable.
 > The indicators also seed first-hour precautions on the dashboard's Response
@@ -243,6 +246,12 @@ Exit code `3` = stalled, so a babysitter loop is one line:
 ```bash
 while sleep 600; do atlas review --live --json || [ $? -eq 3 ] && notify-send "Atlas run stalled"; done
 ```
+
+Without `--live`, `atlas review --case DIR` grades the run as it stands, the review
+`atlas train` writes (`reports/<CASE_ID>_run_review.md`, replacing one a train run
+wrote; exit `3` = NEEDS WORK). It reads only the trace file, never the running process;
+accuracy and the TTP coverage figure are computed from the trace's own findings. Either way
+the review goes to the case the trace belongs to, never to the directory the command ran in.
 
 ---
 
@@ -467,6 +476,7 @@ Designed for scripting — every path is distinguishable:
 | `run` | finished | LLM/config error | run stopped unfinished | — |
 | `train` | finished, review OK | reviewer/LLM error | run didn't finish | review says NEEDS WORK |
 | `review --live` | healthy | reviewer error | — | run is stalled |
+| `review` | graded, review OK | reviewer error | — | review says NEEDS WORK |
 
 ```bash
 atlas train --case DIR -q "…" --json > result.json

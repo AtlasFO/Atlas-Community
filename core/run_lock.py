@@ -2,12 +2,13 @@
 
 dashboard/run_manager.py's own concurrency guard is in-process only (a dict
 of RunSession objects) and its check for an *externally* started run reads
-``.atlas/run_status.json``'s pid — a file the run process only writes after
-its first turn (agent/loop.py's ``_persist_live_status``) or at completion
-(agent/cli.py's ``_persist_run_status``). Between subprocess spawn and that
-first write there is a real window where a second ``atlas run``/``rerun``
-(from the CLI, or a second dashboard request) could start racing the same
-evidence/claim graph with nothing stopping it.
+``.atlas/run_status.json``'s pid — a file the run process first writes when
+its evidence stage begins (agent/cli.py's ``_IntakeStatus``), then every turn
+(agent/loop.py's ``_persist_live_status``) and at completion (agent/cli.py's
+``_persist_run_status``); a ``--dry-run`` rerun writes none. Between
+subprocess spawn and that first write there is a real window where a second
+``atlas run``/``rerun`` (from the CLI, or a second dashboard request) could
+start racing the same evidence/claim graph with nothing stopping it.
 
 ``atlas run``/``atlas rerun`` hold this OS-level lock (``fcntl.flock``) for
 the run's entire lifetime, whichever way the run was started. flock ties

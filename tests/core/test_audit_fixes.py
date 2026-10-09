@@ -2451,7 +2451,8 @@ class TestReportPhaseStall:
         a = self._agent(tmp_path)
         monkeypatch.setattr(lp, "REPORT_STALL_TURNS", 3)
         monkeypatch.setattr(lp.Agent, "_claim_count", lambda self: 40)
-        monkeypatch.setattr(lp.Agent, "_pre_report_checks", lambda self: 1)
+        blockers = {"n": 3}
+        monkeypatch.setattr(lp.Agent, "_report_blockers", lambda self: blockers["n"])
         assert not a._report_phase_stalled(10)          # not in Report
         a._note_dair_phase(json.dumps({"current_phase": "Report"}))
         assert not a._report_phase_stalled(10)          # baseline taken
@@ -2459,7 +2460,9 @@ class TestReportPhaseStall:
         assert a._report_phase_stalled(13)              # 3 quiet turns
         assert not a._report_phase_stalled(14)          # re-armed
         monkeypatch.setattr(lp.Agent, "_claim_count", lambda self: 41)
-        assert not a._report_phase_stalled(20)          # progress resets the clock
+        assert a._report_phase_stalled(20)              # a belief is not progress here
+        blockers["n"] = 2
+        assert not a._report_phase_stalled(21)          # fewer blockers reset the clock
 
     def test_a_belief_does_not_buy_time_before_the_gate_is_asked(
             self, tmp_path, monkeypatch):
@@ -2469,7 +2472,7 @@ class TestReportPhaseStall:
         import agent.loop as lp
         a = self._agent(tmp_path)
         monkeypatch.setattr(lp, "REPORT_STALL_TURNS", 3)
-        monkeypatch.setattr(lp.Agent, "_pre_report_checks", lambda self: 0)
+        monkeypatch.setattr(lp.Agent, "_report_blockers", lambda self: None)
         claims = {"n": 40}
         monkeypatch.setattr(lp.Agent, "_claim_count", lambda self: claims["n"])
         a._note_dair_phase(json.dumps({"current_phase": "Report"}))
@@ -2480,18 +2483,178 @@ class TestReportPhaseStall:
         assert a._report_phase_stalled(13), (
             "recording beliefs must not postpone the question indefinitely")
 
-    def test_once_the_gate_is_asked_beliefs_count_again(
+    def test_once_the_gate_is_asked_fewer_blockers_count_and_a_belief_does_not(
             self, tmp_path, monkeypatch):
+        """After the gate's first verdict, moving towards the report is the
+        verdict's blocking issues reaching a new low. A belief recorded while
+        the blockers stand (a variant of a finding the gate objects to) buys
+        no time, and blockers that rise and fall back to the low buy none."""
         import agent.loop as lp
         a = self._agent(tmp_path)
         monkeypatch.setattr(lp, "REPORT_STALL_TURNS", 3)
-        monkeypatch.setattr(lp.Agent, "_pre_report_checks", lambda self: 2)
-        claims = {"n": 40}
-        monkeypatch.setattr(lp.Agent, "_claim_count", lambda self: claims["n"])
+        state = {"claims": 40, "blockers": 4}
+        monkeypatch.setattr(lp.Agent, "_claim_count", lambda self: state["claims"])
+        monkeypatch.setattr(lp.Agent, "_report_blockers", lambda self: state["blockers"])
         a._note_dair_phase(json.dumps({"current_phase": "Report"}))
         assert not a._report_phase_stalled(10)
-        claims["n"] = 41
-        assert not a._report_phase_stalled(13)          # answering the gate
+        state["claims"] = 41
+        assert a._report_phase_stalled(13)              # the belief bought nothing
+        state["blockers"] = 3
+        assert not a._report_phase_stalled(14)          # a new low resets the clock
+        state["blockers"] = 5
+        assert not a._report_phase_stalled(15)
+        state["blockers"] = 3
+        assert a._report_phase_stalled(17)              # back to the low is no progress
+
+    def test_the_push_count_restarts_on_a_new_low_of_blockers(self, tmp_path, monkeypatch):
+        """Pushes toward the report count in a row until the run moves towards
+        it: before the gate's first verdict a new belief restarts the count,
+        after it only a new low of blocking issues does."""
+        import agent.loop as lp
+        a = self._agent(tmp_path)
+        monkeypatch.setattr(lp, "REPORT_STALL_WRAPUP_FIRES", 3)
+        state = {"claims": 40, "blockers": None}
+        monkeypatch.setattr(lp.Agent, "_claim_count", lambda self: state["claims"])
+        monkeypatch.setattr(lp.Agent, "_report_blockers", lambda self: state["blockers"])
+        assert not a._report_stall_exhausted(1)
+        state["claims"] = 41
+        assert not a._report_stall_exhausted(2)         # no verdict yet: a belief counts
+        state["blockers"] = 4
+        assert not a._report_stall_exhausted(3)         # the first verdict
+        state["claims"] = 42
+        assert not a._report_stall_exhausted(4)
+        state["blockers"] = 3
+        assert not a._report_stall_exhausted(5)         # a new low restarts the count
+        assert not a._report_stall_exhausted(6)
+        state["blockers"] = 5
+        assert a._report_stall_exhausted(7)             # rising is not progress
+
+    def _ledger(self, case, n_units: int):
+        from core.coverage_ledger import save_ledger
+        save_ledger(case, {"units": {
+            f"u{i}": {"path": f"evidence/images/CORP-WS{i:02d}.dd", "kind": "container",
+                      "status": "unseen"} for i in range(n_units)}})
+
+    def _read(self, case, unit: str, status: str = "probed"):
+        from core.coverage_ledger import load_ledger, save_ledger
+        led = load_ledger(case)
+        led["units"][unit]["status"] = status
+        save_ledger(case, led)
+
+    def test_a_rerun_reading_open_evidence_in_report_is_never_wrapped_up(
+            self, tmp_path, monkeypatch):
+        """A rerun's log holds the previous run's gate verdicts (configure()
+        resumes the trace); the ladder reads only the verdicts of this run.
+        The coverage floor stays one blocking issue until the last unseen
+        unit is read, so while the run reads units for the first time the
+        Report phase is neither pushed nor wrapped up; once the reads stop,
+        the ladder runs as before."""
+        import agent.loop as lp
+        from core.execution_log import log
+        verdict = "READY_TO_REPORT: {r}\nBLOCKING_ISSUES ({n}): {b}\nWARNINGS (0): none"
+        for n in (1, 0):                                  # the previous run's verdicts
+            log.record_reason_call(tool="reason_pre_report_check", success=True, directives={},
+                                   conclusion=verdict.format(r="true" if n == 0 else "false", n=n,
+                                                             b="none" if n == 0 else "floor"))
+        a = self._agent(tmp_path)
+        a._run_since = a._last_call_id()                  # what run() stamps at its start
+        assert a._report_blockers() is None
+        log.record_reason_call(tool="reason_pre_report_check", success=True, directives={},
+                               conclusion=verdict.format(r="false", n=1, b="Coverage ledger floor "
+                                                         "not met - read each unseen unit"))
+        assert a._report_blockers() == 1
+        monkeypatch.setattr(lp, "REPORT_STALL_TURNS", 3)
+        monkeypatch.setattr(lp, "REPORT_STALL_WRAPUP_FIRES", 3)
+        monkeypatch.setattr(lp.Agent, "_claim_count", lambda self: 40)
+        self._ledger(tmp_path, 25)
+        a._note_dair_phase(json.dumps({"current_phase": "Report"}))
+        wrapped: list[int] = []
+
+        def turn_of(t: int) -> None:
+            # The loop's order: a stall pushes, a push may wrap up.
+            if a._report_phase_stalled(t) and a._report_stall_exhausted(t):
+                wrapped.append(t)
+        for turn in range(1, 41):
+            if turn % 2 == 0:                             # a unit read for the first time
+                self._read(tmp_path, f"u{turn // 2}")
+            if turn % 9 == 0:                             # syntheses push meanwhile
+                a._report_synth_calls = lp.REPORT_STALL_SYNTHESES
+            turn_of(turn)
+        assert not wrapped
+        self._read(tmp_path, "u3", "answered")            # a finding on a read unit: no read
+        for turn in range(41, 60):
+            turn_of(turn)
+        # Pushes at 43, 46 and 49 with nothing read: wrapped up at the third.
+        assert wrapped[0] == 49
+
+    def test_a_unit_registered_mid_run_counts_when_it_is_read(self, tmp_path, monkeypatch):
+        import agent.loop as lp
+        from core.coverage_ledger import load_ledger, save_ledger
+        monkeypatch.setattr(lp.Agent, "_report_blockers", lambda self: 1)
+        a = self._agent(tmp_path)
+        self._ledger(tmp_path, 2)
+        assert a._report_moved("_m", claims=False)        # the baseline
+        led = load_ledger(tmp_path)
+        led["units"]["d0"] = {"path": "analysis/extracted/CORP-WS00", "kind": "derived",
+                              "status": "unseen"}
+        save_ledger(tmp_path, led)
+        assert not a._report_moved("_m", claims=False)    # registered unseen: nothing read
+        self._read(tmp_path, "d0")
+        assert a._report_moved("_m", claims=False)        # read for the first time
+        self._read(tmp_path, "d0", "answered")
+        assert not a._report_moved("_m", claims=False)    # answered after the read: no read
+
+    def test_a_unit_a_rebuild_drops_does_not_hide_the_next_first_read(self, tmp_path, monkeypatch):
+        """A ledger rebuild mid-run can drop units; what was discharged is
+        kept by identity, so the next first read of another unit still
+        counts."""
+        import agent.loop as lp
+        from core.coverage_ledger import load_ledger, save_ledger
+        monkeypatch.setattr(lp.Agent, "_report_blockers", lambda self: 1)
+        a = self._agent(tmp_path)
+        self._ledger(tmp_path, 4)
+        self._read(tmp_path, "u0")
+        self._read(tmp_path, "u1")
+        assert a._report_moved("_m", claims=False)        # the baseline
+        led = load_ledger(tmp_path)
+        del led["units"]["u0"], led["units"]["u1"]        # the rebuild drops two read units
+        save_ledger(tmp_path, led)
+        assert not a._report_moved("_m", claims=False)
+        self._read(tmp_path, "u2")
+        assert a._report_moved("_m", claims=False)        # a first read still counts
+
+    def _tasks(self, case, tasks):
+        (case / ".atlas" / "investigation_tasks.json").write_text(json.dumps(
+            {"schema_version": "1.0", "case_id": "CASE-A", "next_id": len(tasks) + 1,
+             "tasks": tasks}), encoding="utf-8")
+
+    def test_closing_requests_is_report_work_and_a_reclose_is_not(self, tmp_path, monkeypatch):
+        """The gate names every actionable request in one blocking issue
+        until the last is dispositioned; closing them one by one is the work
+        it asks for. A part answered or limited, or a request blocked on
+        missing evidence, counts once; a part reopened and closed again does
+        not."""
+        import agent.loop as lp
+        monkeypatch.setattr(lp.Agent, "_report_blockers", lambda self: 1)
+        (tmp_path / ".atlas").mkdir(exist_ok=True)
+
+        def tasks(part_status, other_status):
+            return [{"id": "T-001", "text": "Which account logged on to CORP-WS01?", "status": "open",
+                     "parts": [{"id": "p1", "text": "account", "status": part_status},
+                               {"id": "p2", "text": "time", "status": "open"}]},
+                    {"id": "T-002", "text": "What left the host?", "status": other_status}]
+        a = self._agent(tmp_path)
+        self._tasks(tmp_path, tasks("open", "open"))
+        assert a._report_moved("_m", claims=False)        # the baseline
+        assert not a._report_moved("_m", claims=False)
+        self._tasks(tmp_path, tasks("answered", "open"))
+        assert a._report_moved("_m", claims=False)        # a part closed
+        self._tasks(tmp_path, tasks("open", "open"))
+        assert not a._report_moved("_m", claims=False)    # reopened
+        self._tasks(tmp_path, tasks("limited", "open"))
+        assert not a._report_moved("_m", claims=False)    # closed again: known
+        self._tasks(tmp_path, tasks("limited", "blocked_missing_evidence"))
+        assert a._report_moved("_m", claims=False)        # a request dispositioned
 
     def test_repeated_syntheses_in_report_also_fire(self, tmp_path, monkeypatch):
         import agent.loop as lp

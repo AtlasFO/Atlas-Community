@@ -74,13 +74,66 @@ def _find_ground_truth(case_dir: Path) -> Path | None:
     return None
 
 
+# Top-level folders of a case the search for copies of a key does not enter:
+# the evidence tree (its own top level is searched), opened images' mount
+# points and raw exports. A copy in them is still refused by its name
+# (core.paths.is_solution_path), only not stashed.
+_UNSEARCHED_DIRS = frozenset({"evidence", "mnt", "exports"})
+# How far the search for copies of a key goes below each top-level folder of
+# the case, level by level: an operator's or a grader's copy sits near the
+# top, parser and extraction output (thousands of files) lies deeper, and a
+# large folder never delays a shallow sibling.
+# ponytail: a copy deeper than _KEY_SEARCH_DEPTH levels, or in a folder the
+# remaining entry budget cannot list (that folder is skipped, its siblings are
+# still searched; the deepest levels run out first), stays unstashed and
+# unregistered (still refused by its name); a name index of the output trees
+# when keys turn up that deep.
+_KEY_SEARCH_DEPTH = 4
+_KEY_SEARCH_ENTRIES = 100_000
+
+
+def _shallow_files(top: Path):
+    """Files at most _KEY_SEARCH_DEPTH levels below ``top``, breadth-first
+    and at most _KEY_SEARCH_ENTRIES entries in all (a folder larger than what
+    is left is skipped), without following a link or entering an opened
+    image's mount point."""
+    from core.evidence_catalog import _opened_image_mount
+
+    level, budget = [top], _KEY_SEARCH_ENTRIES
+    for _ in range(_KEY_SEARCH_DEPTH):
+        deeper: list[Path] = []
+        for folder in level:
+            try:
+                with os.scandir(folder) as it:
+                    entries = sorted(it, key=lambda e: e.name)
+            except OSError:
+                continue
+            if len(entries) > budget:
+                continue                # too large to list: its siblings still are
+            budget -= len(entries)
+            for e in entries:
+                try:
+                    if e.is_symlink():
+                        continue
+                    if e.is_file():
+                        yield Path(e.path)
+                    elif e.is_dir() and not _opened_image_mount(e.path):
+                        deeper.append(Path(e.path))
+                except OSError:
+                    continue
+        level = deeper
+
+
 def answer_key_paths(case_dir) -> list[Path]:
-    """Every answer-key file the framework recognises for ``case_dir`` — all
-    known ground-truth locations that exist, not just the first.
+    """Every answer-key file the framework recognises for ``case_dir``: the
+    known ground-truth locations, in their order, then every other file in
+    the case whose name is an answer key's (``core.paths.is_answer_key_name``):
+    a copy under .atlas/ or analysis/, a ground_truth.<lang>.json.
 
     Feeds the positive-identifier gate (``core.paths.register_answer_keys``)
     and the filesystem stash: whatever the framework treats as a grading key
-    is what must be blocked / hidden from the analyst. Best-effort, never
+    is what must be blocked / hidden from the analyst. Which key grades stays
+    the first known location (``_find_ground_truth``). Best-effort, never
     raises — a bad case_dir simply yields no keys.
     """
     out: list[Path] = []
@@ -88,11 +141,48 @@ def answer_key_paths(case_dir) -> list[Path]:
         base = Path(case_dir)
     except (TypeError, ValueError):
         return out
+    seen: set[str] = set()
+
+    def add(p: Path) -> None:
+        if str(p) not in seen:
+            seen.add(str(p))
+            out.append(p)
+
     for rel in _GT_LOCATIONS:
         try:
             p = base / rel
             if p.is_file():
-                out.append(p)
+                add(p)
+        except OSError:
+            continue
+    from core.paths import is_answer_key_name
+
+    def copy(p: Path) -> bool:
+        # A link is followed by the realpath gate; moving its target could
+        # take a file from outside the case.
+        return is_answer_key_name(p.name) and p.is_file() and not p.is_symlink()
+
+    try:
+        top = sorted(base.iterdir())
+    except OSError:
+        return out
+    for entry in top:
+        try:
+            if entry.name == "evidence" and entry.is_dir():
+                # Evidence is often attached by a link; its top level is
+                # read through it, nothing below.
+                for p in sorted(entry.iterdir()):
+                    if copy(p):
+                        add(p)
+            elif entry.is_symlink():
+                continue
+            elif entry.is_file():
+                if copy(entry):
+                    add(entry)
+            elif entry.is_dir() and entry.name not in _UNSEARCHED_DIRS:
+                for p in _shallow_files(entry):
+                    if copy(p):
+                        add(p)
         except OSError:
             continue
     return out

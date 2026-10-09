@@ -121,7 +121,9 @@ RERUN_OPTIONS: tuple[dict, ...] = (
     {"id": "dry_run", "flag": "--dry-run", "type": "checkbox", "group": "basic",
      "label": "Dry run", "help": "Scan and diff without writing catalog updates."},
     {"id": "full_hash", "flag": "--full-hash", "type": "checkbox", "group": "advanced",
-     "label": "Force full-file hashes", "help": "Even for large images."},
+     "label": "Force full-file hashes",
+     "help": "Read and hash every evidence file in full: large images, and files unchanged "
+             "since the last scan, which otherwise keep their recorded hash."},
     {"id": "regenerate_sections", "flag": "--regenerate-sections", "type": "checkbox", "group": "advanced",
      "label": "Regenerate stale sections",
      "help": "AI-regenerate stale report projection sections then assemble "

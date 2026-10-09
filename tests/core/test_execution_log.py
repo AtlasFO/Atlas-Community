@@ -1026,11 +1026,30 @@ class TestAutoRecoverFromCwd:
         (case / "analysis" / "AAA_trace.json").write_text(
             '{"schema_version":"2.0","case_id":"AAA","entry_count":0,"entries":[]}'
         )
+        # Equally new documents: the first name wins, whatever order the
+        # file system lists them in.
+        for name in ("AAA_trace.json", "BBB_trace.json"):
+            os.utime(case / "analysis" / name, (1_900_000_000, 1_900_000_000))
         monkeypatch.chdir(case)
         monkeypatch.setattr(elog, "_SESSION_FILE", str(tmp_path / "no-session.json"))
         l = elog.ExecutionLog()
         l.record_dair_call("Triage", "", False, "", "", "stay", "")
         assert l._case_id == "AAA"
+
+    def test_cwd_recovery_picks_the_newest_document(self, tmp_path, monkeypatch):
+        import core.execution_log as elog
+        case = tmp_path / "MULTI"
+        (case / "analysis").mkdir(parents=True)
+        (case / "CASE.md").write_text("# multi\n")
+        for cid, when in (("AAA", 1_900_000_000), ("BBB", 1_900_000_600)):
+            doc = case / "analysis" / f"{cid}_trace.json"
+            doc.write_text('{"schema_version":"2.0","case_id":"%s","entry_count":0,"entries":[]}' % cid)
+            os.utime(doc, (when, when))
+        monkeypatch.chdir(case)
+        monkeypatch.setattr(elog, "_SESSION_FILE", str(tmp_path / "no-session.json"))
+        l = elog.ExecutionLog()
+        l.record_dair_call("Triage", "", False, "", "", "stay", "")
+        assert l._case_id == "BBB"
 
 
 class TestReasonAndDairInputsField:
@@ -1534,3 +1553,46 @@ class TestChallengeAndAuditRendering:
         md = log.to_markdown()
         assert 'audit[0]: claim="one" tool=t\n' in md
         assert 'audit[1]: claim="two" tool=t WARNING: 2×NOT_PROVIDED' in md
+
+
+class TestOneTraceDocumentPerCase:
+    """Every reader that does not hold the live log takes the same document:
+    the one the case id names, else the newest. A second document beside it
+    (another case id, a copy) is never read as this case's trace."""
+
+    def _case(self, tmp_path):
+        import json as _json
+        case = tmp_path / "CASE-A"
+        (case / "analysis").mkdir(parents=True)
+        (case / "CASE.md").write_text("# CASE-A\n\n**Case ID:** CASE-A\n", encoding="utf-8")
+        own = case / "analysis" / "CASE-A_trace.json"
+        own.write_text(_json.dumps({"case_id": "CASE-A", "entries": [
+            {"type": "tool_call", "call_id": 1, "cmd": "fls evidence/CORP-WS01.dd"}]}),
+            encoding="utf-8")
+        other = case / "analysis" / "CORP-OTHER_trace.json"
+        other.write_text(_json.dumps({"case_id": "CORP-OTHER", "entries": [
+            {"type": "tool_call", "call_id": 9, "cmd": "fls evidence/CORP-WS09.dd"}]}),
+            encoding="utf-8")
+        os.utime(own, (1_000_000_000, 1_000_000_000))  # the copy is the newer file
+        return case, own, other
+
+    def test_the_case_ids_document_wins_and_nothing_is_merged(self, tmp_path):
+        from core.execution_log import _trace_entries_on_disk, case_trace_document
+        case, own, _ = self._case(tmp_path)
+        assert case_trace_document(case) == str(own)
+        assert [e["call_id"] for e in _trace_entries_on_disk(str(case))] == [1]
+
+    def test_without_it_the_newest_document_answers_for_every_reader(self, tmp_path,
+                                                                     monkeypatch):
+        from agent.cli import _trace_case_id
+        from core.execution_log import ExecutionLog, case_trace_document, log
+        case, own, other = self._case(tmp_path)
+        own.unlink()
+        assert case_trace_document(case) == str(other)
+        monkeypatch.setattr(log, "_case_id", "")
+        assert _trace_case_id(case) == "CORP-OTHER"
+        monkeypatch.chdir(case)
+        restored = ExecutionLog()               # an MCP server started inside the case
+        assert os.path.realpath(restored.case_dir()) == os.path.realpath(str(case))
+        assert restored._case_id == "CORP-OTHER"
+

@@ -53,12 +53,16 @@ def _is_access_gated_media_entry(img: dict[str, Any]) -> bool:
     except Exception:
         pass
     return True
-_TSK_OPEN_TOOLS = frozenset({
-    "tsk_mmls", "tsk.mmls", "tsk_fls", "tsk.fls",
-    "tsk_fsstat", "tsk.fsstat",
-    # MCP toolbox doubles the namespace: tsk + tsk_mmls → tsk_tsk_mmls
-    "tsk_tsk_mmls", "tsk_tsk_fls", "tsk_tsk_fsstat",
-})
+# The calls that open an image's filesystem, by listed name. A partition
+# table read (tsk.mmls) opens nothing: the image is opened once its
+# filesystem opens at a volume. Access asks whether the filesystem opens;
+# coverage (core.coverage_ledger.NON_PROBE_TOOLS) asks whether a file inside
+# it was reached, which is why fsstat opens the media but examines nothing.
+_TSK_OPEN_TOOLS = frozenset({"tsk_fls", "tsk_fsstat"})
+
+# How a pending image is opened, for the refusals that ask for it.
+OPEN_STEPS = ("tsk.fsstat or tsk.fls at the volume's offset_sectors (tsk.mmls "
+              "lists them; a single volume is found by itself) records the open")
 
 
 def _case_root(case_dir: str | os.PathLike | None) -> Optional[Path]:
@@ -381,8 +385,8 @@ def refuse_blocked_missing_evidence(
     nxt = sample.get("recommended_tool") or "n/a"
     return (
         "refusing blocked_missing_evidence: disk media is present "
-        f"({path}; access_stage={stage}, recommended={nxt}). Open it with "
-        "tsk.mmls/tsk.fls (or unload schemas to load the tsk namespace) — do "
+        f"({path}; access_stage={stage}, recommended={nxt}). Open it: "
+        f"{OPEN_STEPS} (load the tsk namespace if it is not loaded) — do "
         "not mark the task missing-evidence while the image is staged."
     )
 
@@ -408,7 +412,7 @@ def refuse_diskish_answered(
     return (
         "refusing answered: disk media is still pending open "
         f"({sample.get('path')}; access_stage={sample.get('access_stage')}). "
-        "Open with tsk.mmls/tsk.fls, or use status=partial after a durable "
+        f"Open it: {OPEN_STEPS}; or use status=partial after a durable "
         "access_failed is recorded on mount_plan — do not close the disk "
         "reconstruction task from tabular evidence alone."
     )
@@ -547,7 +551,7 @@ def absence_escape_blocked_by_access(
     return (
         f"access_not_opened: disk media is {stage} ({sample}) — cannot treat "
         "event-log / filesystem sources as 'absent from evidence' until the "
-        "image is opened (tsk.mmls/tsk.fls) or access_failed is recorded."
+        f"image is opened ({OPEN_STEPS}) or access_failed is recorded."
     )
 
 
@@ -632,28 +636,12 @@ def any_media_opened(case_dir: str | os.PathLike | None) -> bool:
     return any(e.get("access_stage") == "opened" for e in media_entries(case_dir))
 
 
-def _normalize_tsk_tool_name(tool_name: str) -> str:
-    """Collapse MCP double-prefix names: tsk_tsk_mmls → tsk_mmls."""
-    n = (tool_name or "").strip().replace(".", "_")
-    while n.startswith("tsk_tsk_"):
-        n = "tsk_" + n[len("tsk_tsk_"):]
-    return n
-
-
 def is_tsk_open_tool(tool_name: str) -> bool:
-    n = (tool_name or "").strip()
-    if not n:
-        return False
-    if n in _TSK_OPEN_TOOLS:
-        return True
-    norm = _normalize_tsk_tool_name(n)
-    if norm in _TSK_OPEN_TOOLS or norm.replace("_", ".", 1) in _TSK_OPEN_TOOLS:
-        return True
-    # Bare stem: mmls / fls / fsstat after namespace strip
-    stem = norm
-    if stem.startswith("tsk_"):
-        stem = stem[4:]
-    return stem in ("mmls", "fls", "fsstat")
+    """Whether ``tool_name`` (any spelling: listed, dotted, the server's or
+    the bare stem) opens an image's filesystem."""
+    from core.coverage_ledger import listed_tool_name
+    name = listed_tool_name(tool_name)
+    return bool(name) and (name in _TSK_OPEN_TOOLS or f"tsk_{name}" in _TSK_OPEN_TOOLS)
 
 
 def parse_tool_result_success(result_text: str) -> tuple[bool, str]:

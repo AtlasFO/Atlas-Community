@@ -66,11 +66,10 @@ _STALL_HARD_MSG = (
 _STALL_COVERAGE_REDIRECT_MSG = (
     "[stall coverage-redirect] Belief/exploration stalled and force-report "
     "grace elapsed, but the coverage ledger still has unseen high-value "
-    "units — report close-out is blocked. Probe these next (table.* / "
-    "single-file parse). If a real probe attempt failed (corrupt/empty/"
-    "unparseable), document it with coverage.mark_blocked(path, reason) — "
-    "never mark blocked without attempting. Then continue. "
-    "Unseen examples: {gaps}"
+    "units — report close-out is blocked. Read these next ({how}). If a "
+    "read of one failed (corrupt/empty/unparseable), record that with "
+    "coverage.mark_blocked(path, reason) — blocked records a failed read and "
+    "never replaces one. Then continue. Unseen examples: {gaps}"
 )
 
 _STALL_FORCE_REPORT_MSG = (
@@ -300,13 +299,15 @@ def messages_for_turn(
             and redirect_rearmed):
         ledger_ok = False
         gaps: list[str] = []
+        how = ""
         try:
             from core.coverage_ledger import (
-                open_unit_paths, ready_for_degraded_exit,
+                open_unit_paths, open_units_read_hint, ready_for_degraded_exit,
             )
             ledger_ok = bool(ready_for_degraded_exit(case_dir))
             if not ledger_ok:
                 gaps = open_unit_paths(case_dir, limit=6)
+                how = open_units_read_hint(case_dir, limit=6)
         except Exception:
             ledger_ok = False
         if wall_clock or ledger_ok:
@@ -322,7 +323,8 @@ def messages_for_turn(
             out.append({
                 "role": "user",
                 "content": _STALL_COVERAGE_REDIRECT_MSG.format(
-                    gaps=", ".join(gaps) if gaps else "(rebuild ledger)"),
+                    gaps=", ".join(gaps) if gaps else "(rebuild ledger)",
+                    how=how or "each with a tool that reads its content"),
             })
     return out
 

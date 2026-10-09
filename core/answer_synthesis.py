@@ -37,19 +37,42 @@ _CONFIDENCE_RANK = {"CONFIRMED": 4, "LIKELY": 3, "SUSPECTED": 2,
                     "UNCONFIRMED": 1}
 
 # "We never looked" language. These statements are investigative debt, not
-# findings — the distinction a concatenated answer collapses.
+# findings — the distinction a concatenated answer collapses. An examination
+# verb carries it only negated after a modal ("could not be parsed") or in
+# the perfect ("has not been reviewed"); an impact verb never does: "the
+# document was not opened" is what happened, not what was left unread.
 _GAP_RE = re.compile(
     r"(?i)\b("
-    r"unexamined|not\s+examined|never\s+examined|not\s+(?:yet\s+)?(?:been\s+)?"
-    r"(?:analy[sz]ed|reviewed|recovered|parsed|searched)|"
+    r"unexamined|(?:not|never)\s+(?:yet\s+)?(?:been\s+)?"
+    r"(?:analy[sz]ed|reviewed|recovered|parsed|searched|examined|inspected)|"
+    r"(?:could\s+not|couldn['’]t|can\s*not|can['’]t)\s+(?:yet\s+)?be\s+(?:fully\s+|reliably\s+)?"
+    r"(?:determined|established|recovered|examined|analy[sz]ed|parsed|read|reviewed|searched|"
+    r"processed|inspected|mounted|verified|assessed)|"
     r"remain(?:s|ing)?\s+(?:unexamined|open|unanalyzed)|"
     r"absence\s+hypothesis|further\s+examination|requires?\s+(?:further|"
     r"additional)\s+(?:analysis|examination|investigation)|"
-    r"could\s+not\s+be\s+(?:determined|established|recovered)|"
     r"no\s+(?:direct\s+)?evidence\s+(?:was\s+)?(?:recovered|available)|"
-    r"pending|unavailable\s+for\s+(?:review|analysis)"
+    r"(?:analysis|examination|review|investigation|parsing|processing)\s+(?:\S+\s+){0,6}?pending|"
+    r"pending\s+(?:further\s+)?(?:analysis|examination|review|investigation|parsing|processing)|"
+    r"unavailable\s+for\s+(?:review|analysis)|"
+    r"konnten?\s+(?:\S+\s+){0,4}?nicht\s+(?:\S+\s+){0,2}?(?:ermittelt|bestimmt|festgestellt|"
+    r"wiederhergestellt|untersucht|ausgewertet|analysiert|gepr(?:ü|ue)ft|gelesen|verarbeitet|"
+    r"eingebunden|gemountet|verifiziert)\s+werden|"
+    r"(?:noch\s+)?nicht\s+(?:\S+\s+)?(?:untersucht|ausgewertet|analysiert|gepr(?:ü|ue)ft)|"
+    r"(?:analyse|auswertung|untersuchung|pr(?:ü|ue)fung)\s+(?:\S+\s+){0,4}?(?:steht\s+(?:noch\s+)?aus|ausstehend)"
     r")\b"
 )
+
+# The examination itself in a lead ("The System hive was mounted"): a gap
+# later in the sentence ("its ShimCache could not be parsed") is then what
+# that examination left open, so the statement is a gap. Passive only: "the
+# attacker mounted the share" is an act, not an examination; "scanned" is
+# left out, a scan is as often the attacker's act as the analyst's.
+_EXAMINED_LEAD_RE = re.compile(
+    r"(?i)\b(?:was|were|is|are|been|wurden?|ist|sind)\b(?:\s+\S+){0,3}?\s+"
+    r"(?:mounted|examined|checked|parsed|reviewed|searched|analy[sz]ed|inspected|processed|"
+    r"eingebunden|gemountet|untersucht|gepr(?:ü|ue)ft|ausgewertet|analysiert|durchsucht|"
+    r"verarbeitet)\b")
 
 # "It is not there" language — a real negative finding, distinct from a gap.
 _ABSENCE_RE = re.compile(
@@ -101,11 +124,19 @@ def classify_statement(statement: str) -> str:
     text = str(statement or "")
     # The first sentence carries the assertion; "Ransomware on the file
     # server. No encrypted files on the DC." is a positive finding with a
-    # scoping clause, not an absence claim.
-    lead = first_sentence(text)
-    if _GAP_RE.search(lead):
+    # scoping clause, not an absence claim. A gap is read in its lead clause
+    # (up to "; "): "Encryption of the share began ...; the ransom note could
+    # not be recovered" asserts the encryption, its caveat is no gap. When
+    # the lead reports an examination, a gap later in the sentence is what
+    # that examination left open; when it reports an absence ("No evidence
+    # of exfiltration was found; the proxy logs were not examined"), the gap
+    # leaves the absence unsettled, and a gap it stays.
+    first = first_sentence(text)
+    lead = first.split("; ", 1)[0]
+    if _GAP_RE.search(lead) or (_GAP_RE.search(first) and (_EXAMINED_LEAD_RE.search(lead)
+                                                           or _ABSENCE_RE.search(lead))):
         return GAP
-    if _ABSENCE_RE.search(lead):
+    if _ABSENCE_RE.search(first):
         return ABSENCE
     return AFFIRMATIVE
 
@@ -577,6 +608,77 @@ def _relates(lead: str, sides: tuple[set[str], set[str]]) -> bool:
     return bool(toks & sides[0]) and bool(toks & sides[1])
 
 
+# The share of content words that makes one answer point another's
+# restatement: the record-time guard's default, fixed here so switching that
+# guard off (ATLAS_FINDING_NEAR_DUPLICATE_MIN=off) does not change answers.
+_ANSWER_FOLD_SHARE = 0.7
+
+
+def _host_names(text: str) -> set[str]:
+    return {m.group(0).lower() for m in _HOSTLIKE_RE.finditer(text or "")}
+
+
+# The preposition a machine takes in an answer's own language.
+_ON_HOST = {"en": "on", "de": "auf"}
+
+
+def _tell_hosts_apart(points: list[str], nodes: list[dict], on: str = "on") -> list[str]:
+    """Points that read alike word for word name their host, so an answer
+    about two hosts does not print one line twice. A point that already
+    names its host stays as it is."""
+    seen: dict[str, int] = {}
+    for p in points:
+        seen[p.lower()] = seen.get(p.lower(), 0) + 1
+    out = []
+    for p, n in zip(points, nodes):
+        host = str(n.get("host") or "").strip()
+        if seen[p.lower()] > 1 and host and host.lower() not in p.lower():
+            p = f"{p} {on} {host}"
+        out.append(p)
+    return out
+
+
+def _adds_only_time(new: str, old: str) -> bool:
+    """``new`` adds to ``old`` nothing but times and numbers: the same kind
+    of event again, at another moment."""
+    from core import entities as _ent
+    added = {e for e in _ent.discriminative(_ent.extract(new)) - _ent.discriminative(_ent.extract(old))
+             if not e.startswith("ts:")}
+    return not added and not (_ent.domains_in(new) - _ent.domains_in(old))
+
+
+def _restates_kept(node: dict, kept: list[dict], *, diversity: bool = False) -> bool:
+    """Whether answer point ``node`` says nothing a kept point on the same
+    host does not: the same headline, or a restatement or a rewording at
+    more length (core.entities.relation, the record-time guard's rule, at
+    its default share; a refinement adds an entity or a number and is a
+    different fact). A point naming a host-shaped name the kept point does
+    not is never folded, since the relation reads no host as an entity and
+    "to CORP-DC01" would restate "to CORP-FS01" (ceiling: a host name
+    without the hyphen-and-digit shape). ``diversity`` also folds a
+    refinement that adds only times and numbers, for an overview that has
+    more candidates than points. The same headline on another host is kept
+    and told apart by its host (``_tell_hosts_apart``).
+    """
+    from core.entities import relation
+    stmt = str(node.get("statement") or "")
+    head = _plain_headline(stmt).lower()
+    host = " ".join(str(node.get("host") or "").split()).lower()
+    for k in kept:
+        if host != " ".join(str(k.get("host") or "").split()).lower():
+            continue
+        kstmt = str(k.get("statement") or "")
+        if head and head == _plain_headline(kstmt).lower():
+            return True
+        if _host_names(stmt) - _host_names(kstmt):
+            continue
+        rel = relation(stmt, kstmt, threshold=_ANSWER_FOLD_SHARE, elaborates=True)
+        if rel and (rel[0] in ("restates", "elaborates")
+                    or (diversity and rel[0] == "refines" and _adds_only_time(stmt, kstmt))):
+            return True
+    return False
+
+
 def synthesize_answer(
     question: str,
     claims: Iterable[dict],
@@ -689,15 +791,19 @@ def synthesize_answer(
         pool = list(positive or negative)
         pool = sorted(pool, key=lambda n: (_when(n) or "~", n.get("id") or ""))
     heads = []
-    seen_heads: set[str] = set()
+    kept: list[dict] = []
+    # An overview with more candidates than points tells each kind of event
+    # once; an answer lists every distinct fact up to max_points.
+    diversity = chronological and len(pool) > max_points
     for n in pool:
         h = _plain_headline(n.get("statement") or "")
-        key = h[:40].lower()
-        if not h or key in seen_heads:
-            continue                      # near-duplicate claims read once
-        seen_heads.add(key); heads.append(h[:1].upper() + h[1:])
+        if not h or _restates_kept(n, kept, diversity=diversity):
+            continue
+        kept.append(n); heads.append(h[:1].upper() + h[1:])
         if len(heads) >= max_points:
             break
+    on = _ON_HOST.get(lang, "on")
+    heads = _tell_hosts_apart(heads, kept, on)
     points = list(heads)
 
     not_established = ("Nicht geklärt — keine Feststellung beantwortet die Frage direkt" if lang == "de"
@@ -705,15 +811,21 @@ def synthesize_answer(
     if chronological and heads:
         # An overview is one short story in time order, not a verdict.
         verdict = "Overview"
-        where = f" on {', '.join(hosts[:3])}" if hosts else ""
-        lead = ((f"{span}{where}: " if span else (f"On{where}: " if where else ""))
-                + "; ".join(heads[:4]))
+        # When and where, as far as known: "<span> on CORP-WS01: ",
+        # "On CORP-WS01: " without a span.
+        place = " ".join(p for p in (span, f"{on} {', '.join(hosts[:3])}" if hosts else "") if p)
+        lead = (f"{place[:1].upper()}{place[1:]}: " if place else "") + "; ".join(heads[:4])
         heads = []
     elif kind == "yes_no" and (positive or negative):
         if rel_pos and any(_direct(n) for n in rel_pos):
-            direct = [n for n in rel_pos if _direct(n)]
-            dheads = [h[:1].upper() + h[1:] for h in
-                      (_plain_headline(n.get("statement") or "") for n in direct) if h]
+            dkept: list[dict] = []
+            for n in rel_pos:
+                if (_direct(n) and _plain_headline(n.get("statement") or "")
+                        and not _restates_kept(n, dkept)):
+                    dkept.append(n)
+            dheads = _tell_hosts_apart(
+                [h[:1].upper() + h[1:] for h in
+                 (_plain_headline(n.get("statement") or "") for n in dkept)], dkept, on)
             lead = f"{yes} — {dheads[0]}" if dheads else f"{yes} — {heads[0]}"
             heads = dheads[1:3]           # support only from findings that address it directly
             points = dheads or points

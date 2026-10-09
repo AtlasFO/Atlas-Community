@@ -805,7 +805,8 @@ def reason_plan(case_description: str,
     Call this after the fast pre-enumeration block (SYSTEM hive, SAM hive,
     SOFTWARE hive, memory stat) so the plan is grounded in real evidence data.
 
-    case_description: incident description — host, timeframe, known suspicion
+    case_description: incident description — host, timeframe, and the
+        analyst's PRIOR KNOWLEDGE statements that bear on it, with their ids
     evidence_available: concatenated output from the pre-enumeration tools.
         Optional — when omitted/empty, Atlas defaults from the latest successful
         misc.inventory_evidence (+ mount_plan summary) so a missing arg does
@@ -940,7 +941,8 @@ def reason_hypothesize(observation: str, evidence: str = "", context: str = "",
       observation: the UNRESOLVED part of the case question (one sentence)
       evidence:    the artifact categories ALREADY examined (so it proposes gaps)
 
-    context: broader case context (OS, known TTPs, incident timeline, roster).
+    context: broader case context (OS, known TTPs, incident timeline, roster,
+             the analyst's PRIOR KNOWLEDGE statements that bear on it).
     input_call_ids: REQUIRED — _atlas_call_id values for the calls that informed this.
 
     The returned hypothesis_id should be passed as `seeded_by` to any
@@ -2039,7 +2041,9 @@ _MIN_ACK_JUSTIFICATION = 40
 # that say exactly the same thing, the agent's OWN declared blockers become
 # documented limitations — the same outcome as (a), reached without needing
 # the agent to phrase it. Scope is unchanged: every independently-computed
-# gate (citation integrity, coverage, tier) stays hard.
+# gate (citation integrity, coverage, tier) stays hard. The lowering of a
+# mis-cited finding reads the same number per finding and as occurrences:
+# the check that lowers is the Nth in a row to flag that finding.
 _BLOCKER_VERDICT_MAX_REPEATS = int(
     os.environ.get("ATLAS_REPORT_BLOCKER_MAX_REPEATS") or "4")
 
@@ -2615,42 +2619,66 @@ def _miscited_finding_entries(finding_entries, entries) -> list[dict]:
     return out
 
 
-def _citation_blocker(miscited: list[dict], entries) -> str:
-    """The blocker for findings whose citations do not support them: what
-    each rests on and which calls in the trace would support it, so the
-    repair is a re-record with those calls rather than a withdrawal."""
-    from tools._gates.citation_support import (calls_showing, cited_ids,
-                                               is_absence_claim)
-    tool_calls = [e for e in entries if e.get("type") == "tool_call"]
+def _citation_blocker(miscited: list[dict]) -> str:
+    """The blocker for findings whose citations do not support them, each
+    named with its problem and the supersedes= that repairs it, so the repair
+    is a re-record that replaces the finding rather than a variant beside it.
+
+    The text depends only on which findings stand flagged (call-id order,
+    three named), so the verdict repeats while they stand and the backstops
+    that wait for a repeated verdict can see it. Which calls would support
+    each finding changes with every call and goes to the warning from
+    :func:`_citation_repair_hint` instead."""
+    from tools._gates.citation_support import is_absence_claim
+    flagged = sorted(miscited, key=lambda f: int(f.get("call_id") or 0))
     lines: list[str] = []
-    for f in miscited[:3]:
+    for f in flagged[:3]:
         desc = str(f.get("description") or "")
-        support = str(f.get("supporting_evidence") or "")
-        absence = is_absence_claim(desc)
-        shown = calls_showing(desc, tool_calls, exclude=cited_ids(f),
-                              complete_only=absence, supporting_evidence=support)
-        if absence:
-            what = ("asserts an absence but cites no complete search that would "
-                    "have found what it says is missing")
-        else:
-            what = "its cited calls show none of the identifiers it rests on"
-        if shown:
-            what += "; call(s) " + ", ".join(
-                f"{s['call_id']} ({s['why']})" for s in shown) + " would"
-        else:
-            what += "; no evidence call in the trace does"
-        lines.append(f"{desc[:80]!r}: {what}")
+        what = ("asserts an absence but cites no complete search that would have found what "
+                "it says is missing" if is_absence_claim(desc)
+                else "its cited calls show none of the identifiers it rests on")
+        lines.append(f"{desc[:80]!r} (supersedes={f.get('call_id')}): {what}")
+    if len(flagged) > 3:
+        lines.append(f"and {len(flagged) - 3} more (supersedes= "
+                     + ", ".join(str(f.get("call_id")) for f in flagged[3:]) + ")")
     return (
         "Finding(s) cite calls that do not contain the identifiers they rest on: "
         + "; ".join(lines)
-        + ". Re-record the same finding citing the calls that support it (the "
-        "same words with the right citations is a citation repair, not a "
-        "duplicate, and it carries the hypothesis the finding resolved), move "
-        "that value into supporting_evidence, lower the finding to UNCONFIRMED "
-        "as a limitation, or - only when no tool output anywhere supports it - "
-        "withdraw it (claim.supersede with no new_id). A report must not rest "
+        + ". Repair each by recording it again with the supersedes= named, which replaces "
+        "it instead of adding a variant beside it: cite the calls that show it (for an "
+        "absence, run the complete search first and cite that), or move the value they "
+        "show into supporting_evidence. The same words with the right citations is a "
+        "citation repair, not a duplicate, and it carries the hypothesis the finding "
+        "resolved. Where nothing shows it, lower it: record it again at UNCONFIRMED with "
+        "the same supersedes=, as a limitation. Withdraw it (claim.supersede with no "
+        "new_id) only when no tool output anywhere supports it. A report must not rest "
         "on evidence that does not say what the finding claims."
     )
+
+
+def _citation_repair_hint(miscited: list[dict], entries) -> str:
+    """Which calls in the trace would support each finding the citation
+    blocker names. A warning, not part of the blocker: the next call can
+    change it while the finding stands unrepaired."""
+    from tools._gates.citation_support import (calls_showing, cited_ids,
+                                               is_absence_claim)
+    tool_calls = [e for e in entries if e.get("type") == "tool_call"]
+    leads: list[str] = []
+    for f in sorted(miscited, key=lambda f: int(f.get("call_id") or 0))[:3]:
+        desc = str(f.get("description") or "")
+        absence = is_absence_claim(desc)
+        shown = calls_showing(desc, tool_calls, exclude=cited_ids(f),
+                              complete_only=absence,
+                              supporting_evidence=str(f.get("supporting_evidence") or ""))
+        if shown:
+            lead = ("call(s) " + ", ".join(f"{s['call_id']} ({s['why']})" for s in shown)
+                    + " would support it")
+        elif absence:
+            lead = "no complete search in the trace covers it yet; run one, or lower it"
+        else:
+            lead = "no evidence call in the trace shows it; lower or withdraw it"
+        leads.append(f"supersedes={f.get('call_id')}: {lead}")
+    return "Citation repair leads: " + "; ".join(leads) + "."
 
 
 def _withdrawn_since_last_check(trace: list[dict], case_dir) -> list[str]:
@@ -2698,6 +2726,42 @@ def _findings_with_unsupported_citations(finding_entries, entries) -> list[str]:
             for f in _miscited_finding_entries(finding_entries, entries)]
 
 
+# The stamps record_finding leaves on a finding recorded again: named with
+# supersedes=, a citation repair, a sharper statement, an elaboration.
+_REPRISE_KEYS = ("replaces_call_id", "repairs_call_id", "refines_call_id", "restates_call_id")
+
+
+def _finding_lineage_root(finding: dict, findings_by_cid: dict) -> int:
+    """The call id of the first record in a finding's chain of re-records,
+    so a finding recorded again is still the same finding to the lowering
+    below. A link to a finding the trace does not hold ends the chain."""
+    cur, seen = finding, set()
+    while True:
+        cid = int(cur.get("call_id") or 0)
+        seen.add(cid)
+        prev = next((int(cur[k]) for k in _REPRISE_KEYS if cur.get(k)), 0)
+        if not prev or prev in seen or prev not in findings_by_cid:
+            return cid
+        cur = findings_by_cid[prev]
+
+
+def _miscited_streaks(trace: list[dict], roots: list[int]) -> dict[int, int]:
+    """For each lineage root, how many of the newest report checks in a row
+    flagged it. A check that stored no list (an older build) ends a streak."""
+    checks = [e.get("miscited_lineage") for e in reversed(trace)
+              if e.get("type") == "reason_call"
+              and e.get("tool") == "reason_pre_report_check"]
+    out: dict[int, int] = {}
+    for root in roots:
+        n = 0
+        for flagged in checks:
+            if not isinstance(flagged, list) or root not in flagged:
+                break
+            n += 1
+        out[root] = n
+    return out
+
+
 def _lower_miscited_findings(miscited: list[dict], case_dir) -> list[str]:
     """Drop each mis-cited finding's claim to UNCONFIRMED; return what moved.
 
@@ -2705,8 +2769,9 @@ def _lower_miscited_findings(miscited: list[dict], case_dir) -> list[str]:
     identifiers the finding rests on. Its own message offers three remedies,
     and the third — lower the finding — is the one that can be applied
     without weakening anything: the report then claims only what the evidence
-    shows. Taken only after the gate has repeated itself, so a run still
-    correcting its citations is never pre-empted.
+    shows. Taken only once the gate has flagged the same finding (followed
+    through its re-records) in _BLOCKER_VERDICT_MAX_REPEATS report checks in
+    a row, so a run whose repair works is never pre-empted.
 
     This is the gate's one write, and it is deliberate: the gate is the only
     thing that knows a citation is unsupported. Idempotent — a claim already
@@ -2840,7 +2905,7 @@ def _pre_report_check(*, apply_remedies: bool = False) -> dict:
     # Access stage — SoT only (mount_plan / evidence_access). Do not treat
     # prose "access_failed" findings as clearing this gate.
     try:
-        from core.evidence_access import media_access_summary, media_entries
+        from core.evidence_access import OPEN_STEPS, media_access_summary, media_entries
         _acc_case = log.case_dir()
         if _acc_case:
             _acc = media_access_summary(_acc_case)
@@ -2854,7 +2919,7 @@ def _pre_report_check(*, apply_remedies: bool = False) -> dict:
                 structural_issues.append(
                     "Disk media access stage incomplete — "
                     + "; ".join(_bits)
-                    + ". Open with tsk.mmls/tsk.fls (or record access_failed) "
+                    + f". Open each: {OPEN_STEPS}; or record access_failed. Do this "
                     "before treating filesystem/EVTX sources as examined or absent. "
                     "Cite Access Stage / mount_plan — do not spawn repeated "
                     "UNCONFIRMED limitation findings as a substitute."
@@ -2891,11 +2956,13 @@ def _pre_report_check(*, apply_remedies: bool = False) -> dict:
         _led_case = log.case_dir()
         _led_why = _led_reason(_led_case) if _led_case else ""
         if _led_why:
+            from core.coverage_ledger import open_units_read_hint as _led_how
+            _how = _led_how(_led_case)
             issues.append(
                 "Coverage ledger floor not met — " + _led_why + ". This is the "
-                "primary open work: probe each unseen unit with "
-                "table.table_query / a single-file parse (cheap), or document "
-                "a real failed attempt via coverage.mark_blocked(path, reason). "
+                "primary open work: read each unseen unit"
+                + (f" ({_how})" if _how else "") + "; "
+                "coverage.mark_blocked(path, reason) records a read that failed. "
                 "Do NOT run unrelated tools to clear other warnings while "
                 "coverage is open."
             )
@@ -3148,6 +3215,7 @@ def _pre_report_check(*, apply_remedies: bool = False) -> dict:
     # the run may have ignored; both are bounded and satisfiable (record,
     # re-cite, or lower a finding), and both respect the accepted-limitations
     # hatch so a genuine dead-end never loops. One env flag disables the pair.
+    _flagged_lineage: list[int] = []
     if not _accepted_limits and (os.environ.get("ATLAS_REPORT_READINESS_GATES")
                                  or "1").strip().lower() not in ("0", "false", "no", "off"):
         # (1) Indicators the evidence keeps showing that no finding names.
@@ -3165,8 +3233,11 @@ def _pre_report_check(*, apply_remedies: bool = False) -> dict:
         if _demand:
             issues.append(
                 "Indicators recur across the evidence but no finding names them: "
-                + "; ".join(f"{d['value']} ({d['kind']}, seen in {d['calls']} calls)"
-                            for d in _demand)
+                # Named in a fixed order and without their call counts, which
+                # grow with every read: the blocker's text changes only when
+                # the indicators it names change.
+                + "; ".join(f"{d['value']} ({d['kind']})" for d in sorted(
+                    _demand, key=lambda d: (str(d['kind']), str(d['value']))))
                 + ". Record a finding naming each — one finding may cover "
                 "several, and a SUSPECTED finding that rules them benign counts "
                 "— or accept them in analysis/REPORT_LIMITATIONS_ACCEPTED.md. "
@@ -3199,21 +3270,34 @@ def _pre_report_check(*, apply_remedies: bool = False) -> dict:
                 "Limitations section that the citation does not show the value, "
                 "or withdraw the claim (claim.supersede with no new_id).")
             documented_limitations.extend(_floor_desc)
-        _miscited = [str(f.get("description") or "")[:80]
-                     for f in _miscited_entries]
-        _lowered = (_lower_miscited_findings(_miscited_entries, _case_dir)
-                    if (apply_remedies and _miscited
-                        and _blocker_verdicts_exhausted()) else [])
-        if _lowered:
+        # Each finding is followed back through its re-records to the first
+        # one, and the check stores the roots it flagged on its own trace
+        # entry. A root flagged by this check and the ones right before it,
+        # _BLOCKER_VERDICT_MAX_REPEATS checks in all, is lowered: counted per
+        # finding, so a repair loop that changes the rest of the verdict on
+        # every pass still reaches the remedy.
+        _by_cid = {int(e.get("call_id") or 0): e for e in all_finding_entries}
+        _roots = [_finding_lineage_root(f, _by_cid) for f in _miscited_entries]
+        _flagged_lineage = sorted(set(_roots))
+        _streaks = _miscited_streaks(trace, _flagged_lineage)
+        _due = [f for f, root in zip(_miscited_entries, _roots)
+                if 0 < _BLOCKER_VERDICT_MAX_REPEATS <= _streaks[root] + 1]
+        _moved = ([f for f in _due if _lower_miscited_findings([f], _case_dir)]
+                  if apply_remedies else [])
+        _still = [f for f in _miscited_entries if f not in _moved]
+        if _moved:
+            _lowered = [str(f.get("description") or "")[:80] for f in _moved]
             warnings.append(
                 "Finding(s) whose cited calls carry none of the identifiers "
                 "they rest on were lowered to UNCONFIRMED after the gate "
-                "repeated itself: " + " | ".join(_lowered)
+                f"flagged each in {_BLOCKER_VERDICT_MAX_REPEATS} report checks "
+                "in a row: " + " | ".join(_lowered)
                 + ". State in the report's Limitations section that the "
                 "citation does not support the original tier.")
             documented_limitations.extend(_lowered)
-        elif _miscited:
-            issues.append(_citation_blocker(_miscited_entries, entries))
+        if _still:
+            issues.append(_citation_blocker(_still))
+            warnings.append(_citation_repair_hint(_still, entries))
 
     mitre_findings = finding_entries
     if len(finding_entries) < len(all_finding_entries):
@@ -3278,6 +3362,16 @@ def _pre_report_check(*, apply_remedies: bool = False) -> dict:
         _iw = report_warning(_case_dir, finding_entries)
         if _iw:
             warnings.append(_iw)
+    except Exception:  # noqa: BLE001 — advisory only
+        pass
+    # Refused indicator rows (advisory, never a blocker): a typed value the
+    # record refused is in no indicator list; the reader sees it under
+    # "Not exported", the analyst may re-type it from the cited output.
+    try:
+        from core.indicators import dropped_warning
+        _dw = dropped_warning(_case_dir)
+        if _dw:
+            warnings.append(_dw)
     except Exception:  # noqa: BLE001 — advisory only
         pass
     # Response coverage (advisory): a substantiated finding of those kinds
@@ -4272,9 +4366,11 @@ def _pre_report_check(*, apply_remedies: bool = False) -> dict:
             f"({', '.join(_shed[:6])}) while blocking issues remain. A withdrawal "
             "to clear a gate loses the finding and reopens the question, "
             "hypothesis or indicator it resolved. When the citation was the "
-            "objection, re-record the finding citing the calls that support it "
-            "instead (a citation repair is not a duplicate and carries the "
-            "hypothesis), or lower it to UNCONFIRMED as a limitation.")
+            "objection, record a standing finding again with supersedes=<its "
+            "call id> citing the calls that support it instead of withdrawing it "
+            "(a citation repair is not a duplicate and carries the hypothesis), "
+            "or lower it the same way: recorded again at UNCONFIRMED with "
+            "supersedes=<its call id>, as a limitation.")
 
     all_issues = structural_issues + issues
     ready = len(all_issues) == 0
@@ -4303,13 +4399,15 @@ def _pre_report_check(*, apply_remedies: bool = False) -> dict:
                 or (e.get("type") == "reason_call" and e.get("tool") == "reason_synthesize")
             )
         ]
-        log.record_reason_call(
+        _check_cid = log.record_reason_call(
             tool="reason_pre_report_check",
             success=True,
             conclusion=conclusion,
             directives={},
             input_call_ids=synthesized_cids or None,
         )
+        # What the next check counts a mis-cited finding's streak from.
+        log.update_reason_call(_check_cid, miscited_lineage=_flagged_lineage)
     except Exception as _e:
         import sys as _sys
         print(f"[Atlas WARN] pre_report_check trace write failed: {_e}", file=_sys.stderr)

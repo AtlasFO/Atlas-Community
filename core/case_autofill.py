@@ -52,7 +52,7 @@ from core.case_knowledge import (
 from core.entities import extract
 from core.evidence_profile import build_evidence_profile
 from core.investigation_tasks import _SECTION_HEADINGS as _REQUEST_TITLES
-from core.investigation_tasks import parse_case_requests
+from core.investigation_tasks import parse_case_requests, unclosed_fence
 
 STANDARD_REQUEST = "What happened on the Host(s)?"
 
@@ -88,8 +88,11 @@ _AUTOFILL_SYSTEM_PROMPT = (
 _PRIOR_KNOWLEDGE_SYSTEM_PROMPT = (
     "You tidy the 'What you already know' section of a DFIR case file. It "
     "holds the analyst's prior knowledge: suspicions, indicators seen "
-    "elsewhere, accounts, hosts, a time window. Rewrite it so a parser "
-    "reads it well, keeping every fact.\n\n"
+    "elsewhere, accounts, hosts, a time window, facts about their own "
+    "environment, and sometimes a pasted list or log excerpt in a code "
+    "fence. Rewrite it so a parser reads it well, keeping every fact; a "
+    "pasted list becomes one bullet per item that names a value, with the "
+    "value kept exactly.\n\n"
     "- One bullet per fact. Keep every name, address, account, hash, path, "
     "time and every stated uncertainty (a spelling the analyst is unsure "
     "of stays marked as unsure). Add nothing the text does not say and "
@@ -126,6 +129,7 @@ def build_proposal(case_dir: str | Path) -> dict[str, Any]:
     profile = build_evidence_profile(case_dir)
     current_md = read_case_md(case_dir)
     linked = parse_evidence_links(current_md, case_dir=case_dir)
+    fence = unclosed_fence(current_md)
     linked_paths = {e.get("path") for e in linked["entries"] if e.get("path")}
 
     rows: list[dict[str, Any]] = []
@@ -144,9 +148,14 @@ def build_proposal(case_dir: str | Path) -> dict[str, Any]:
         "case_id": profile["case_id"],
         "rows": rows,
         "unsure": unsure,
-        "investigation_requests_empty": not parse_case_requests(current_md),
-        # The analyst's prior knowledge as written (comments and fences
-        # removed); "" when CASE.md has no such section or it is empty.
+        # Requests an unclosed code block hides are still the analyst's: the
+        # standard question is not added on top of them.
+        "investigation_requests_empty": (not parse_case_requests(current_md)
+                                         and not (fence or {}).get("hidden_requests")),
+        "unclosed_fence": fence,
+        # The analyst's prior knowledge as written (comments removed, a
+        # pasted fenced block kept); "" when CASE.md has no such section
+        # or it is empty.
         "prior_knowledge": section_text(current_md),
     }
 

@@ -244,6 +244,18 @@ class TestCaseMd:
         case_admin.write_case_md(cases_root, "MD-CASE-3", "content")
         assert not (d / "CASE.md.tmp").exists()
 
+    def test_a_code_block_that_never_closes_is_reported_on_save_and_read(self, cases_root):
+        case_admin.create_case(cases_root, "MD-CASE-6")
+        broken = ("**Case ID:** MD-CASE-6\n\n## Notes\n```\nraw output\n\n"
+                  "## Investigation Requests\n- Was data taken from CORP-FS01?\n")
+        saved = case_admin.write_case_md(cases_root, "MD-CASE-6", broken)
+        assert saved["success"] and saved["unclosed_fence"]["line"] == 4
+        assert saved["unclosed_fence"]["hidden_requests"] == 1
+        assert case_admin.read_case_md(cases_root, "MD-CASE-6")["unclosed_fence"]["line"] == 4
+        fixed = broken.replace("raw output\n", "raw output\n```\n")
+        assert case_admin.write_case_md(cases_root, "MD-CASE-6", fixed)["unclosed_fence"] is None
+        assert case_admin.read_case_md(cases_root, "MD-CASE-6")["unclosed_fence"] is None
+
     def test_missing_case_md_reports_not_exists(self, cases_root):
         d = case_admin.create_case(cases_root, "MD-CASE-4")
         (d / "CASE.md").unlink()

@@ -369,3 +369,122 @@ class TestAccountsAreNotReadFromPaths:
 def test_a_sid_in_a_registry_path_is_still_an_account():
     text = "under HKLM\\SAM\\SAM\\Domains\\Account\\Users\\S-1-5-21-1-2-3-1001\\V the account keeps its F value"
     assert [v for v, _ in av.values(text, "account")] == ["S-1-5-21-1-2-3-1001"]
+
+
+def test_a_code_span_path_binds_whole():
+    text = "The dropper `C:\\Users\\jane.doe\\AppData\\evil.exe` ran on CORP-WS01."
+    assert [v for v, _ in av.values(text, "path")][0] == "C:\\Users\\jane.doe\\AppData\\evil.exe"
+    assert [v for v, _ in av.values("copied `C:\\Temp` by `CORP\\jdoe`", "path")] == ["C:\\Temp"]
+
+
+def test_a_code_span_relative_path_binds_whole():
+    got = [v for v, _ in av.values("carved into `exports/carved/x.bin` then", "path")]
+    assert got[0] == "exports/carved/x.bin"
+
+
+class TestABeliefNamedForAPartBindsOnlyWhatItSingles:
+    """A belief the analyst named for a part binds the value beside the part's
+    words, or the one value of the kind it states; with several and no clause
+    saying which, it binds none and the refusal names them."""
+
+    def test_a_host_inside_a_longer_host_name_is_no_host(self):
+        assert av.values("CORP-WS01 was the attacker's host.", "host") == [("CORP-WS01", 0)]
+        assert av.bind("the attacker's host", "host", "CORP-WS01 was the attacker's host.",
+                       explicit=True)[0] == "CORP-WS01"
+
+    def test_an_fqdn_takes_its_host_name_with_it(self):
+        assert av.values("Beacons reached CORP-WS01.example.com at night.", "host") == [
+            ("CORP-WS01.example.com", 16)]
+
+    def test_two_hosts_and_no_role_word_bind_none_and_are_listed(self):
+        st = "Logons from CORP-WS02 reached CORP-DC01 over SMB."
+        assert av.bind("the attacker's host", "host", st, explicit=True, known_hosts=["CORP-DC01"]) == (None, "")
+        assert av.explicit_candidates("the attacker's host", "host", st) == ["CORP-WS02", "CORP-DC01"]
+        assert av.bind("the attacker's host", "host", st, explicit=True, prefer=["CORP-WS02"])[0] == "CORP-WS02"
+        assert av.explicit_candidates("the attacker's host", "host", st, prefer=["CORP-WS02"]) == []
+
+    def test_the_one_value_a_belief_states_binds(self):
+        assert av.bind("the attacker's host", "host", "Logons from CORP-WS02 were seen over SMB.",
+                       explicit=True)[0] == "CORP-WS02"
+
+    def test_a_clause_with_the_parts_words_that_denies_the_value_binds_nothing(self):
+        st = "Network: delivery IP is 203.0.113.7; the C2 IP could not be established."
+        assert av.bind("the C2 IP", "ip", st, explicit=True) == (None, "")
+        assert av.bind("the delivery IP", "ip", st, explicit=True)[0] == "203.0.113.7"
+        assert av.bind("the C2 IP", "ip", "Network: the C2 IP is unknown; delivery from 203.0.113.7.",
+                       explicit=True) == (None, "")
+
+    def test_a_negator_about_something_else_does_not_stop_the_bind(self):
+        st = "The attacker's host was not a domain member. It was CORP-WS02."
+        assert av.bind("the attacker's host", "host", st, explicit=True)[0] == "CORP-WS02"
+
+    def test_a_file_over_its_shortcut_and_utc_over_local_time_count_as_one(self):
+        st = ("The recent-files list shows C:\\Users\\jane.doe\\AppData\\Roaming\\Microsoft\\Windows\\Recent\\"
+              "plan.docx.lnk for C:\\Share\\plan.docx.")
+        assert av.bind("the staged document", "path", st, explicit=True)[0] == "C:\\Share\\plan.docx"
+        st = "jane.doe signed in at 2031-03-04 10:00:00 UTC (2031-03-04 11:00:00 local)."
+        assert av.bind("the first logon time", "datetime", st, explicit=True)[0] == "2031-03-04 10:00:00 UTC"
+
+    def test_a_typed_principal_matches_either_half_of_name_and_sid(self):
+        st = "The file was created by jane.doe (S-1-5-21-1111111111-2222222222-3333333333-1104)."
+        got = av.bind("the account that created the file", "account", st, explicit=True,
+                      prefer=["S-1-5-21-1111111111-2222222222-3333333333-1104"])
+        assert got[0] == "jane.doe (S-1-5-21-1111111111-2222222222-3333333333-1104)"
+
+
+class TestAFileClassNamedByThePart:
+    LOG_AND_EXE = "The analyst found C:\\Temp\\example3.log and C:\\Temp\\tool.exe."
+
+    def test_the_class_comes_from_the_parts_head_noun(self):
+        assert av.file_class_named("an executable") == "executable"
+        assert av.file_class_named("the log of the executable") == "log"
+        assert av.file_class_named("which files were executed") == ""
+
+    def test_an_executable_binds_the_executable_named_or_linked(self):
+        assert av.bind("an executable", "path", self.LOG_AND_EXE, explicit=True)[0] == "C:\\Temp\\tool.exe"
+        # The class word is checked on the value, so a linked belief needs
+        # no word "executable" in its first sentence.
+        assert av.bind("an executable", "path", self.LOG_AND_EXE)[0] == "C:\\Temp\\tool.exe"
+
+    def test_a_file_of_no_class_stays_and_one_of_another_class_never_binds(self):
+        assert av.bind("an executable", "path", "The dropper /usr/local/bin/tool ran at boot.")[0] == \
+            "/usr/local/bin/tool"
+        assert av.bind("an executable", "path", "Only C:\\Temp\\example3.log was written.") == (None, "")
+
+
+class TestWordsMatchByTheirStems:
+    @pytest.mark.parametrize("a, b", [("key", "keys"), ("log", "logs"), ("wiping", "wiped"),
+                                      ("copied", "copies"), ("deleting", "deleted"),
+                                      ("encrypted", "encryption"), ("exfiltration", "exfiltrated"),
+                                      ("authentication", "authenticated"), ("creation", "created")])
+    def test_inflections_of_one_word_match(self, a, b):
+        assert av._same_word(a, b) and av._same_word(b, a)
+
+    @pytest.mark.parametrize("a, b", [("same", "sam"), ("note", "not"), ("hat", "hate"),
+                                      ("installer", "install"), ("ration", "rated"), ("early", "ears")])
+    def test_short_look_alikes_and_agent_nouns_do_not(self, a, b):
+        assert not av._same_word(a, b) and not av._same_word(b, a)
+
+
+class TestANameAndItsSidAreOnePrincipal:
+    SID = "S-1-5-21-1111111111-2222222222-3333333333-1104"
+
+    @pytest.mark.parametrize("text, want", [
+        (f"The file was created by jane.doe ({SID}).", f"jane.doe ({SID})"),
+        (f"{SID} (jane.doe) logged on.", f"jane.doe ({SID})"),
+        (f"EXAMPLE\\jane.doe ({SID}) logged on.", f"EXAMPLE\\jane.doe ({SID})"),
+        ("Administrator (S-1-5-21-1111111111-2222222222-3333333333-500) logged on.",
+         "Administrator (S-1-5-21-1111111111-2222222222-3333333333-500)"),
+        (f"The file was created by Jane Doe ({SID}).", f"Jane Doe ({SID})"),
+        ("Logon by The Administrator (S-1-5-21-1111111111-2222222222-3333333333-500).",
+         "Administrator (S-1-5-21-1111111111-2222222222-3333333333-500)"),
+    ])
+    def test_name_and_sid_in_apposition_read_as_one(self, text, want):
+        assert [v for v, _ in av.values(text, "account")] == [want]
+
+    @pytest.mark.parametrize("text", [
+        f"the account ({SID}) logged on.",
+        f"{SID} (the local administrator) logged on.",
+    ])
+    def test_a_generic_word_beside_the_sid_is_no_name(self, text):
+        assert [v for v, _ in av.values(text, "account")] == [self.SID]

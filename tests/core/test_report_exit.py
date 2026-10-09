@@ -428,3 +428,40 @@ def test_the_close_out_delivers_the_indicator_files(tmp_path, monkeypatch):
     assert Path(files["markdown"]).is_file() and Path(files["csv"]).is_file()
     assert Path(files["markdown"]).parent == case / "reports"
     assert "Verify ownership before deploying a block item." in Path(files["markdown"]).read_text()
+
+
+# ── what the floor owes without a model ─────────────────────────────────────
+
+def test_the_floor_writes_the_indicator_files_it_points_at(tmp_path, monkeypatch):
+    case = _case(tmp_path)
+    _no_projection(monkeypatch)
+    res = write_exit_report(case, "keyboard_interrupt", allow_llm=False)
+    assert (case / "reports" / "T_iocs.md").is_file()
+    assert (case / "reports" / "T_iocs.csv").is_file()
+    text = Path(res["path"]).read_text(encoding="utf-8")
+    assert "reports/T_iocs.md" in text
+    assert "could not be written" not in text
+
+
+def test_the_floor_shows_the_recorded_plan_not_canned_advice(tmp_path, monkeypatch):
+    from core.claim_graph import add_recommendation
+    case = _case(tmp_path)
+    _no_projection(monkeypatch)
+    add_recommendation(case, action="Isolate CORP-HOST01 from the network", phase="contain",
+                       scope="host", urgency="now", basis_ids=["C0001"], hosts=["CORP-HOST01"])
+    text = Path(write_exit_report(case, "keyboard_interrupt",
+                                  allow_llm=False)["path"]).read_text(encoding="utf-8")
+    assert "Isolate CORP-HOST01 from the network" in text
+    assert "Containment/isolation decisions must follow" not in text
+    assert "Finding-tied actions" not in text
+
+
+def test_a_case_with_an_official_report_is_left_untouched(tmp_path, monkeypatch):
+    import core.recommendations as rec
+    case = _case(tmp_path)
+    (case / "reports").mkdir()
+    (case / "reports" / "final_report.md").write_text("# Final\n\n" + "x" * 200, encoding="utf-8")
+    monkeypatch.setattr(rec, "derive_next_steps",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("touched")))
+    assert write_exit_report(case, "manual", allow_llm=False)["written"] is False
+    assert not (case / "reports" / "T_iocs.md").exists()

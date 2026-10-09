@@ -56,34 +56,42 @@ def refang(value: str) -> str:
     return low
 
 
+# The names a model reaches for: the canonical type, its common spellings,
+# and the suffixes it likes to add.
+_TYPE_ALIASES = {"ipv4": "ip", "ipv6": "ip", "ip_addr": "ip", "ipaddress": "ip",
+    "md5": "hash", "sha1": "hash", "sha256": "hash", "file_hash": "hash", "md5_hash": "hash",
+    "sha1_hash": "hash", "sha256_hash": "hash", "filehash": "hash",
+    "filename": "file", "file_name": "file", "binary": "file", "executable": "file",
+    "process": "file", "process_name": "file", "image": "file", "tool": "file", "script": "file",
+    "file_path": "path", "filepath": "path", "full_path": "path", "directory": "path", "folder": "path",
+    "hostname": "host", "computer": "host", "computer_name": "host", "machine": "host",
+    "user": "account", "username": "account", "user_account": "account", "account_name": "account",
+    "user_name": "account", "principal": "account", "sid": "account",
+    "reg": "registry", "regkey": "registry", "registry_key": "registry", "registry_path": "registry",
+    "registry_value": "registry", "scheduled_task": "task", "service_name": "service",
+    "key_id": "credential_id", "access_key": "credential_id", "access_key_id": "credential_id",
+    "api_key": "credential_id", "token": "credential_id", "credential": "credential_id",
+    "bucket": "cloud_resource", "s3_bucket": "cloud_resource", "cloud_account": "cloud_resource",
+    "mutex": "pattern", "user_agent": "pattern", "useragent": "pattern",
+    "fqdn": "domain", "dns": "domain", "hostname_fqdn": "domain", "mac_addr": "mac",
+    "email_address": "email", "mail": "email", "sha_256": "hash", "sha_1": "hash"}
+
+
+def canonical_type(kind: Any) -> str:
+    """The canonical indicator type for the name given to it."""
+    kind = str(kind or "").strip().lower().replace("-", "_").replace(" ", "_")
+    for suffix in ("_address", "_name", "_value", "_string"):
+        if kind.endswith(suffix) and kind[:-len(suffix)] in TYPES:
+            kind = kind[:-len(suffix)]
+    return _TYPE_ALIASES.get(kind, kind)
+
+
 def normalize_row(row: Any) -> tuple[dict[str, Any] | None, str]:
     """``(row, "")`` with the type, value and side canonical, or
     ``(None, reason)`` when the row cannot be an indicator."""
     if not isinstance(row, dict):
         return None, "a row is an object with type, value and side"
-    kind = str(row.get("type") or "").strip().lower().replace("-", "_").replace(" ", "_")
-    # The names a model reaches for: the canonical type, its common
-    # spellings, and the suffixes it likes to add.
-    for suffix in ("_address", "_name", "_value", "_string"):
-        if kind.endswith(suffix) and kind[:-len(suffix)] in TYPES:
-            kind = kind[:-len(suffix)]
-    kind = {"ipv4": "ip", "ipv6": "ip", "ip_addr": "ip", "ipaddress": "ip",
-            "md5": "hash", "sha1": "hash", "sha256": "hash", "file_hash": "hash", "md5_hash": "hash",
-            "sha1_hash": "hash", "sha256_hash": "hash", "filehash": "hash",
-            "filename": "file", "file_name": "file", "binary": "file", "executable": "file",
-            "process": "file", "process_name": "file", "image": "file", "tool": "file", "script": "file",
-            "file_path": "path", "filepath": "path", "full_path": "path", "directory": "path", "folder": "path",
-            "hostname": "host", "computer": "host", "computer_name": "host", "machine": "host",
-            "user": "account", "username": "account", "user_account": "account", "account_name": "account",
-            "user_name": "account", "principal": "account", "sid": "account",
-            "reg": "registry", "regkey": "registry", "registry_key": "registry", "registry_path": "registry",
-            "registry_value": "registry", "scheduled_task": "task", "service_name": "service",
-            "key_id": "credential_id", "access_key": "credential_id", "access_key_id": "credential_id",
-            "api_key": "credential_id", "token": "credential_id", "credential": "credential_id",
-            "bucket": "cloud_resource", "s3_bucket": "cloud_resource", "cloud_account": "cloud_resource",
-            "mutex": "pattern", "user_agent": "pattern", "useragent": "pattern",
-            "fqdn": "domain", "dns": "domain", "hostname_fqdn": "domain", "mac_addr": "mac",
-            "email_address": "email", "mail": "email", "sha_256": "hash", "sha_1": "hash"}.get(kind, kind)
+    kind = canonical_type(row.get("type"))
     value = " ".join(str(row.get("value") or "").split()).strip("`'\" ")
     side = str(row.get("side") or "").strip().lower().replace("-", "_").replace(" ", "_")
     side = {"third": "third_party", "thirdparty": "third_party", "other": "third_party",
@@ -120,6 +128,9 @@ def _shape(kind: str, value: str) -> tuple[str, str]:
         return ":".join(bare[i:i + 2] for i in range(0, 12, 2)), ""
     if kind == "hash":
         if not re.fullmatch(r"[0-9a-f]{32}|[0-9a-f]{40}|[0-9a-f]{64}", low):
+            if re.fullmatch(r"[0-9a-f]+", low):
+                return value, (f"{len(low)} hex characters; the hash type takes an MD5 (32), "
+                               "a SHA-1 (40) or a SHA-256 (64)")
             return value, f"{value!r} is not an MD5, SHA-1 or SHA-256 hash"
         return low, ""
     if kind == "email":
@@ -369,6 +380,74 @@ def _timestamp_present(stamp: str, texts: list[str]) -> str:
     return ""
 
 
+# The lengths of an MD5, a SHA-1 and a SHA-256 in hex: universal knowledge,
+# the same three the hash type accepts.
+_DIGEST_LENGTHS = (32, 40, 64)
+_HEX_RUN_RE = re.compile(r"(?<![0-9a-f])[0-9a-f]{32,64}(?![0-9a-f])")
+
+
+def within_edits(a: str, b: str, k: int = 2) -> int | None:
+    """The edit distance between ``a`` and ``b`` when it is at most ``k``,
+    else None (bounded Levenshtein: a row whose minimum passes ``k`` ends it)."""
+    if abs(len(a) - len(b)) > k:
+        return None
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i] + [0] * len(b)
+        for j, cb in enumerate(b, 1):
+            cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb))
+        if min(cur) > k:
+            return None
+        prev = cur
+    return prev[-1] if prev[-1] <= k else None
+
+
+def _near_digest(value: str, texts: list[str]) -> tuple[str, int] | None:
+    """The one digest in the cited outputs that a typed hash is a slip of: a
+    32/40/64-hex run within two edits of it that shares its first or last
+    eight characters. Hashes only: two real digests are never that close,
+    two addresses or names often are. None for no candidate or several.
+    A candidate is a regex-checked run of hex digits, so naming it in a
+    reason the model reads carries no text from the evidence beyond it.
+    ponytail: only the outputs as read for presence (the spill read up to
+    SPILL_READ_CHARS); a digest further into a spill is not suggested."""
+    v = value.lower()
+    if not re.fullmatch(r"[0-9a-f]{30,66}", v):
+        return None
+    found: dict[str, int] = {}
+    for text in texts:
+        for m in _HEX_RUN_RE.finditer(text.lower()):
+            run = m.group(0)
+            if (len(run) not in _DIGEST_LENGTHS or run == v or run in found
+                    or (run[:8] != v[:8] and run[-8:] != v[-8:])):
+                continue
+            distance = within_edits(v, run)
+            if distance is not None:
+                found[run] = distance
+                if len(found) > 1:
+                    return None
+    return next(iter(found.items())) if len(found) == 1 else None
+
+
+def _dropped(kind: Any, value: Any, reason: str, texts: list[str] | None,
+             refusal: str) -> dict[str, str]:
+    """A refused row as it is kept and shown: its canonical type, the value
+    on one line without the quotes around it (at most 80 characters), the
+    reason, why it was refused (``refusal``: "shape", a value of no such
+    type, or "presence", a value its cited calls do not show), and for a
+    hash the digest in the cited output it is a slip of."""
+    out = {"type": canonical_type(kind)[:24],
+           "value": " ".join(str(value or "").split()).strip("`'\" ")[:80],
+           "reason": reason[:240], "refusal": refusal}
+    if out["type"] == "hash" and texts:
+        near = _near_digest(out["value"], texts)
+        if near:
+            out["suggested"] = near[0]
+            out["reason"] += (f"; the cited output shows {near[0]}, {near[1]} character(s) "
+                              "apart: type that value")
+    return out
+
+
 def validate(rows: Iterable[Any], *, call_ids: Iterable[int], case_dir: str | os.PathLike | None,
              frame: str = "incident") -> dict[str, Any]:
     """Every row checked in order: shape, presence in the cited outputs
@@ -387,22 +466,23 @@ def validate(rows: Iterable[Any], *, call_ids: Iterable[int], case_dir: str | os
     for raw in rows or []:
         row, why = normalize_row(raw)
         if row is None:
-            dropped.append({"value": str((raw or {}).get("value") if isinstance(raw, dict) else raw)[:80],
-                            "reason": why})
+            given = raw if isinstance(raw, dict) else {"value": raw}
+            dropped.append(_dropped(given.get("type"), given.get("value"), why, texts, "shape"))
             continue
         key = (row["type"], row["value"].lower())
         if key in seen:
             continue
         seen.add(key)
         if not ids:
-            dropped.append({"value": row["value"], "reason": (
+            dropped.append(_dropped(row["type"], row["value"], (
                 "the finding cites no evidence call whose output could show it (reasoning, "
-                "claim and correlation calls are the analyst's own words)")})
+                "claim and correlation calls are the analyst's own words)"), None, "presence"))
             continue
         if not any(_found(row["type"], row["value"], t) for t in texts) and not _in_index(row["type"], row["value"], ids):
-            dropped.append({"value": row["value"], "reason": (
+            dropped.append(_dropped(row["type"], row["value"], (
                 f"not in the output of the cited calls {ids[:8]} (spill read up to "
-                f"{SPILL_READ_CHARS:,} characters, index up to {INDEXED_CHARS:,}); cite the call that shows it")})
+                f"{SPILL_READ_CHARS:,} characters, index up to {INDEXED_CHARS:,}); cite the call that shows it"),
+                texts, "presence"))
             continue
         for key_ in ("first_seen", "last_seen"):
             if row.get(key_):
@@ -624,3 +704,49 @@ def report_warning(case_dir: str | os.PathLike | None, finding_entries: list[dic
             + "; ".join(missing) + ". The indicator list (block, hunt, scope and request items) is "
             "built from typed rows: call claim.add_indicators(claim_id, [{type, value, side}]) with each "
             "value taken from the finding's cited output.")
+
+
+def dropped_warning(case_dir: str | os.PathLike | None) -> str:
+    """One advisory naming the typed indicators of substantiated findings
+    that were refused when recorded and are in no indicator list. Read from
+    the catalog, so the advisory and the indicator file agree. Never a
+    blocker: where the cited output does not show a value, its listing
+    under "Not exported" is where it ends."""
+    if not case_dir:
+        return ""
+    try:
+        from core.ioc_catalog import build_catalog
+        rows = [r for r in build_catalog(case_dir).get("not_exported") or []
+                if str(r.get("confidence") or "").upper() in ("CONFIRMED", "LIKELY")]
+    except Exception:  # noqa: BLE001
+        return ""
+    if not rows:
+        return ""
+
+    def name(r: dict[str, Any], *, call: bool = False) -> str:
+        value = str(r.get("value") or "")
+        out = f"{(r.get('claim_ids') or ['?'])[0]} '{value[:24]}{'…' if len(value) > 24 else ''}'"
+        if call and r.get("finding_call_ids"):
+            out += f" (finding call {r['finding_call_ids'][0]})"
+        if r.get("suggested"):
+            out += f" (the cited output shows {r['suggested']})"
+        return out
+
+    # A value its cited calls do not show cannot be repaired on the claim:
+    # claim.add_indicators checks the same calls again.
+    malformed = [r for r in rows if r.get("refusal") != "presence"]
+    unshown = [r for r in rows if r.get("refusal") == "presence"]
+    parts = [f"{len(rows)} typed indicator(s) of substantiated findings were refused when "
+             "recorded and are in no indicator list."]
+    if malformed:
+        parts.append("Malformed: " + "; ".join(name(r) for r in malformed[:8])
+                     + ". Re-type each from the cited output with "
+                     "claim.add_indicators(claim_id, [{type, value, side}]).")
+    if unshown:
+        parts.append("Not shown by the finding's cited calls: "
+                     + "; ".join(name(r, call=True) for r in unshown[:8])
+                     + ". Re-record the finding citing the call that shows the value, with "
+                     "supersedes=<its finding call>, or leave it out.")
+    parts.append("A value left as it is stays listed under 'Not exported' in the indicator "
+                 "file for the reader; nothing here blocks the report.")
+    return " ".join(parts)

@@ -1289,9 +1289,6 @@ class TestRunLoopPseudoToolRecovery:
             def _log(self, record):
                 events.append(record)
 
-            def _pre_report_checks(self):
-                return 1
-
             def _claim_count(self):
                 return 5
 
@@ -1314,6 +1311,132 @@ class TestRunLoopPseudoToolRecovery:
         assert wrap[0]["turn"] == pushes[2]
         assert any("wrapping up now" in str(m.get("content")) for m in agent.messages
                    if m.get("role") == "user")
+
+    def test_findings_recorded_while_the_gates_blockers_stand_do_not_hold_off_the_wrap_up(
+            self, monkeypatch, tmp_path):
+        """Once the gate has a verdict, another variant of a finding it
+        objects to is no move towards the report: three pushes with the same
+        blockers wrap the run up however many findings came between them."""
+        events = []
+        claims = iter(range(5, 500))
+
+        class _Varying(_DoneAgent):
+            def _run_tool(self, tc):
+                return '{"success": true}'
+
+            def _log(self, record):
+                events.append(record)
+
+            def _report_blockers(self):
+                return 2
+
+            def _claim_count(self):
+                return next(claims)
+
+        monkeypatch.setattr(loop_mod, "REPORT_STALL_TURNS", 1)
+        monkeypatch.setattr(loop_mod, "MAX_WALL_SECONDS", 0.0)
+        monkeypatch.setattr(loop_mod, "MAX_TURNS", 0)
+        monkeypatch.setattr(loop_mod, "BLOCKER_EXTENSION_TURNS", 0)
+        monkeypatch.setattr(loop_mod, "BLOCKER_EXTENSION_MAX", 0)
+        call = ChatResponse(content="", tool_calls=[ToolCall(id="1", name="misc_tool", arguments={})])
+        agent = _Varying(_ScriptedClient([call] * 6 + [_finish_response()]),
+                         _StubToolbox(), case_dir=tmp_path, quiet=True)
+        agent._dair_phase = "Report"
+        agent.run("sys", "user")
+        wrap = [e for e in events if e.get("event") == "budget_wrapup" and e.get("trigger") == "report_stall"]
+        assert len(wrap) == 1 and wrap[0]["pushes"] == 3
+
+    def test_a_rerun_reads_open_evidence_in_report_without_being_wrapped_up(
+            self, monkeypatch, tmp_path):
+        """A rerun's log holds the previous run's gate verdicts; the ladder of
+        this run reads only its own. A Report phase in which evidence the gate
+        counts as open is read for the first time every turn is never pushed;
+        the same phase with nothing read is wrapped up as before."""
+        from core.execution_log import log
+        for n in (1, 0):
+            log.record_reason_call(
+                tool="reason_pre_report_check", success=True, directives={},
+                conclusion=f"READY_TO_REPORT: {'false' if n else 'true'}\n"
+                           f"BLOCKING_ISSUES ({n}): {'floor' if n else 'none'}\nWARNINGS (0): none")
+
+        def run(done):
+            events, blockers_seen = [], []
+
+            class _Rerun(_DoneAgent):
+                def _run_tool(self, tc):
+                    return '{"success": true}'
+
+                def _log(self, record):
+                    events.append(record)
+
+                def _claim_count(self):
+                    return 5
+
+                def _report_done(self):
+                    blockers_seen.append(self._report_blockers())
+                    return done()
+
+            call = ChatResponse(content="", tool_calls=[ToolCall(id="1", name="misc_tool", arguments={})])
+            agent = _Rerun(_ScriptedClient([call] * 12 + [_finish_response()]),
+                           _StubToolbox(), case_dir=tmp_path, quiet=True)
+            agent._dair_phase = "Report"
+            agent.run("sys", "user")
+            assert blockers_seen[0] is None               # the old verdicts are not its own
+            return events
+
+        monkeypatch.setattr(loop_mod, "REPORT_STALL_TURNS", 1)
+        monkeypatch.setattr(loop_mod, "MAX_WALL_SECONDS", 0.0)
+        monkeypatch.setattr(loop_mod, "MAX_TURNS", 0)
+        monkeypatch.setattr(loop_mod, "BLOCKER_EXTENSION_TURNS", 0)
+        monkeypatch.setattr(loop_mod, "BLOCKER_EXTENSION_MAX", 0)
+        reads = iter(range(1, 10_000))
+        reading = run(lambda: frozenset({("unit", f"evidence/CORP-WS{next(reads):04d}.dd")}))
+        assert not [e for e in reading if e.get("event") == "report_phase_stall"
+                    or e.get("trigger") == "report_stall"]
+        idle = run(lambda: frozenset({("unit", "evidence/CORP-WS0007.dd")}))
+        assert [e for e in idle if e.get("event") == "budget_wrapup"
+                and e.get("trigger") == "report_stall"]
+
+    def test_a_run_wrapped_up_by_another_trigger_still_reaches_the_close_out(
+            self, monkeypatch, tmp_path):
+        """The report-phase close-out starts from the report-phase wrap-up; a
+        run another trigger had wrapped up first (here the wall clock) and
+        that then stalls in Report starts the same clock instead of staying
+        there for good, and is told once, not wrapped up a second time."""
+        events = []
+
+        class _Stalled(_DoneAgent):
+            def _run_tool(self, tc):
+                return '{"success": true}'
+
+            def _log(self, record):
+                events.append(record)
+
+            def _report_blockers(self):
+                return 2
+
+            def _claim_count(self):
+                return 5
+
+            def _run_pre_report_check(self):
+                return {"ready_to_report": False}
+
+        monkeypatch.setattr(loop_mod, "REPORT_STALL_TURNS", 2)
+        monkeypatch.setattr(loop_mod, "MAX_WALL_SECONDS", 1e-9)
+        monkeypatch.setattr(loop_mod, "WALL_GRACE_SECONDS", 1e9)
+        monkeypatch.setattr(loop_mod, "MAX_TURNS", 0)
+        monkeypatch.setattr(loop_mod, "BLOCKER_EXTENSION_TURNS", 0)
+        monkeypatch.setattr(loop_mod, "BLOCKER_EXTENSION_MAX", 0)
+        call = ChatResponse(content="", tool_calls=[ToolCall(id="1", name="misc_tool", arguments={})])
+        agent = _Stalled(_ScriptedClient([call] * 30), _StubToolbox(), case_dir=tmp_path, quiet=True)
+        agent._dair_phase = "Report"
+        agent.run("sys", "user")
+        assert [e["trigger"] for e in events if e.get("event") == "budget_wrapup"] == ["wall_clock"]
+        stalls = [e for e in events if e.get("event") == "report_phase_stall"]
+        assert [e["reason"] for e in stalls] == ["stalled_after_wrapup"]
+        close = [e for e in events if e.get("event") == "report_stall_close_out"]
+        assert len(close) == 1 and close[0]["since_wrapup"] == 2 and close[0]["ready"] is False
+        assert agent.stats["stopped_reason"] == "report_stall"
 
     def test_one_hosts_report_does_not_make_the_run_reported(self, monkeypatch, tmp_path):
         """A report writer that produced one host's report, or refused to

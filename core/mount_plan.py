@@ -136,8 +136,9 @@ def _classify_image(path: Path) -> dict[str, Any]:
         # Prefer TSK over FUSE/loop mounts (xmount/losetup) as the Triage default.
         entry["recommended_tool"] = "tsk.mmls"
         entry["reason"] = (
-            "raw/container — open with tsk.* (avoid xmount/losetup as "
-            "Triage default)"
+            "raw/container — tsk.mmls lists the volume offsets; tsk.fsstat or "
+            "tsk.fls at a volume's offset_sectors opens it (avoid xmount/losetup "
+            "as Triage default)"
         )
         return entry
     entry["image_type"] = "unknown"
@@ -411,7 +412,7 @@ def mark_image_opened(
     case_dir: str | os.PathLike,
     image_path: str | os.PathLike,
     *,
-    tool: str = "tsk.mmls",
+    tool: str = "tsk.fsstat",
     persist: bool = True,
 ) -> dict[str, Any]:
     """Record successful disk open (TSK / mount) on the access plan."""
@@ -678,7 +679,8 @@ def build_mount_plan(
 ) -> dict[str, Any]:
     """Scan evidence profile for disk images; optionally auto-mount E01s."""
     root = Path(case_dir).resolve()
-    prior = list(load_mount_plan(root).get("images") or [])
+    prior_plan = load_mount_plan(root)
+    prior = list(prior_plan.get("images") or [])
     images: list[dict[str, Any]] = []
 
     try:
@@ -713,10 +715,14 @@ def build_mount_plan(
             continue
         images.append(classified)
 
-    # Fallback walk if profile empty of disk
+    # Fallback walk if profile empty of disk. A file the evidence classifier
+    # does not call a disk (a memory image by its header or by the brief's
+    # declaration) is not disk media, whatever its name.
     if not images:
         ev = root / "evidence"
         if ev.is_dir():
+            from core.evidence_profile import classify_path, declared_kinds
+            declared = declared_kinds(root)
             for p in sorted(ev.rglob("*")):
                 if not p.is_file():
                     continue
@@ -724,6 +730,9 @@ def build_mount_plan(
                     if str(p) in seen:
                         continue
                     seen.add(str(p))
+                    rel = p.relative_to(root).as_posix()
+                    if classify_path(p, declared.get(rel, "")) != "disk":
+                        continue
                     classified = _classify_image(p)
                     if classified.get("access_gated") is False or classified.get("action") == "skip":
                         continue
@@ -751,6 +760,16 @@ def build_mount_plan(
         entry.pop("status", None)
         entry["mount_result"] = {**mr, "success": False, "stale": True}
         soft_notes.append(f"remount:{entry.get('basename') or entry.get('path')}")
+    # An "opened" recorded by a call that opens no filesystem (a partition-
+    # table read) loses the status: the image still waits for its open
+    # (core.evidence_access.is_tsk_open_tool).
+    from core.evidence_access import is_tsk_open_tool
+    for entry in images:
+        tool = str(entry.get("opened_tool") or "")
+        if entry.get("status") == "opened" and tool and not is_tsk_open_tool(tool):
+            for key in ("status", "opened_tool", "opened_at"):
+                entry.pop(key, None)
+            soft_notes.append(f"reopen:{entry.get('basename') or entry.get('path')}")
     auto_policy = ""
     do_auto = bool(auto_mount)
     if do_auto:
@@ -837,6 +856,12 @@ def build_mount_plan(
             "case/mnt is a protected path segment."
         ),
     }
+    # The offset a filesystem tool succeeded at (note_volume_offset) stays
+    # the default for an image that is still there.
+    offsets = {k: v for k, v in (prior_plan.get("volume_offsets") or {}).items()
+               if os.path.exists(k)}
+    if offsets:
+        plan["volume_offsets"] = offsets
     if persist:
         save_mount_plan(root, plan)
         # Drop/demote entries whose files vanished (e.g. after partial clears).

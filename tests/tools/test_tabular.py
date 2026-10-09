@@ -443,3 +443,40 @@ class TestGrep:
     def test_bad_regex(self, events_csv):
         r = _fn(table_grep)(events_csv, "[unclosed")
         assert r["success"] is False
+
+
+class TestScanBound:
+    """A scan reads every row unless an operator bounds it; a bounded scan
+    says how far it read, and finding nothing before the bound is
+    inconclusive, not a negative."""
+
+    @pytest.fixture()
+    def timeline(self, tmp_path):
+        p = tmp_path / "CORP-DC01-timeline.csv"
+        rows = [f"2031-01-0{1 + i % 9} 10:00:{i:02d},logon,user{i:02d},{i}" for i in range(12)]
+        rows[10] = "2031-01-09 10:00:10,logon,jane.doe,10"
+        p.write_text("time,event,user,n\n" + "\n".join(rows) + "\n", encoding="utf-8")
+        return str(p)
+
+    def test_the_whole_file_is_scanned_by_default(self, timeline):
+        r = _fn(table_grep)(timeline, "jane\\.doe")
+        assert r["hit_count"] == 1 and r["scan_capped"] is False
+        assert r["scanned_rows"] == 12 and "inconclusive" not in r
+
+    def test_a_bounded_scan_that_found_nothing_is_inconclusive(self, timeline, monkeypatch):
+        import tools.tabular as tabular
+        monkeypatch.setattr(tabular, "MAX_SCAN_ROWS", 5)
+        r = _fn(table_grep)(timeline, "jane\\.doe")
+        assert r["hit_count"] == 0 and r["scan_capped"] is True and r["scanned_rows"] == 5
+        assert r["inconclusive"] is True and "first 5 rows" in r["note"]
+        _fn(table_schema)(timeline)
+        q = _fn(table_query)(timeline, where=["user=jane.doe"])
+        assert q["matched_rows"] == 0 and q["valid_zero"] is False and q["inconclusive"] is True
+
+    def test_a_query_holds_only_its_window_and_counts_every_match(self, timeline):
+        _fn(table_schema)(timeline)
+        r = _fn(table_query)(timeline, sort_by="n", descending=True, limit=3, offset=2)
+        assert r["matched_rows"] == 12
+        assert [row["n"] for row in r["rows"]] == ["9", "8", "7"]
+        r = _fn(table_query)(timeline, limit=2, offset=1)
+        assert r["matched_rows"] == 12 and [row["n"] for row in r["rows"]] == ["1", "2"]

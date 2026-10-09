@@ -26,6 +26,9 @@ _UNIVERSAL_RE = re.compile(
 
 _COUNT_RE = re.compile(
     r'"(matched_rows|returned_rows|hit_count|max_hits)"\s*:\s*(\d+)')
+# A table scan stopped at an operator's row bound, as a result that carries
+# only the row count it stopped at says it.
+_SCAN_CAP_RE = re.compile(r'"scan_capped_at"\s*:\s*(\d+)')
 
 # Text a finding quotes from the evidence - a message body, a command line,
 # a log line - is the source's words, not the analyst's: "all data" inside
@@ -71,8 +74,18 @@ def incomplete_reason(entry: dict) -> str:
                 "everything)")
     body = " ".join(str(entry.get(k) or "")
                     for k in ("output", "result", "stdout"))
-    nums: dict[str, int] = {}
     meta = entry.get("result_meta") or {}
+    scanned = meta.get("scanned_rows")
+    capped = bool(meta.get("scan_capped"))
+    if not capped:
+        m = _SCAN_CAP_RE.search(f"{body} {entry.get('stdout_excerpt') or ''}")
+        if m:
+            capped, scanned = True, int(m.group(1))
+    if capped:
+        return (f"it scanned only the first {scanned} rows of the file"
+                if isinstance(scanned, int) and scanned else
+                "it stopped scanning before the end of the file")
+    nums: dict[str, int] = {}
     for key in ("matched_rows", "returned_rows", "hit_count", "max_hits"):
         if isinstance(meta.get(key), int):
             nums[key] = meta[key]

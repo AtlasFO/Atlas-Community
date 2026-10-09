@@ -156,7 +156,7 @@ Written to `.atlas/rerun_brief.md`. Includes:
 - Open conflicts  
 - Unresolved hypotheses  
 - Previously superseded conclusions  
-- New / active **analyst context** + interpretation rule (not a blind allowlist)  
+- New / withdrawn **analyst context** + interpretation rule (not a blind allowlist); every standing statement is in the system prompt's PRIOR KNOWLEDGE block  
 - Claims potentially affected by analyst context  
 - Outstanding questions  
 - Explicit note: dirty set is a **starting point**

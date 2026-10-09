@@ -7,6 +7,7 @@ changing investigator guidance.
 """
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -535,6 +536,45 @@ def _brain_context(case_dir: Path | None) -> str:
         return ""
 
 
+_CASE_FILE_CHARS = 8000  # full narrative briefs are discouraged; tasks live in .atlas/
+
+
+def _case_file_text(case_doc: str, *, knowledge_shown: bool) -> str:
+    """CASE.md as the prompt shows it: without its HTML comments (the
+    template's documentation, which no parser reads either), the
+    prior-knowledge section pointing at the block that renders it, and,
+    when long, cut at a line with the headings the cut hides named."""
+    from core.investigation_tasks import _HEADING_RE, fenced_flags, strip_html_comments
+
+    # One line end, so the cut and the heading positions below count alike.
+    text = strip_html_comments(case_doc).replace("\r\n", "\n")
+    if knowledge_shown:
+        from core.case_knowledge import replace_section_body
+        text = replace_section_body(
+            text, "(shown below under PRIOR KNOWLEDGE, with the rules for reading it)")
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    if len(text) <= _CASE_FILE_CHARS:
+        return text
+    cut = text.rfind("\n", 0, _CASE_FILE_CHARS)
+    cut = cut if cut > 0 else _CASE_FILE_CHARS
+    from core.case_knowledge import is_section_title
+
+    lines = text.splitlines()
+    hidden: list[str] = []
+    pos = 0
+    for line, fenced in zip(lines, fenced_flags(lines)):
+        heading = None if fenced else _HEADING_RE.match(line)
+        # The prior-knowledge section is not hidden by the cut when its
+        # own block shows it.
+        if pos >= cut and heading and not (knowledge_shown and is_section_title(heading)):
+            hidden.append(line.strip())
+        pos += len(line) + 1
+    shown = ", ".join(hidden[:12]) + (f" and {len(hidden) - 12} more" if len(hidden) > 12 else "")
+    return (text[:cut] + f"\n\n…(CASE.md cut at {_CASE_FILE_CHARS} characters"
+            + (f"; not shown: {shown}" if hidden else "")
+            + ". The requests stand under Investigation Tasks.)\n")
+
+
 def build_system_prompt(case_dir: Path | None,
                         interactive: bool = False,
                         chat: bool = False) -> str:
@@ -565,26 +605,23 @@ def build_system_prompt(case_dir: Path | None,
             pass
         case_doc = _read(case_dir / "CASE.md") or _read(case_dir / "CLAUDE.md")
         if case_doc:
-            # Cap inbox size — full narrative briefs are discouraged; tasks SoT
-            # lives under .atlas/. Keep enough for Case ID + request list.
-            inbox = case_doc.strip()
-            if len(inbox) > 8000:
-                inbox = inbox[:8000] + "\n\n…(CASE.md truncated; see Investigation Tasks)\n"
+            # The analyst's prior knowledge is shown in a block of its own,
+            # statement by statement with the contract for what it may mean
+            # (core.case_knowledge); the brief points there instead.
+            _knowledge = ""
+            try:
+                from core.case_knowledge import prompt_note
+                _knowledge = prompt_note(case_dir, chat=chat)
+            except Exception:
+                pass
             parts.append(
                 "\n────────────────────────────────────────────────────────\n"
                 "# CASE FILE (investigator inbox)\n\n"
                 "CASE.md is the work queue only — not findings, not memory.\n"
                 "Durable state lives in `.atlas/` (tasks, claims, plan).\n\n"
-                + inbox)
-            # The analyst's prior knowledge, when CASE.md carries it, comes
-            # with the contract for what it may mean (core.case_knowledge).
-            try:
-                from core.case_knowledge import prompt_note
-                _knowledge = prompt_note(case_dir)
-                if _knowledge:
-                    parts.append("\n" + _knowledge)
-            except Exception:
-                pass
+                + _case_file_text(case_doc, knowledge_shown=bool(_knowledge)))
+            if _knowledge:
+                parts.append("\n" + _knowledge)
             # The operator's threat context, fenced as data, with the same
             # contract: a lead, never proof (core.threat_context).
             try:
@@ -739,7 +776,10 @@ def initial_user_message(question: str, namespace_summary: str,
         "satisfied. Follow assessment.recommended_first_actions. "
         "Then verify evidence hashes, run the initial "
         "reason_hypothesize on the case question, then "
-        "reason_plan, then drive the DAIR loop "
+        "reason_plan; when the prompt carries PRIOR KNOWLEDGE, pass the "
+        "statements that bear on the question, with their ids, as "
+        "reason_hypothesize's context and in reason_plan's "
+        "case_description. Then drive the DAIR loop "
         "(dair_assess after every tool batch) until it directs Report. "
         "Update investigation task status with "
         "misc_update_investigation_task as work progresses. "
@@ -777,6 +817,14 @@ def rerun_objective(case_dir: Path | None, work: dict | None) -> str:
     if any((work.get("evidence") or {}).values()):
         parts.append("Examine the evidence added or changed since the last run "
                      "and record what it shows.")
+    unread = [str(p) for p in work.get("unexamined_items") or []]
+    if unread:
+        # The work summary keeps at most 40 of them; the brief has the rest.
+        more = len(unread) - 5
+        shown = ", ".join(unread[:5]) + (
+            "" if more <= 0 else f" and {more} more" if len(unread) < 40 else " and more")
+        parts.append(f"Examine the delivered evidence no call has read yet ({shown}; "
+                     "the brief lists every one) and record what it shows.")
     if work.get("claims_to_review"):
         parts.append("Re-validate the findings marked needs_review against the "
                      "current evidence and record each outcome: claim.revalidate, "
@@ -827,13 +875,10 @@ def initial_rerun_message(
         "ANALYST CONTEXT WITHDRAWN THIS RERUN (no longer to be assumed):\n"
         f"{gone_lines}\n\n"
         "Rules:\n"
-        "- Analyst context improves interpretation of known infrastructure / "
-        "accounts / expected activity.\n"
-        "- It is NOT a blind allowlist: legitimate admin IPs/accounts can still "
-        "perform malicious actions — investigate credential dumping, unusual "
-        "auth, malware, and out-of-scope use even from trusted infrastructure.\n"
-        "- Distinguish identity of infrastructure from nature of observed "
-        "activity.\n"
+        "- The added statements, and every one still standing, are read by the "
+        "PRIOR KNOWLEDGE rules of the system prompt, where they stand with "
+        "their ids. A withdrawn statement is no longer to be assumed; the "
+        "findings that leaned on it are marked for review.\n"
         "- Reinvestigate needs_review claims and record each outcome explicitly: "
         "claim.revalidate (citing the re-read) when one still holds, "
         "supersede/withdraw/open conflicts when it does not — never silently "

@@ -50,6 +50,9 @@ SCHEMA_VERSION = "1.0"
 MAX_PIVOTS = 40
 MAX_TARGETS_PER_PIVOT = 12
 
+# The origin of an indicator the analyst named in CASE.md.
+from core.case_knowledge import ORIGIN as _ANALYST_ORIGIN  # noqa: E402
+
 # ── evidence source classes ──────────────────────────────────────────────
 #
 # Classified from the source's own path, so a case gets the classes its
@@ -798,29 +801,34 @@ def refresh_pivots(
     """Re-derive pivots from current beliefs and evidence; keep statuses."""
     ledger = load_pivots(case_dir)
     prev = ledger.get("pivots") or {}
-    # The analyst's own indicators first: they are owed a search before any
-    # belief exists, and the cap below must never push them out in favour
-    # of something a later belief mentioned.
-    indicators: dict[str, str] = {}
+    # Each source of indicators has its own room. The analyst's are owed a
+    # search before any belief exists, so a later belief never pushes them
+    # out; and a brief that describes the estate (hosts, admin accounts)
+    # never pushes out what the run's own findings attribute to the
+    # attacker. The operator's threat context takes at most half a ledger
+    # (core.threat_context.pivot_indicators): its sweep covers every row.
+    analyst: dict[str, str] = {}
     try:
         from core.case_knowledge import prior_indicators
-        indicators.update(prior_indicators(case_dir))
+        analyst = prior_indicators(case_dir)
     except Exception:  # noqa: BLE001 — a brief problem must not stop pivots
         pass
-    # Then the operator's threat context, at most half the ledger: the
-    # sweep covers every row, and the run's own indicators keep their room.
+    intel: dict[str, str] = {}
     try:
         from core.threat_context import pivot_indicators
-        for ioc, row_id in pivot_indicators(case_dir).items():
-            indicators.setdefault(ioc, row_id)
+        intel = {ioc: row_id for ioc, row_id in pivot_indicators(case_dir).items()
+                 if ioc not in analyst}
     except Exception:  # noqa: BLE001
         pass
-    indicators.update(indicators_from_beliefs(case_dir))
+    beliefs = {ioc: origin for ioc, origin in indicators_from_beliefs(case_dir).items()
+               if ioc not in analyst and ioc not in intel}
+    chosen = (list(analyst.items())[:MAX_PIVOTS] + list(intel.items())
+              + list(beliefs.items())[:MAX_PIVOTS])
     sources = evidence_sources(case_dir)
     blocked = _blocked_sources(case_dir)
 
     pivots: dict[str, Any] = {}
-    for ioc, origin in list(indicators.items())[:MAX_PIVOTS]:
+    for ioc, origin in chosen:
         targets = relevant_targets(ioc, sources, root=case_dir)
         if not targets:
             continue
@@ -988,17 +996,47 @@ def pivot_stats(case_dir: str | os.PathLike) -> dict[str, int]:
     return stats
 
 
-def format_pivot_nudge(pivots: Iterable[dict[str, Any]], *, limit: int = 5) -> str:
-    """The message the loop shows the model: concrete searches still owed."""
+def format_pivot_nudge(pivots: Iterable[dict[str, Any]], *, limit: int = 5,
+                       case_dir: str | os.PathLike | None = None) -> str:
+    """The message the loop shows the model: concrete searches still owed.
+    What a hit means depends on who named the indicator: one a finding or
+    the threat context named is corroborated by a hit; one the analyst
+    named is judged against the analyst's statement, which may describe
+    the estate's own infrastructure rather than a suspicion. With
+    ``case_dir`` the statement is read from the brief as it stands now,
+    so a fact added mid-run is quoted, not just keyed; only a nudge that
+    is shown pays for that read."""
     items = list(pivots)[:limit]
     if not items:
         return ""
+    named_by_analyst = [p for p in items if p.get("origin") == _ANALYST_ORIGIN]
+    statements: dict[str, dict[str, str]] = {}
+    if named_by_analyst and case_dir is not None:
+        try:
+            from core.case_knowledge import indicator_statements
+            statements = indicator_statements(case_dir)
+        except Exception:  # noqa: BLE001 — a brief problem must not stop the nudge
+            statements = {}
     lines = [
-        "[ioc pivot] New indicators were recorded but not carried back "
-        "across the evidence. Each indicator below must be searched for in "
-        "the listed sources (grep / table query / EVTX filter as "
-        "appropriate). A corroborating hit is a finding "
-        "(misc.record_finding). A clean miss is a disposition, not a "
+        "[ioc pivot] These indicators are not yet searched for across the "
+        "evidence. Search each one in the listed sources (grep / table "
+        "query / EVTX filter as appropriate)."
+        + (" For an indicator a finding or the threat context named, a "
+           "corroborating hit is a finding (misc.record_finding)."
+           if len(named_by_analyst) < len(items) else "")
+        + (" For an indicator the analyst named"
+           + (" (their statement is quoted below it where it stands in "
+              "CASE.md)" if statements else " in CASE.md")
+           + ", what a hit means depends on "
+           "the statement. If it is a suspicion or an indicator seen "
+           "elsewhere, a hit in this evidence is a finding: record it now "
+           "with misc.record_finding (SUSPECTED or LIKELY while a binding is "
+           "still open), citing the call. If it describes the environment (a "
+           "known host or account), a hit that shows it doing its stated job "
+           "is a disposition naming the statement; anything else it does is "
+           "judged like any other hit, and a suspicious one is a finding now."
+           if named_by_analyst else "")
+        + " A clean miss is a disposition, not a "
         "finding: record it with misc.record_agent_message(content=..., "
         "disposition=True), naming the indicator and the sources searched. "
         "A finding that only documents a search is a false conclusion, and "
@@ -1009,8 +1047,17 @@ def format_pivot_nudge(pivots: Iterable[dict[str, Any]], *, limit: int = 5) -> s
     ]
     for p in items:
         kind, value = ioc_type(p["ioc"]), ioc_value(p["ioc"])
-        lines.append(f"- {kind} {value}"
-                     + (f" (from {p['origin']})" if p.get("origin") else ""))
+        if p.get("origin") == _ANALYST_ORIGIN:
+            fact = statements.get(p["ioc"]) or {}
+            lines.append(f"- {kind} {value}, named by the analyst in CASE.md")
+            if fact.get("text"):
+                said = " ".join(str(fact["text"]).split())
+                said = said if len(said) <= 200 else said[:199].rstrip() + "…"
+                lines.append(f"    statement{' ' + fact['id'] if fact.get('id') else ''}: "
+                             f"\"{said}\"")
+        else:
+            lines.append(f"- {kind} {value}"
+                         + (f" (from {p['origin']})" if p.get("origin") else ""))
         for target in p["pending"][:6]:
             lines.append(f"    search in: {target}")
     return "\n".join(lines)

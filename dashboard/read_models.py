@@ -28,9 +28,9 @@ import json
 import os
 from pathlib import Path
 import re
-import time
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import quote
 
 TRACE_RE = re.compile(r".*_trace\.json$", re.IGNORECASE)
 
@@ -52,10 +52,17 @@ STATUS_VIEW: dict[str, dict[str, str]] = {
     "withdrawn": {"label": "Dropped", "glyph": "—", "bucket": "dropped"},
 }
 
-# Older run_status.json files carry a spinner prefix on "activity"
-# (agent/loop.py no longer writes it). Kept as an escape so no
-# pictograph appears in this source file.
-_LEGACY_ACTIVITY_PREFIX = "\u23f5 "
+# The live-run check lives in core so the CLI and the MCP layer share it;
+# the names it has always had here stay importable.
+from core.run_state import (  # noqa: E402,F401
+    LEGACY_ACTIVITY_PREFIX as _LEGACY_ACTIVITY_PREFIX,
+    active_runs,
+    agent_busy,
+    pid_alive as _pid_alive,
+    run_process_alive,
+    run_status as _run_status,
+    transcript_fresh as _transcript_fresh,
+)
 
 _CONFIDENCE_RANK = {"CONFIRMED": 4, "LIKELY": 3, "SUSPECTED": 2,
                     "UNCONFIRMED": 1}
@@ -358,110 +365,6 @@ def _trace_digest(path: str) -> dict:
     return digest
 
 
-def _pid_alive(pid) -> bool:
-    if not pid:
-        return False
-    try:
-        os.kill(int(pid), 0)
-    except ProcessLookupError:
-        return False
-    except (TypeError, ValueError):
-        return False
-    except OSError:
-        # Exists but owned by another user (EPERM) or some other transient
-        # signal error — something is there, so don't report the run dead.
-        return True
-    return True
-
-
-def _run_status(case_dir: str) -> dict:
-    data = _read_json(os.path.join(case_dir, ".atlas", "run_status.json"))
-    return data if isinstance(data, dict) else {}
-
-
-def run_process_alive(case_dir: str) -> bool:
-    """True if the agent.cli run process for this case is still alive.
-
-    Process liveness, not "did something write to disk recently" — a long
-    tool call (img_vmdk_export_raw's qemu-img convert, which can run for
-    hours) writes nothing to the transcript or the trace and only refreshes
-    run_status.json at tool start/end, not while it's running. Checking the
-    recorded pid instead means a run showing "in progress" here matches
-    reality regardless of how long the current tool call has been running,
-    and works the same whether the run was started via the dashboard or
-    the bare CLI (dashboard/run_manager.py's own Popen-based liveness check
-    only knows about runs it started itself)."""
-    status = _run_status(case_dir)
-    if status.get("stopped_reason") != "running":
-        return False
-    return _pid_alive(status.get("pid"))
-
-
-def _transcript_fresh(case_dir: str, window_seconds: int) -> bool:
-    """True if any agent_transcript_*.jsonl was written within window_seconds."""
-    analysis = os.path.join(case_dir, "analysis")
-    newest = None
-    try:
-        for name in os.listdir(analysis):
-            if name.startswith("agent_transcript_") and name.endswith(".jsonl"):
-                try:
-                    m = os.path.getmtime(os.path.join(analysis, name))
-                except OSError:
-                    continue
-                if newest is None or m > newest:
-                    newest = m
-    except OSError:
-        return False
-    return newest is not None and (time.time() - newest) < window_seconds
-
-
-def agent_busy(case_dir: str, *, window_seconds: int = 90) -> bool:
-    """'Agent is working' signal: process liveness first, recent transcript
-    growth as a fallback for a run_status.json written before the pid field
-    existed, or one that's momentarily unreadable."""
-    return run_process_alive(case_dir) or _transcript_fresh(case_dir, window_seconds)
-
-
-def active_runs(cases_root: str) -> list[dict]:
-    """Every case under ``cases_root`` with a run in progress right now.
-
-    The shell's "Atlas working" indicator used to ask the per-case questions
-    projection for the *selected* case only, so a run started in another case
-    -- or any run at all, before a case was picked -- left the header saying
-    "idle". This is the case-wide answer, kept deliberately cheap because the
-    shell polls it on a timer: per case it reads one small JSON and, only as
-    the fallback path, lists one directory. It does not touch traces.
-    """
-    out: list[dict] = []
-    try:
-        entries = sorted(os.listdir(cases_root))
-    except OSError:
-        return out
-    for name in entries:
-        if name.startswith(".") or name == "_dashboard":
-            continue
-        case_dir = os.path.join(cases_root, name)
-        if not os.path.isdir(case_dir):
-            continue
-        try:
-            if not agent_busy(case_dir):
-                continue
-            status = _run_status(case_dir)
-            out.append({
-                "case_dir": name,
-                "case_id": status.get("case_id") or name,
-                # Same de-prefixing as activity_projection: the legacy prefix reads
-                # better in the UI as a plain tool name.
-                "activity": (status.get("activity") or "")
-                .removeprefix(_LEGACY_ACTIVITY_PREFIX).strip(),
-                "started_at": status.get("started_at") or "",
-            })
-        except Exception:  # noqa: BLE001 — one unreadable case must not
-            # blank the indicator for every other case.
-            continue
-    return out
-
-
 def seconds_since(value) -> float | None:
     """Seconds from a stored UTC stamp to now, never negative; None when the
     stamp cannot be read."""
@@ -696,54 +599,94 @@ def _file_kind(name: str) -> str:
     return "other"
 
 
-def _reports_source_dir(case_dir: str) -> tuple[str, str] | None:
-    """Prefer reports/latest/ when it has deliverables, else reports/."""
-    reports = os.path.join(case_dir, "reports")
-    latest = os.path.join(reports, "latest")
-    for d, sub in ((latest, "latest"), (reports, "")):
-        try:
-            names = os.listdir(d)
-        except OSError:
-            continue
-        if any(_is_report_deliverable(n)
-               and os.path.isfile(os.path.join(d, n)) for n in names):
-            return d, sub
-    return None
+def _report_snapshot_dir(case_dir: str) -> str | None:
+    """The rerun snapshot ``reports/latest`` names, when the case has one.
+
+    A persisting ``atlas rerun`` freezes the report pack into
+    ``reports/initial_report/`` or ``reports/rerun_NNNN/`` and points
+    ``reports/latest`` at the newest one (core.report_snapshots). Only a
+    directory that resolves inside the case's own reports/ counts: a link
+    aimed anywhere else, or one that cannot be resolved, leaves reports/ as
+    the only source.
+    """
+    reports = os.path.realpath(os.path.join(case_dir, "reports"))
+    try:
+        from core.report_snapshots import resolve_latest_report_dir
+        snap = os.path.realpath(resolve_latest_report_dir(case_dir))
+    except (OSError, RuntimeError):  # RuntimeError: a symlink loop, Python < 3.13
+        return None
+    if not snap.startswith(reports + os.sep) or not os.path.isdir(snap):
+        return None
+    return snap
 
 
 def list_report_files(case_dir: str) -> list[dict]:
-    """Case-scoped report deliverables (markdown + timeline files)."""
-    src = _reports_source_dir(case_dir)
-    if src is None:
-        return []
-    d, sub = src
+    """Case-scoped report deliverables (markdown + timeline files).
+
+    reports/ first, then the files of the newest rerun snapshot that reports/
+    does not hold under the same name. Promoting a snapshot moves every
+    deliverable out of reports/, so a file found there was written after the
+    snapshot was taken and supersedes the snapshot's copy of that name: a
+    rerun that changed no investigation state regenerates its report in
+    reports/ and leaves the snapshot as it was. Names are therefore unique,
+    which is what lets the export route find a file by name in this same
+    listing. A file that resolves outside the case's reports/ is not listed.
+    """
+    reports = os.path.join(case_dir, "reports")
+    real_reports = os.path.realpath(reports)
+    sources = [(reports, "")]
+    snap = _report_snapshot_dir(case_dir)
+    if snap is not None:
+        sources.append((snap, os.path.relpath(snap, real_reports)))
     case_name = os.path.basename(case_dir)
     out: list[dict] = []
-    try:
-        names = sorted(os.listdir(d))
-    except OSError:
-        return []
-    for fn in names:
-        if not _is_report_deliverable(fn):
-            continue
-        p = os.path.join(d, fn)
-        if not os.path.isfile(p):
-            continue
+    seen: set[str] = set()
+    for d, sub in sources:
         try:
-            st = os.stat(p)
+            names = sorted(os.listdir(d))
         except OSError:
             continue
-        rel = f"/{case_name}/reports/{sub}/{fn}" if sub else \
-            f"/{case_name}/reports/{fn}"
-        out.append({
-            "name": fn,
-            "path": rel,
-            "kind": _file_kind(fn),
-            "size": st.st_size,
-            "mtime": st.st_mtime,
-            "abs_path": p,  # server-side only; stripped before JSON responses
-        })
+        for fn in names:
+            if fn in seen or not _is_report_deliverable(fn):
+                continue
+            p = os.path.join(d, fn)
+            real = os.path.realpath(p)
+            if not real.startswith(real_reports + os.sep) \
+                    or not os.path.isfile(real):
+                continue
+            try:
+                st = os.stat(p)
+            except OSError:
+                continue
+            seen.add(fn)
+            rel = f"{sub}/{fn}" if sub else fn
+            out.append({
+                "name": fn,
+                # A URL: a name holding "#" or "?" must not end the path.
+                "path": quote(f"/{case_name}/reports/{rel}"),
+                "kind": _file_kind(fn),
+                "size": st.st_size,
+                "mtime": st.st_mtime,
+                "abs_path": p,  # server-side only; stripped before JSON responses
+            })
     return out
+
+
+def _report_rank(f: dict, reports: str) -> tuple:
+    """Order for the case's default report, best last.
+
+    The case's main report before notes, host sections and the rerun change
+    history; then the working copy in ``reports`` before a snapshot's file;
+    then the estate report before a single-scope one; then the newest.
+    ``reports`` is the same join list_report_files builds its root entries
+    from.
+    """
+    from core.report_snapshots import RESERVED_FILES
+    low = f["name"].lower()
+    main = (low.endswith("_report.md") and not low.startswith("host_")
+            and f["name"] not in RESERVED_FILES)
+    return (main, os.path.dirname(f["abs_path"]) == reports,
+            low.endswith("estate_report.md"), f.get("mtime") or 0)
 
 
 def build_report_bundle_zip(case_dir: str) -> bytes | None:
@@ -804,11 +747,12 @@ def report_stage(case_dir: str) -> dict:
 
 
 def report_status(case_dir: str) -> dict:
-    """Newest investigator report under reports/ (latest/ preferred).
+    """The case's report (see _report_rank) and its downloadable files.
 
     Also lists downloadable deliverables (markdown + timeline), how far the
     report got, and whether the timeline-plugin template download should be
-    offered.
+    offered. The Overview card and the Report tab's first selection both
+    show ``path``.
     """
     files = list_report_files(case_dir)
     public_files = [{k: v for k, v in f.items() if k != "abs_path"}
@@ -816,9 +760,8 @@ def report_status(case_dir: str) -> dict:
     plugin = timeline_plugin_active()
 
     md_files = [f for f in files if f["kind"] == "report"]
-    best = None
-    if md_files:
-        best = max(md_files, key=lambda f: f.get("mtime") or 0)
+    reports = os.path.join(case_dir, "reports")
+    best = max(md_files, key=lambda f: _report_rank(f, reports), default=None)
 
     if not best:
         return {

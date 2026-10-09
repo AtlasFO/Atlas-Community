@@ -191,6 +191,31 @@ class TestAFilesystemToolFindsTheLoneVolume:
             out = getattr(tsk_fls, "fn", tsk_fls)(str(img), 63)
         assert out["success"] is False and run.call_count == 1
 
+    def test_a_path_walk_finds_the_lone_volume_and_remembers_it(self, tmp_path, monkeypatch):
+        """A path walk reports the listing's failure as its own error; it
+        still reads the lone volume, and later calls default to its offset."""
+        from unittest.mock import patch
+        from core.mount_plan import volume_offset
+        from tools import sleuthkit
+        from tools.sleuthkit import tsk_resolve_path
+        import core.paths
+        monkeypatch.setattr(core.paths, "active_case_dir", lambda: str(tmp_path))
+        sleuthkit._LISTINGS.clear()
+        img = tmp_path / "CORP-WS02.raw"; img.write_bytes(b"\x00" * 512)
+
+        def run(cmd, **kw):
+            if cmd[0] == "mmls":
+                return {"success": True, "stdout": self.MMLS_ONE, "stderr": ""}
+            if "-o" in cmd:
+                return {"success": True, "stderr": "",
+                        "stdout": "d/d 29-144-1:\tC\nr/r 64-128-1:\tnotes.txt\n"}
+            return {"success": False, "stdout": "", "stderr": "Cannot determine file system type"}
+
+        with patch("tools.sleuthkit.run", side_effect=run):
+            out = getattr(tsk_resolve_path, "fn", tsk_resolve_path)(str(img), "C")
+        assert out["success"] and out["offset_sectors_used"] == 2048
+        assert volume_offset(tmp_path, img) == 2048
+
 
 class TestAMountedFilesystemDirectoryIsReadThroughItsDevice:
     """A mounted filesystem directory is not an image; the Sleuth Kit gets

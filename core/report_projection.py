@@ -1458,13 +1458,14 @@ def assemble_report(
         derive_next_steps(case_dir, get_report_language(case_dir))
     except Exception:  # noqa: BLE001 - the report is written whatever the plan does
         pass
+    # The indicator files are a deliverable of their own; the report's
+    # Indicators section (core.report_assemble) points at them, so they are
+    # written before it is rendered.
+    from core.ioc_catalog import write_indicator_files
+    write_indicator_files(case_dir)
     md_text = render_markdown(
         case_dir, report_scope=scope, report_host=host,
     )
-    # The indicator files are a deliverable of their own; the report's
-    # Indicators section (core.report_assemble) points at them.
-    from core.ioc_catalog import write_indicator_files
-    write_indicator_files(case_dir)
     if fmt_n == "markdown":
         if not output_path:
             output_path = default_report_output_path(

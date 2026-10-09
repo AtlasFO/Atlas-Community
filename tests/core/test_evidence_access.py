@@ -197,6 +197,8 @@ def test_task_refuse_and_repair(tmp_path: Path):
 
 
 def test_record_open_from_tool(tmp_path: Path):
+    """The image is opened when its filesystem opens; reading its partition
+    table opens nothing."""
     case = _case_with_disk(tmp_path)
     analysis = case / "analysis"
     analysis.mkdir()
@@ -209,13 +211,21 @@ def test_record_open_from_tool(tmp_path: Path):
         cmd_or_args=json.dumps({"image": str(raw)}),
         success=True,
     )
+    assert stage_for_path(case, str(raw)) != "opened"
+    record_open_from_tool(
+        case,
+        tool_name="tsk_fsstat",
+        cmd_or_args=json.dumps({"image": str(raw), "offset_sectors": 2048}),
+        success=True,
+    )
     assert stage_for_path(case, str(raw)) == "opened"
 
 
 def test_mcp_double_prefix_tsk_name_and_json_failure(tmp_path: Path):
-    """MCP exposes tsk_tsk_mmls; JSON success:false must mark access_failed."""
-    assert is_tsk_open_tool("tsk_tsk_mmls")
-    assert is_tsk_open_tool("tsk.mmls")
+    """MCP exposes tsk_tsk_fsstat; JSON success:false must mark access_failed."""
+    assert is_tsk_open_tool("tsk_tsk_fsstat")
+    assert is_tsk_open_tool("tsk.fls")
+    assert not is_tsk_open_tool("tsk_tsk_mmls")
     ok, err = parse_tool_result_success(
         json.dumps({
             "success": False,
@@ -239,7 +249,7 @@ def test_mcp_double_prefix_tsk_name_and_json_failure(tmp_path: Path):
 
     record_open_from_tool(
         case,
-        tool_name="tsk_tsk_mmls",
+        tool_name="tsk_tsk_fsstat",
         cmd_or_args=json.dumps({"image": str(raw)}),
         success=False,
         error="sudo_auth",

@@ -301,13 +301,35 @@ _CLASS_MEMBERS: tuple[tuple[frozenset[str], re.Pattern[str]], ...] = (
 )
 
 
+# A numbered name ("USB#2", "RM-3") is told from its siblings ("USB#3") by
+# its number alone, which the word tests drop. The hyphen form counts in
+# capitals only: "Windows-10" is a product a belief writes without one.
+_ANCHOR_RE = re.compile(r"(?<![\w#])([A-Za-z]+)#(\d+)(?!\d)|(?<![\w-])([A-Z]{1,4})-(\d+)(?!\d)")
+
+
+def anchors_carried(part_text: str, text: str) -> bool:
+    """Whether ``text`` writes every numbered name of the part with its
+    number: "#", "-", a space or nothing between name and number. A kind's
+    own name ("SHA-256") says what is asked, not which one, and is none."""
+    from core.answer_values import type_for
+    for m in _ANCHOR_RE.finditer(part_text or ""):
+        if type_for(m.group(0)):
+            continue
+        word, num = (m.group(1), m.group(2)) if m.group(1) else (m.group(3), m.group(4))
+        if not re.search(rf"(?i)(?<![A-Za-z]){re.escape(word)}(?:\s?[#-]\s?|\s)?0*{int(num)}(?!\d)",
+                         text or ""):
+            return False
+    return True
+
+
 def carries_part(part_text: str, text: str) -> bool:
     """Whether ``text`` carries the part's words the way the value binder
     requires a qualifier: all of them up to two, at least half when more.
-    A word naming a class is carried by a member of it."""
+    A word naming a class is carried by a member of it; a numbered name
+    only with its number."""
     from core.answer_values import _same_word, _tokens
     words = part_words(part_text)
-    if not words:
+    if not words or not anchors_carried(part_text, text):
         return False
     need = len(words) if len(words) <= 2 else (len(words) + 1) // 2
     toks, core = _tokens(text), _tokens(part_text)
@@ -487,6 +509,13 @@ def assign(task: dict[str, Any], nodes: dict[str, dict], claim_ids: Iterable[str
             candidates = [n for n in candidates
                           if str(n.get("host") or "").casefold() == h
                           or h in str(n.get("statement") or "").casefold()]
+        if kind != "umbrella":
+            # A belief about "USB#3" shares every word with the part "on
+            # USB#2" and may state a value of its kind: it answers the part
+            # only when it writes the part's numbered names (carries_part
+            # checks the clause it reads).
+            candidates = [n for n in candidates
+                          if anchors_carried(str(part.get("text") or ""), str(n.get("statement") or ""))]
         # A reading (an observation) answers a part only by a value of its
         # kind, never by a lexical test.
         lexical = [n for n in candidates if str(n.get("kind") or "") != "observation"]

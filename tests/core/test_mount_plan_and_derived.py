@@ -152,6 +152,47 @@ def test_build_mount_plan_without_auto(tmp_path: Path):
     assert plan.get("auto_mounted") == []
 
 
+def test_a_rebuilt_plan_keeps_the_volume_offsets_reads_succeeded_at(tmp_path: Path):
+    """The pre-run pass rebuilds the plan; the offset a filesystem tool
+    succeeded at stays the default for an image that is still there."""
+    from core.evidence_profile import ensure_evidence_profile
+    from core.mount_plan import note_volume_offset, volume_offset
+    case = tmp_path / "CASE-A"
+    (case / "evidence").mkdir(parents=True)
+    img = case / "evidence" / "CORP-DC01.dd"
+    img.write_bytes(b"\x00" * 4096)
+    gone = case / "evidence" / "CORP-WS02.dd"
+    gone.write_bytes(b"\x00" * 4096)
+    ensure_evidence_profile(case, refresh=True)
+    note_volume_offset(case, img, 63)
+    note_volume_offset(case, gone, 2048)
+    gone.unlink()
+    build_mount_plan(case, persist=True, auto_mount=False)
+    assert volume_offset(case, img) == 63
+    assert volume_offset(case, gone) is None
+
+
+def test_an_open_recorded_by_a_partition_table_read_is_dropped(tmp_path: Path):
+    """An image counts as opened once its filesystem opened; a plan entry a
+    partition-table read marked opened waits for its open again."""
+    from core.evidence_profile import ensure_evidence_profile
+    from core.mount_plan import load_mount_plan, save_mount_plan
+    case = tmp_path / "CASE-A"
+    (case / "evidence").mkdir(parents=True)
+    for name in ("CORP-DC01.dd", "CORP-WS02.dd"):
+        (case / "evidence" / name).write_bytes(b"\x00" * 4096)
+    ensure_evidence_profile(case, refresh=True)
+    plan = build_mount_plan(case, persist=True, auto_mount=False)
+    tools = {"CORP-DC01.dd": "tsk_tsk_mmls", "CORP-WS02.dd": "tsk_fls"}
+    for img in plan["images"]:
+        img.update(status="opened", opened_tool=tools[img["basename"]])
+    save_mount_plan(case, plan)
+    rebuilt = build_mount_plan(case, persist=True, auto_mount=False)
+    status = {i["basename"]: i.get("status") for i in load_mount_plan(case)["images"]}
+    assert status == {"CORP-DC01.dd": None, "CORP-WS02.dd": "opened"}
+    assert "reopen:CORP-DC01.dd" in rebuilt["soft_notes"]
+
+
 def _case_with_hosts(tmp_path: Path, labels: list[str]) -> Path:
     """A case whose evidence links name ``labels`` as its hosts."""
     case = tmp_path / "case"

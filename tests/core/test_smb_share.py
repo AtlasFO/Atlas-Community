@@ -174,3 +174,54 @@ class TestCurrentUsername:
             monkeypatch.delenv(var, raising=False)
         with pytest.raises(smb_share.ShareError):
             smb_share._current_username()
+
+
+class TestTheGeneratedShareConfig:
+    """`smb encrypt` is a share-level option: set in an included [global] it
+    is only a default for the shares defined after it, so the Atlas share
+    must carry it itself. The real script runs here, against a copy whose
+    two config paths point into a temp dir and with the Samba and service
+    programs stubbed on PATH; the root-run script itself takes no path from
+    the environment."""
+
+    def _enable(self, tmp_path):
+        import configparser
+        import os
+        import stat
+        from pathlib import Path
+        script = Path(__file__).resolve().parents[2] / "bin" / "atlas-smb-share"
+        etc = tmp_path / "etc"
+        etc.mkdir()
+        smb_conf = etc / "smb.conf"
+        smb_conf.write_text("[global]\n    workgroup = EXAMPLE\n\n[print$]\n"
+                            "    path = /var/lib/samba/printers\n", encoding="utf-8")
+        share_conf = etc / "atlas-share.conf"
+        copy = tmp_path / "atlas-smb-share"
+        copy.write_text(script.read_text(encoding="utf-8")
+                        .replace("/etc/samba/atlas-share.conf", str(share_conf))
+                        .replace("/etc/samba/smb.conf", str(smb_conf)), encoding="utf-8")
+        stubs = tmp_path / "bin"
+        stubs.mkdir()
+        for name, code in (("smbpasswd", 0), ("testparm", 0), ("systemctl", 0),
+                           ("smbd", 0), ("pgrep", 1)):
+            stub = stubs / name
+            stub.write_text(f"#!/bin/sh\nexit {code}\n", encoding="utf-8")
+            stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+        cases = tmp_path / "cases"
+        cases.mkdir()
+        done = subprocess.run(["bash", str(copy), "enable", str(cases), "jane.doe"],
+                              capture_output=True, text=True, timeout=30,
+                              env={**os.environ, "PATH": f"{stubs}:{os.environ['PATH']}"})
+        assert done.returncode == 0, done.stderr
+        conf = configparser.ConfigParser(allow_no_value=True, strict=False,
+                                         comment_prefixes=("#", ";"))
+        conf.read_string(share_conf.read_text(encoding="utf-8"))
+        return conf, smb_conf.read_text(encoding="utf-8"), cases
+
+    def test_the_atlas_share_requires_encryption_itself(self, tmp_path):
+        conf, smb_conf, cases = self._enable(tmp_path)
+        share = conf["atlas-cases"]
+        assert share["smb encrypt"] == "required"
+        assert share["path"] == str(cases) and share["valid users"] == "jane.doe"
+        assert share["guest ok"] == "no"
+        assert f"include = {tmp_path / 'etc' / 'atlas-share.conf'}" in smb_conf

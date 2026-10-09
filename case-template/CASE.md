@@ -32,14 +32,21 @@
 
 <!-- Optional. What the analyst brings to the case before any evidence is
      opened: a working theory, indicators seen elsewhere (an address from
-     the firewall, a hash from an alert, an account name), a time window.
-     Free text; one bullet per item works well, for example:
+     the firewall, a hash from an alert, an account name), a time window,
+     and facts about the environment (the admin jump host, a service
+     account, what normal activity looks like). One bullet per item works
+     well; a pasted list or log excerpt can go in a code fence, closed by a
+     line of three backticks of its own: an unclosed fence turns the rest of
+     this file into code, its requests and evidence links included.
+     For example:
 - We suspect a ransomware intrusion that began around <date>.
 - The firewall logged outbound connections from <host> to <ip>.
 - The EDR alert carried the hash <sha256>.
-     Atlas seeds searches from the indicators here and treats the theory
-     as a lead to test. Nothing in this section becomes a finding by
-     itself, and a miss is never taken as proof of absence. -->
+- <ip> is our admin jump host.
+     Atlas seeds searches from the indicators here, tests a theory as a
+     lead, and reads a fact about the environment as context, never as an
+     allowlist. Nothing in this section becomes a finding by itself, and a
+     miss is never taken as proof of absence. -->
 
 ## Evidence Links
 

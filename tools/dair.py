@@ -380,9 +380,10 @@ def _gaps_block() -> str:
     if unread:
         lines.append("UNREAD HIGH-VALUE ARTIFACTS (known to the case, never opened):")
         for u in unread:
-            path = str(u.get("path") or u.get("name") or "")
+            path = str(u.get("path") or u.get("lpath") or u.get("name") or "")
+            host = str(u.get("host") or "") if not u.get("path") else ""
             why = str(u.get("why") or "")
-            lines.append(f"- {path}" + (f": {why}" if why else ""))
+            lines.append(f"- {path}" + (f" [{host}]" if host else "") + (f": {why}" if why else ""))
     try:
         from core.investigation_tasks import actionable_tasks
         from core.request_parts import open_parts
@@ -412,7 +413,8 @@ def _gaps_digest() -> dict:
         return {"unread": [], "open_parts": []}
     try:
         from core.artifact_value import unexamined_high_value
-        unread = sorted(str(u.get("path") or u.get("name") or "") for u in unexamined_high_value(case, limit=10))
+        unread = sorted(str(u.get("key") or u.get("path") or u.get("name") or "")
+                        for u in unexamined_high_value(case, limit=10))
     except Exception:  # noqa: BLE001
         unread = []
     try:
@@ -1462,15 +1464,17 @@ def _report_entry_coverage_gate() -> tuple[str, list[str]]:
         if _report_gate_deferrals >= _REPORT_GATE_MAX_DEFERRALS:
             return "", []
         _report_gate_deferrals += 1
+        from core.coverage_ledger import open_units_read_hint, read_tools
         names = ", ".join(gaps)
+        how = open_units_read_hint(case, limit=5)
         note = (
             f"report_entry_coverage: Report deferred "
             f"({_report_gate_deferrals}/{_REPORT_GATE_MAX_DEFERRALS}) — "
-            f"unseen high-value evidence remains: {names}. Probe these with "
-            f"table.table_query / a single-file parse, or record a failed "
-            f"attempt with coverage.mark_blocked, before entering Report."
+            f"unseen high-value evidence remains: {names}. Read these"
+            + (f" ({how})" if how else "") + "; coverage.mark_blocked records "
+            "a read that failed. Do this before entering Report."
         )
-        return note, ["coverage.ledger_status", "table.table_query"]
+        return note, ["coverage.ledger_status", *read_tools(case, limit=5)]
     except Exception:
         return "", []
 
@@ -2733,7 +2737,8 @@ def dair_assess(
     tool_results_summary: 3-5 sentence summary of what the last tool batch found.
     phase_stack: JSON list of {phase, entry_reason, depth} objects, newest last.
                  Pass "[]" on the first call — DAIR will start at Triage.
-    case_context: case ID, known threat actor, confirmed IOCs so far.
+    case_context: case ID, the analyst's PRIOR KNOWLEDGE statements that
+                  bear on this batch, known threat actor, confirmed IOCs so far.
     input_call_ids: optional — the _atlas_call_id values of the calls whose
         results you summarised. Omit it and every tool and reason call since
         the previous assessment is taken as the lineage; never abbreviate a

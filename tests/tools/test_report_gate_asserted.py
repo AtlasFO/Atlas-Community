@@ -176,3 +176,117 @@ class TestWhatCountsAsTheCitedEvidence:
         log.record_finding(MISCITED, "LIKELY", "vol.netscan",
                            linked_call_id=wrong, input_call_ids=[wrong])
         assert _citation_issues(_check(log, case))
+
+
+def _remedy_check(log, case):
+    """The analyst's own call, the one that may lower a finding."""
+    from tools.reasoning import _pre_report_check
+    with patch("core.execution_log.log", log), \
+         patch.object(log, "case_dir", return_value=str(case)):
+        return _pre_report_check(apply_remedies=True)
+
+
+def _tier(case, claim_id):
+    return load_graph(str(case))["nodes"][claim_id]["confidence"]
+
+
+def _verdicts(log):
+    return [e["conclusion"] for e in log._entries
+            if e.get("type") == "reason_call" and e.get("tool") == "reason_pre_report_check"]
+
+
+def _shows_address(log, n):
+    """Another evidence call that prints the address: it changes which calls
+    would support the finding, not which findings stand flagged."""
+    return log.record_tool_call("<py>:vol_netscan", True, False, 0, 0, stdout_excerpt=(
+        f"svc_update.exe 44{n:02d} TCPv4 10.0.0.5:498{n:02d} 203.0.113.9:443 ESTABLISHED"))
+
+
+class TestAMiscitedFindingIsLoweredPerFinding:
+    """The gate's one write lowers a finding it has flagged in
+    _BLOCKER_VERDICT_MAX_REPEATS report checks in a row, counted for that
+    finding and through its re-records, so work between the checks that
+    changes the rest of the verdict does not hold the remedy off."""
+
+    def test_lowered_at_the_fourth_flagged_check_while_calls_come_between(self, log, case):
+        wrong = log.record_tool_call("<py>:vol_pslist", True, False, 0, 0,
+                                     stdout_excerpt="svc_update.exe 4412 running")
+        _, claim = _record(log, case, MISCITED, cite=wrong)
+        for n in range(3):
+            assert _citation_issues(_remedy_check(log, case))
+            assert _tier(case, claim) == "LIKELY"
+            _shows_address(log, n)
+        v = _remedy_check(log, case)
+        assert not _citation_issues(v)
+        assert any("lowered to UNCONFIRMED" in w for w in v["warnings"])
+        assert _tier(case, claim) == "UNCONFIRMED"
+
+    def test_a_re_record_that_still_miscites_continues_the_streak(self, log, case):
+        wrong = log.record_tool_call("<py>:vol_pslist", True, False, 0, 0,
+                                     stdout_excerpt="svc_update.exe 4412 running")
+        first, old = _record(log, case, MISCITED, cite=wrong)
+        assert _citation_issues(_remedy_check(log, case))
+        assert _citation_issues(_remedy_check(log, case))
+        again = MISCITED + ", per the process listing"
+        cid = log.record_finding(again, "LIKELY", "vol.netscan", linked_call_id=wrong,
+                                 input_call_ids=[wrong],
+                                 gate_metadata={"replaces_call_id": first})
+        from core.claim_graph import upsert_claim_from_finding
+        new = upsert_claim_from_finding(
+            str(case), statement=again, confidence="LIKELY", source="vol.netscan",
+            finding_call_id=cid, linked_call_id=wrong, input_call_ids=[wrong])["claim_id"]
+        assert supersede(str(case), old, new, reason="recorded again with supersedes=")["success"]
+        assert _citation_issues(_remedy_check(log, case))
+        assert _tier(case, new) == "LIKELY"
+        _remedy_check(log, case)
+        assert _tier(case, new) == "UNCONFIRMED"
+
+    def test_a_finding_repaired_between_checks_is_never_lowered(self, log, case):
+        wrong = log.record_tool_call("<py>:vol_pslist", True, False, 0, 0,
+                                     stdout_excerpt="svc_update.exe 4412 running")
+        right = _shows_address(log, 1)
+        _, old = _record(log, case, MISCITED, cite=wrong)
+        for _ in range(3):
+            assert _citation_issues(_remedy_check(log, case))
+        _, new = _record(log, case, MISCITED + " (cited to the connection list)", cite=right)
+        assert supersede(str(case), old, new, reason="re-cited")["success"]
+        for _ in range(2):
+            v = _remedy_check(log, case)
+            assert not _citation_issues(v)
+            assert not any("lowered to UNCONFIRMED" in w for w in v["warnings"])
+        assert _tier(case, new) == "LIKELY"
+
+
+class TestTheBlockerTextStaysPut:
+    """What the citation blocker says depends only on which findings stand
+    flagged, so the verdict repeats while they stand and the backstops that
+    wait for a repeated verdict (declared blockers as limitations, the
+    blocker extension) can see the repeat."""
+
+    def test_the_fingerprint_repeats_while_only_the_leads_change(self, log, case):
+        from core.investigation_exit import blocker_fingerprint
+        wrong = log.record_tool_call("<py>:vol_pslist", True, False, 0, 0,
+                                     stdout_excerpt="svc_update.exe 4412 running")
+        first, _ = _record(log, case, MISCITED, cite=wrong)
+        v1 = _check(log, case)
+        _shows_address(log, 2)
+        v2 = _check(log, case)
+        one, two = _verdicts(log)[-2:]
+        assert blocker_fingerprint(one) == blocker_fingerprint(two)
+        assert f"supersedes={first}" in _citation_issues(v2)[0]
+        leads = [[w for w in v["warnings"] if w.startswith("Citation repair leads")] for v in (v1, v2)]
+        assert leads[0] and leads[1] and leads[0] != leads[1]
+
+    def test_unrecorded_indicators_are_named_without_their_call_counts(self, log, case):
+        from core.investigation_exit import blocker_fingerprint
+        demand = [{"value": "203.0.113.7", "kind": "ip", "calls": 3},
+                  {"value": "updates.example.com", "kind": "domain", "calls": 2}]
+        later = [dict(d, calls=d["calls"] + 5) for d in reversed(demand)]
+        with patch("core.ioc_pivots.unrecorded_evidence_indicators", return_value=demand), \
+             patch("core.ioc_pivots.unrecorded_demand", side_effect=[(demand, []), (later, [])]):
+            v = _check(log, case)
+            _check(log, case)
+        issue = next(i for i in v["blocking_issues"] if i.startswith("Indicators recur"))
+        assert "203.0.113.7 (ip)" in issue and "seen in" not in issue
+        one, two = _verdicts(log)[-2:]
+        assert blocker_fingerprint(one) == blocker_fingerprint(two)

@@ -36,7 +36,7 @@ openpyxl>=3.1.5        # table.* — typed xlsx access, streaming read-only
 # Binary triage & deobfuscation (optional but recommended)
 py-tlsh>=5.0.0         # bin.tlsh_hash/compare — fuzzy similarity hashing
 jsbeautifier>=2.0.3   # deob.js_beautify — pretty-print obfuscated JS
-markdown>=3.11          # atlas report --format html, and the source of the PDF's markup
+markdown>=3.11,<4       # atlas report --format html, and the source of the PDF's markup; below the next major: the HTML export switches off the parser's raw-HTML handlers by name (agent/report.py)
 fpdf2>=2.8.8           # atlas report --format pdf — pure-Python wheels only, no system libraries; 2.8.1 brings fpdf.fonts.TextStyle
 
 # OSINT enrichment

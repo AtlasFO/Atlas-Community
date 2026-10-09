@@ -17,14 +17,21 @@ from core.run_budget import StallState, messages_for_turn
 
 
 def test_an_integrity_hash_is_not_a_probe():
-    """Hashing reads every byte to compare and examines nothing; only a tool
-    that opens or parses the unit moves it off unseen."""
+    """Hashing reads every byte to compare and examines nothing, and a call
+    that only identifies an image (its partition table, its volume, its
+    symbols) reads no file in it; only a tool that opens or parses the unit
+    moves it off unseen, whichever spelling of its name the call carries."""
     from core.coverage_ledger import is_probe_tool
     assert not is_probe_tool("hash_verify_evidence_hash")
     assert not is_probe_tool("hash_hash_file")
     assert not is_probe_tool("misc_inventory_evidence")
     assert not is_probe_tool("strings_stat_file")
+    for name in ("tsk_mmls", "tsk_tsk_mmls", "tsk.mmls", "<py>:tsk_tsk_mmls",
+                 "tsk_mmstat", "tsk_fsstat", "vol_symbol_check"):
+        assert not is_probe_tool(name), name
     assert is_probe_tool("tsk_tsk_fls")
+    assert is_probe_tool("tsk_resolve_path")
+    assert is_probe_tool("vol_netscan")
     assert is_probe_tool("table_table_query")
 
 
@@ -417,8 +424,8 @@ def test_mark_unit_blocked_requires_real_attempt(tmp_path: Path):
 def test_mark_unit_blocked_refuses_a_unit_read_in_part(tmp_path: Path):
     """blocked records a failed examination. A directory whose members
     were partly read is demonstrably readable, so the label would only
-    close the unread rest — refuse and name them; once every member has
-    been read, the refusal no longer applies."""
+    close the unread rest — refuse and name them; once a read of every
+    member has failed, blocked records that."""
     from core.coverage_ledger import mark_unit_blocked, register_derived_outputs
     case = _two_host_case(tmp_path)
     streams = case / "analysis" / "streams"
@@ -431,9 +438,10 @@ def test_mark_unit_blocked_refuses_a_unit_read_in_part(tmp_path: Path):
         arguments={"output_dir": "analysis/streams"}, result_text="{}",
     ) == ["analysis/streams"]
 
-    def _read(n: int) -> list[dict]:
+    def _read(n: int, success: bool = True) -> list[dict]:
         rows = [{"type": "tool_call", "mcp_tool": "steg_extract",
-                 "cmd": f"steg_extract analysis/streams/{i:08d}.jpg"}
+                 "cmd": f"steg_extract analysis/streams/{i:08d}.jpg",
+                 "success": success}
                 for i in range(n)]
         (case / "analysis" / "T_trace.json").write_text(
             json.dumps(rows), encoding="utf-8")
@@ -451,7 +459,7 @@ def test_mark_unit_blocked_refuses_a_unit_read_in_part(tmp_path: Path):
                for u in load_ledger(case)["units"].values()}
     assert by_path["analysis/streams"] != "blocked"
 
-    every = _read(4)
+    every = _read(4, success=False)
     r2 = mark_unit_blocked(
         case, "analysis/streams",
         reason="every member fails to parse: truncated JPEG headers",

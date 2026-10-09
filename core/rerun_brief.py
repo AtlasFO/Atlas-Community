@@ -417,25 +417,18 @@ def build_rerun_brief(
         for e in gone:
             lines.append(f"- **{e.get('id')}**: {e.get('text')}")
 
-    lines += ["", "## Active Analyst Context (persistent)", ""]
-    if not active_ctx:
-        lines.append("(none)")
-    else:
-        for e in active_ctx:
-            lines.append(f"- **{e.get('id')}**: {e.get('text')}")
-            ents = e.get("entities") or []
-            if ents:
-                lines.append(f"  - entities: {', '.join(ents)}")
-
+    # Every standing statement is in the system prompt's PRIOR KNOWLEDGE
+    # block with its id and the one contract for reading it; the brief
+    # names the count and the rule, not a second list.
     lines += [
         "",
-        "## Analyst-context interpretation rule",
+        "## Analyst Context: how to read it",
         "",
-        "Analyst context improves interpretation of known infrastructure,",
-        "accounts, and expected activity. It is **not** a blind allowlist:",
-        "legitimate jump hosts / admin accounts can still host malicious",
-        "activity (credential dumping, unusual auth, malware, out-of-scope use).",
-        "Distinguish *identity of infrastructure* from *nature of observed activity*.",
+        f"{len(active_ctx)} statement(s) stand, each in the PRIOR KNOWLEDGE block "
+        "of the system prompt with its id. Each is the analyst's word, not "
+        "evidence: a suspicion says where to look first; a statement about the "
+        "environment informs interpretation and is not a blind allowlist "
+        "(judge the activity, not the name).",
         "",
         "## Claims / conclusions potentially affected by analyst context",
         "",

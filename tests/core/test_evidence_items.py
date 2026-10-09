@@ -122,7 +122,8 @@ class TestBlocked:
     def test_a_blocked_item_needs_a_failed_attempt_and_no_read(self, case):
         r = cl.mark_unit_blocked(case, "evidence/traffic.pcap", reason="capture header is corrupt", trace_entries=[])
         assert not r["success"] and "no tool call" in r["error"]
-        trace = [{"type": "tool_call", "cmd": "<py>:net_tshark evidence/traffic.pcap"}]
+        trace = [{"type": "tool_call", "cmd": "<py>:net_tshark evidence/traffic.pcap",
+                  "success": False, "failure_class": "tool_error"}]
         r = cl.mark_unit_blocked(case, "evidence/traffic.pcap", reason="capture header is corrupt", trace_entries=trace)
         assert r["success"] and _items(case)["evidence/traffic.pcap"]["status"] == "blocked"
         # the blocking call names the path in the model's own words: no read
@@ -134,7 +135,8 @@ class TestBlocked:
         assert not r["success"] and "was read" in r["error"]
 
     def test_a_blocked_unit_blocks_its_item(self, case):
-        trace = [{"type": "tool_call", "cmd": "<py>:img_mmls evidence/disk.E01"}]
+        trace = [{"type": "tool_call", "cmd": "fls evidence/disk.E01", "mcp_tool": "tsk_tsk_fls",
+                  "success": False, "failure_class": "tool_error", "stderr": "invalid EWF header checksum"}]
         r = cl.mark_unit_blocked(case, "evidence/disk.E01", reason="EWF header checksum fails", trace_entries=trace)
         assert r["success"] and _items(case)["evidence/disk.E01"]["status"] == "blocked"
 

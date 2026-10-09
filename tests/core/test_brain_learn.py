@@ -43,6 +43,20 @@ def brain_case(tmp_path, monkeypatch):
     return {"brain": brain, "case": case}
 
 
+def test_digest_leaves_out_the_analysts_context(brain_case):
+    """The estate's hosts and accounts the brief names are no cross-case
+    lesson: the learner never sees them."""
+    from core.brain.learn import build_investigation_digest
+    (brain_case["case"] / ".atlas" / "investigation_memory.json").write_text(json.dumps({
+        "analyst_context": [{"id": "ac-0001", "status": "active",
+                             "text": "10.0.0.5 is our admin jump host CORP-JUMP01."}],
+        "open_questions": ["What persisted?"],
+    }))
+    dig = build_investigation_digest(brain_case["case"], "CASE1", question="What persisted?")
+    assert "CORP-JUMP01" not in dig and "analyst_context" not in dig
+    assert "open_questions" in dig
+
+
 def test_digest_includes_claims_and_review(brain_case):
     from core.brain.learn import build_investigation_digest
     dig = build_investigation_digest(

@@ -579,9 +579,12 @@ def add_indicators(
     checked = validate(indicators, call_ids=cited, case_dir=cd, frame=frame_for(cd))
     out = {"success": True, "claim_id": node["id"], "kept": checked["kept"],
            "dropped": checked["dropped"], "resided": checked["resided"]}
-    if checked["kept"]:
-        r = set_claim_indicators(cd, node["id"], checked["kept"])
-        if r.get("success") and str(node.get("confidence") or "").upper() in ("CONFIRMED", "LIKELY"):
+    if checked["kept"] or checked["dropped"]:
+        # The refused rows stay on the claim: the indicator file lists them as
+        # not exported, and a later row of the value they stood for clears them.
+        r = set_claim_indicators(cd, node["id"], checked["kept"], dropped=checked["dropped"])
+        if (r.get("success") and checked["kept"]
+                and str(node.get("confidence") or "").upper() in ("CONFIRMED", "LIKELY")):
             # The rows the claim now carries fill the steps derived from it:
             # an open row is extended in place, a closed one gets a new row.
             try:

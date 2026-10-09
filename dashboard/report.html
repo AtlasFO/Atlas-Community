@@ -69,25 +69,6 @@ const $app = () => document.getElementById('app');
 let reportFiles = [];   // kind === 'report'
 let selectedPath = '';
 
-function preferredReport(files, preferredPath) {
-  if (preferredPath && files.some(f => f.path === preferredPath)) {
-    return preferredPath;
-  }
-  // Prefer estate / main report names, then newest by mtime.
-  const ranked = [...files].sort((a, b) => {
-    const score = (n) => {
-      const low = n.toLowerCase();
-      if (low.includes('estate_report')) return 3;
-      if (low.endsWith('_report.md') && !low.includes('host_')) return 2;
-      return 1;
-    };
-    const d = score(b.name) - score(a.name);
-    if (d) return d;
-    return (b.mtime || 0) - (a.mtime || 0);
-  });
-  return ranked[0] ? ranked[0].path : '';
-}
-
 /** Point the Download link at the chosen format.
  *
  * Markdown is the file as it stands; HTML and PDF are rendered by the server
@@ -145,7 +126,7 @@ async function showFile(path) {
   }
 }
 
-function renderShell(cd, files, preferredPath, stageLabel) {
+function renderShell(cd, files, sel, stageLabel) {
   reportFiles = files;
   if (!files.length) {
     $app().innerHTML = `
@@ -160,7 +141,6 @@ function renderShell(cd, files, preferredPath, stageLabel) {
       </div>`;
     return;
   }
-  const sel = preferredReport(files, preferredPath);
   $app().innerHTML = `
     <h1 class="page-title">Report</h1>
     <p class="page-sub">Choose a report file to preview.</p>
@@ -212,8 +192,12 @@ async function refresh() {
   if (AtlasShell.activeCase() !== cd) return;
   const files = (ov.report && ov.report.files || [])
     .filter(f => f.kind === 'report');
-  const want = new URLSearchParams(location.search).get('file')
-    || (ov.report && ov.report.path) || '';
+  // A ?file= link opens the file it names while the listing still holds it;
+  // otherwise the case's report, which the server ranks
+  // (read_models.report_status).
+  const asked = new URLSearchParams(location.search).get('file');
+  const want = files.some(f => f.path === asked) ? asked
+    : ((ov.report && ov.report.path) || '');
   // Says plainly when the file is the basis version a stopped run left,
   // rather than letting it read as the finished report.
   renderShell(cd, files, want, (ov.report && ov.report.report_label) || '');

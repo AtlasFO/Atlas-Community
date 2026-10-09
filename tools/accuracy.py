@@ -39,44 +39,15 @@ def _looks_like_answer_hash(value: str) -> bool:
     return bool(_ANSWER_HASH_RE.match(value.strip()))
 
 
-# Function words excluded from matching. Kept minimal and generic — no
-# DFIR-domain terms, which carry signal (e.g. "deleted", "confidential").
-_STOPWORDS = frozenset("""
-the and for from with was were are has have had that this these those not its
-into onto via per during between then than when where which while been being
-also after before both each all any but his her their our your can could did
-does doing done down out over under only same some such more most other own
-""".split())
-
-# No backslash in the token class: UNC paths and Windows paths split into
-# components so \\10.11.11.128\secured_drive matches a finding that cites the
-# IP or the share name separately.
-_TOKEN_RE = re.compile(r"[A-Za-z0-9_.#@:-]{3,}")
-# fat32 / utc-5-style tokens also contribute their alpha stem (fat, utc) so a
-# ground truth saying "FAT" matches a finding saying "FAT32".
-_NUMERIC_SUFFIX_RE = re.compile(r"^([a-z]{3,})\d{1,4}$")
-
 _HS_IP = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
 _HS_MITRE = re.compile(r"^t1\d{3}(?:\.\d{3})?$")
 _HS_FILENAME = re.compile(r"^[\w#-]+\.[a-z0-9]{1,5}$")
 _HS_IDENTIFIER = re.compile(r"^(?=.*\d)[a-z0-9]{8,}$")
 
 
-def _tokens(text: str) -> set[str]:
-    """Lowercase tokens ≥3 chars from a description, minus stopwords.
-
-    Used as the matching primitive between trace findings and ground-truth
-    items. We deliberately avoid heavyweight NLP — token-set containment is
-    enough for validation against a curated ground truth.
-    """
-    toks = {t.strip(".:-") for t in _TOKEN_RE.findall(text.lower())}
-    toks = {t for t in toks if len(t) >= 3 and t not in _STOPWORDS}
-    stems = set()
-    for t in toks:
-        m = _NUMERIC_SUFFIX_RE.match(t)
-        if m:
-            stems.add(m.group(1))
-    return toks | stems
+# The matching primitive lives in core.entities, shared with the record-time
+# near-duplicate guard and the answer points.
+from core.entities import content_words as _tokens  # noqa: E402
 
 
 def _is_high_signal(token: str) -> bool:

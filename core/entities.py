@@ -32,7 +32,9 @@ from datetime import datetime, timezone
 _CVE_RE = re.compile(r"\bCVE-\d{4}-\d{4,}\b", re.IGNORECASE)
 _MITRE_RE = re.compile(r"\bT\d{4}(?:\.\d{3})?\b")
 _FLAG_RE = re.compile(r"\b(?:flag|ctf|htb|thm|key)\{[^}]{2,}\}", re.IGNORECASE)
-_URL_RE = re.compile(r"\bhttps?://[^\s\"'<>)\]]+", re.IGNORECASE)
+# A URL never carries a raw backtick, closing quote or brace: in prose those
+# are the code span or quotation around it.
+_URL_RE = re.compile(r"\bhttps?://[^\s\"'<>)\]`”’»}]+", re.IGNORECASE)
 _EMAIL_RE = re.compile(r"\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b")
 # Windows paths: the directories a profile lives in carry spaces ("Documents
 # and Settings", "Program Files", "Application Data"), so a segment that is
@@ -41,8 +43,8 @@ _EMAIL_RE = re.compile(r"\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b")
 # follows it. A path that stopped at the first space shattered into location
 # words ("data", "microsoft") that then looked like the artifacts a finding
 # was about.
-_WIN_SEGMENT = r"(?:[^\\/:*?\"<>|\r\n]+?\\)*"
-_WIN_TAIL = r"[^\s\\/:*?\"'<>|,;]*"
+_WIN_SEGMENT = r"(?:[^\\/:*?\"<>|\r\n`]+?\\)*"
+_WIN_TAIL = r"[^\s\\/:*?\"'<>|,;`]*"
 _UNC_RE = re.compile(r"\\\\[\w.-]+\\" + _WIN_SEGMENT + _WIN_TAIL)
 _WIN_PATH_RE = re.compile(r"\b[A-Za-z]:\\" + _WIN_SEGMENT + _WIN_TAIL)
 _REG_RE = re.compile(
@@ -74,8 +76,31 @@ _ACCOUNT_RE = re.compile(
 _HASH_TYPE_BY_LEN = {32: "md5", 40: "sha1", 64: "sha256"}
 
 
+# What prose wraps around a path: closing quotes and code-span backticks, and
+# a closing bracket the path itself never opened.
+_CLOSING_QUOTES = "`'\"\u201d\u2019\u00bb"
+_OPENER_OF = {")": "(", "]": "[", "}": "{"}
+
+
+def _strip_closers(raw: str) -> str:
+    """``raw`` without the sentence marks, closing quotes and unbalanced
+    closing brackets that follow a path in prose. They nest ("(see
+    `C:\\x.exe`.)"), so stripping runs to a fixpoint; a bracket is stripped
+    only while the match holds more of it than of its opener, which keeps
+    "Program Files (x86)" and "report(1).pdf". Ceiling: a name whose last
+    character is a genuinely unbalanced closer loses it."""
+    s = raw
+    while True:
+        prev = s
+        s = s.rstrip(".,;:").rstrip(_CLOSING_QUOTES)
+        if s and s[-1] in _OPENER_OF and s.count(s[-1]) > s.count(_OPENER_OF[s[-1]]):
+            s = s[:-1]
+        if s == prev:
+            return s
+
+
 def _canon_path(raw: str) -> str:
-    p = raw.strip().rstrip(".,;:").replace("\\", "/").lower()
+    p = _strip_closers(raw.strip()).replace("\\", "/").lower()
     while "//" in p[2:]:  # keep a leading // for UNC roots
         p = p[:2] + p[2:].replace("//", "/")
     return p.rstrip("/")
@@ -175,6 +200,32 @@ pcap pcapng cap mft edb wal
 so dylib ko elf deb rpm phtml shtml cgi war
 md go ts css java
 """.split())
+
+# The file classes a request names by a head noun ("an executable", "the
+# documents", "the log file"), and the extensions of each: universal
+# file-type knowledge beside FILE_EXTENSIONS, never a case's. A file with no
+# extension or one listed under no class is of no class.
+FILE_CLASSES = {
+    "executable": frozenset("exe dll sys scr com msi cpl ocx drv pif elf so dylib ko apk jar".split()),
+    "script": frozenset("ps1 psm1 psd1 bat cmd vbs vbe js jse wsf wsh hta py pyw rb pl sh bash zsh php".split()),
+    "document": frozenset("doc docx docm xls xlsx xlsm ppt pptx pptm pdf rtf odt ods odp txt".split()),
+    "archive": frozenset("zip rar 7z gz bz2 xz tar tgz cab".split()),
+    "log": frozenset("log evtx evt etl".split()),
+}
+FILE_CLASS_NOUNS = {
+    "executable": "executable", "executables": "executable", "binary": "executable",
+    "binaries": "executable", "script": "script", "scripts": "script",
+    "document": "document", "documents": "document", "archive": "archive",
+    "archives": "archive", "log": "log", "logs": "log", "logfile": "log", "logfiles": "log",
+}
+
+
+def file_class_of(name: str) -> str:
+    """The class of a file name by its extension, "" for none."""
+    ext = str(name or "").rsplit(".", 1)[-1].lower() if "." in str(name or "") else ""
+    return next((cls for cls, exts in FILE_CLASSES.items() if ext in exts), "")
+
+
 _VERSIONISH_RE = re.compile(r"^[A-Za-z]?\d+(?:\.\d+)+$")
 
 
@@ -572,3 +623,107 @@ def is_format_namespace_url(value: str) -> bool:
     if prefixes is None:
         return True
     return bool(slash) and prefixes.match("/" + path) is not None
+
+
+# ── content words, and how one statement stands to another ──────────────
+
+# Function words excluded from matching. Kept minimal and generic — no
+# DFIR-domain terms, which carry signal (e.g. "deleted", "confidential").
+_STOPWORDS = frozenset("""
+the and for from with was were are has have had that this these those not its
+into onto via per during between then than when where which while been being
+also after before both each all any but his her their our your can could did
+does doing done down out over under only same some such more most other own
+""".split())
+
+# No backslash in the token class: UNC paths and Windows paths split into
+# components so \\10.0.0.5\finance_share matches a finding that cites the
+# IP or the share name separately.
+_CONTENT_TOKEN_RE = re.compile(r"[A-Za-z0-9_.#@:-]{3,}")
+# fat32 / utc-5-style tokens also contribute their alpha stem (fat, utc) so a
+# ground truth saying "FAT" matches a finding saying "FAT32".
+_NUMERIC_SUFFIX_RE = re.compile(r"^([a-z]{3,})\d{1,4}$")
+
+
+def content_words(text: str) -> set[str]:
+    """Lowercase tokens of three or more characters, minus stopwords.
+
+    The matching primitive between trace findings and ground-truth items,
+    and between two findings. No heavyweight NLP: token-set containment is
+    enough for statements about the same evidence.
+    """
+    toks = {t.strip(".:-") for t in _CONTENT_TOKEN_RE.findall(text.lower())}
+    toks = {t for t in toks if len(t) >= 3 and t not in _STOPWORDS}
+    stems = set()
+    for t in toks:
+        m = _NUMERIC_SUFFIX_RE.match(t)
+        if m:
+            stems.add(m.group(1))
+    return toks | stems
+
+
+NUMBER_RE = re.compile(r"\d+(?:[.:,/-]\d+)*")
+
+
+def adds_information(new: str, old: str) -> bool:
+    """``new`` says something ``old`` does not: a further canonical entity
+    (file, address, hash, account, time, site) or a further number (a
+    count, a size, a port)."""
+    if discriminative(extract(new)) - discriminative(extract(old)):
+        return True
+    if domains_in(new) - domains_in(old):
+        return True
+    return bool(set(NUMBER_RE.findall(new or "")) - set(NUMBER_RE.findall(old or "")))
+
+
+def negation_words(text: str):
+    """The negator words of ``text`` (core.ir_playbook's list and "-n't"
+    forms), read from whitespace-separated words stripped of punctuation, so
+    a negator inside a value ("email=none@example.org") does not count."""
+    from collections import Counter
+    from core.ir_playbook import _NEGATORS
+    words = (w.strip(".,;:!?()[]{}\"'").lower() for w in (text or "").split())
+    return Counter(w for w in words if w in _NEGATORS or w.endswith("n't"))
+
+
+def relation(new: str, old: str, *, threshold: float, ignore_negation: bool = False,
+             elaborates: bool = False) -> tuple[str, float] | None:
+    """How statement ``new`` stands to ``old``: ``("restates", share of
+    new's content words old carries)`` when new adds no entity or number,
+    ``("refines", share of old's words new carries)`` when it adds one, or
+    None. ``threshold`` is the share that counts; 0 or less answers None.
+
+    Judged on content words alone, without the scorer's entity boosts, so a
+    shared address never folds two different events; when both texts name
+    artifacts they must share one, so one event on two files stays two
+    findings; and a statement is never related to its own negation ("not"
+    is no content word) unless ``ignore_negation`` asks how the two would
+    stand without it. With ``elaborates``, a statement that carries old's
+    words and adds nothing but says more is ``("elaborates", share of
+    old's words new carries)``: the same fact reworded. Lexical: a host name
+    without digits is a plain word, and a paraphrase with other verbs does
+    not relate.
+    """
+    if threshold <= 0:
+        return None
+    new_tokens, old_tokens = content_words(new), content_words(old)
+    if len(new_tokens) < 3:
+        return None
+    shared = new_tokens & old_tokens
+    if len(shared) < 3:
+        return None
+    mine, theirs = artifact_tokens(new), artifact_tokens(old)
+    if mine and theirs and not (mine & theirs):
+        return None
+    if not ignore_negation and negation_words(new) != negation_words(old):
+        return None
+    cover_new = len(shared) / len(new_tokens)
+    cover_old = len(shared) / len(old_tokens)
+    adds = adds_information(new, old)
+    if cover_new >= threshold and not adds:
+        return "restates", cover_new
+    if cover_old >= threshold and adds:
+        return "refines", cover_old
+    if elaborates and cover_old >= threshold:
+        return "elaborates", cover_old
+    return None

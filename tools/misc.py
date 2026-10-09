@@ -2042,71 +2042,20 @@ def _near_duplicate_min() -> float:
         return 0.7
 
 
-_NUMBER_RE = re.compile(r"\d+(?:[.:,/-]\d+)*")
-
-
-def _adds_information(new: str, old: str) -> bool:
-    """``new`` says something ``old`` does not: a further canonical entity
-    (file, address, hash, account, time, site) or a further number (a
-    count, a size, a port)."""
-    from core import entities as _ent
-    if _ent.discriminative(_ent.extract(new)) - _ent.discriminative(_ent.extract(old)):
-        return True
-    if _ent.domains_in(new) - _ent.domains_in(old):
-        return True
-    return bool(set(_NUMBER_RE.findall(new or "")) - set(_NUMBER_RE.findall(old or "")))
-
-
-def _negation_words(text: str):
-    """The negator words of ``text`` (core.ir_playbook's list and "-n't"
-    forms), read from whitespace-separated words stripped of punctuation, so
-    a negator inside a value ("email=none@example.org") does not count."""
-    from collections import Counter
-    from core.ir_playbook import _NEGATORS
-    words = (w.strip(".,;:!?()[]{}\"'").lower() for w in (text or "").split())
-    return Counter(w for w in words if w in _NEGATORS or w.endswith("n't"))
+# "The same fact" is one rule, core.entities.relation, shared with the answer
+# points (core.answer_synthesis); the guard applies it at its own threshold.
+from core.entities import NUMBER_RE as _NUMBER_RE  # noqa: E402
+from core.entities import adds_information as _adds_information  # noqa: E402,F401
 
 
 def _relation(new: str, old: str, *, ignore_negation: bool = False,
               elaborates: bool = False) -> tuple[str, float] | None:
-    """How statement ``new`` stands to ``old``: ``("restates", share of
-    new's content words old carries)`` when new adds no entity or number,
-    ``("refines", share of old's words new carries)`` when it adds one, or
-    None. Judged on content words alone, without the scorer's entity
-    boosts, so a shared address never folds two different events; when both
-    texts name artifacts they must share one, so one event on two files
-    stays two findings; and a statement is never related to its own
-    negation ("not" is no content word) unless ``ignore_negation`` asks how
-    the two would stand without it (standing_contradictions). With
-    ``elaborates``, a statement that carries old's words and adds nothing
-    but says more is ``("elaborates", share of old's words new carries)``:
-    the same fact reworded, which the advisories name and nothing folds."""
-    threshold = _near_duplicate_min()
-    if threshold <= 0:
-        return None
-    from core.entities import artifact_tokens
-    from tools.accuracy import _tokens
-    new_tokens, old_tokens = _tokens(new), _tokens(old)
-    if len(new_tokens) < 3:
-        return None
-    shared = new_tokens & old_tokens
-    if len(shared) < 3:
-        return None
-    mine, theirs = artifact_tokens(new), artifact_tokens(old)
-    if mine and theirs and not (mine & theirs):
-        return None
-    if not ignore_negation and _negation_words(new) != _negation_words(old):
-        return None
-    cover_new = len(shared) / len(new_tokens)
-    cover_old = len(shared) / len(old_tokens)
-    adds = _adds_information(new, old)
-    if cover_new >= threshold and not adds:
-        return "restates", cover_new
-    if cover_old >= threshold and adds:
-        return "refines", cover_old
-    if elaborates and cover_old >= threshold:
-        return "elaborates", cover_old
-    return None
+    """core.entities.relation at the near-duplicate guard's threshold
+    (ATLAS_FINDING_NEAR_DUPLICATE_MIN; "off" answers None): restates,
+    refines, elaborates, or None."""
+    from core.entities import relation
+    return relation(new, old, threshold=_near_duplicate_min(),
+                    ignore_negation=ignore_negation, elaborates=elaborates)
 
 
 def _near_duplicate(description: str, host: str, log, exclude=()) -> dict | None:
@@ -2208,7 +2157,7 @@ def standing_contradictions(nodes: dict) -> list[dict]:
     not oppose "X ran.". A pair a recorded conflict already names is not
     listed."""
     from core.ir_playbook import negated
-    from tools.accuracy import _tokens
+    from core.entities import content_words as _tokens
     covered = [set(n.get("conflicting_claim_ids") or []) for n in (nodes or {}).values()
                if isinstance(n, dict) and n.get("kind") == "conflict"]
     claims = _standing(nodes, ("claim",))
@@ -3161,6 +3110,10 @@ def record_finding(
     # to refuse the finding. The kept rows travel with the claim mirror
     # and are stamped on the trace entry.
     _typed_rows: list[dict] = []
+    # The rows the check refused travel with the claim too: the indicator
+    # file lists them as not exported. Never the failure row below, which
+    # says the check itself did not run.
+    _dropped_rows: list[dict] = []
     if indicators:
         try:
             from core.claim_graph import resolve_case_dir as _rcd
@@ -3170,6 +3123,7 @@ def record_finding(
                 int(c) for c in (input_call_ids or []) if c]
             _iv = validate(indicators, call_ids=_cited, case_dir=_icd, frame=frame_for(_icd))
             _typed_rows = _iv["kept"]
+            _dropped_rows = _iv["dropped"]
             if _typed_rows:
                 result["indicators_kept"] = [
                     {k: v for k, v in r.items() if k in ("type", "value", "side", "first_seen", "last_seen",
@@ -3261,6 +3215,7 @@ def record_finding(
             supporting_evidence=supporting_evidence or "",
             fresh=_repairs is not None or _replaces is not None,
             indicators=_typed_rows or None,
+            indicators_dropped=_dropped_rows or None,
         )
         if _cg and _cg.get("skipped"):
             # Distinct from "no active case" (mirror_finding_fail_open
@@ -4456,7 +4411,13 @@ def clear_case_run(case_dir: str, clear_memory: bool = True) -> dict:
             if os.path.basename(item) == "generate_pdf_report.py":
                 continue
             try:
-                if os.path.isdir(item):
+                # A link (reports/latest names the newest snapshot) goes as a
+                # link, whatever it points at and in whatever order the
+                # listing comes: rmtree refuses a symlink to a directory, and
+                # following one could reach outside the case.
+                if os.path.islink(item):
+                    os.unlink(item)
+                elif os.path.isdir(item):
                     shutil.rmtree(item)
                 else:
                     os.remove(item)

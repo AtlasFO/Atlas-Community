@@ -7,9 +7,12 @@ FUSE ewf1 nodes, which contradicted playbook disk_open_policy ("prefer
 tsk.mmls — no sudo") and blocked non-interactive hosts.
 """
 import functools
+import importlib.util
 import inspect
 import os
 import re
+import sys
+from datetime import date, timedelta
 from typing import Optional
 from fastmcp import FastMCP
 from core import (run, run_with_output_file, output_safe, DEFAULT_TIMEOUT,
@@ -166,8 +169,9 @@ def _reads_image(fn):
         if refusal:
             return refusal
         res = fn(resolved, *args, **kwargs)
+        # A tool may fold the program's stderr into its own "error".
         if (offset_at is not None and isinstance(res, dict) and not res.get("success")
-                and _NO_FS_RE.search(str(res.get("stderr") or ""))
+                and _NO_FS_RE.search(str(res.get("stderr") or res.get("error") or ""))
                 and not _offset_given(args, kwargs)):
             start, listed = _single_volume_offset(resolved, _metadata_timeout(resolved))
             if start is not None:
@@ -359,8 +363,10 @@ def tsk_resolve_path(
         if entries is None:
             res = run(cmd, needs_sudo=False, timeout=_metadata_timeout(image))
             if not res.get("success"):
-                return {"success": False, "error": res.get("stderr") or "fls failed",
-                        "walked": walked, "cmd": " ".join(cmd)}
+                return _note_volume(image, offset_sectors, {
+                    "success": False, "error": res.get("stderr") or "fls failed",
+                    "stderr": res.get("stderr") or "", "walked": walked,
+                    "cmd": " ".join(cmd)})
             entries = _remember_listing(image, offset_sectors, current,
                                         _parse_fls(_full_stdout(res)))
         hit = next((e for e in entries if e["name"].casefold() == name.casefold()), None)
@@ -391,7 +397,7 @@ def tsk_resolve_path(
                                             _parse_fls(_full_stdout(res)))
         if entries is not None:
             out["entries"] = entries[:400]
-    return out
+    return _note_volume(image, offset_sectors, out)
 
 
 # Directory listings read while resolving paths, by image, offset and
@@ -824,14 +830,26 @@ def tsk_jcat(image: str, journal_inode: int, offset_sectors: Optional[int] = Non
     return _note_volume(image, offset_sectors, run(cmd, needs_sudo=False))
 
 
+# INDXParse lists a slack entry only when its four timestamps fall inside a
+# validity window; the pinned release closes it at a fixed date (its
+# NTATTR_DIRECTORY_INDEX_SLACK_ENTRY.is_valid). The runner moves the upper
+# bound to a year past the day of the call, when it can import the package.
+_INDX_STOCK_WINDOW = ("1990-01-01", "2024-01-01")
+_INDX_RUNNER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_indxparse_window.py")
+
+
 @mcp.tool()
 @output_safe
-def tsk_indxparse(mft_path: str, output_path: Optional[str] = None) -> dict:
+def tsk_indxparse(index_path: str, output_path: Optional[str] = None) -> dict:
     """
-    Parse NTFS $INDX records (directory index slack) using INDXParse.py.
-    Recovers deleted directory entries that MFTECmd and Vol3 miss.
+    Parse a directory's NTFS index ($I30 INDX records) with INDXParse.py and
+    recover the entries left in its slack: files the directory once listed
+    that were deleted or renamed, which MFTECmd and Vol3 miss.
 
-    mft_path: path to the $MFT file (or any file containing $INDX records).
+    index_path: the directory's $I30 index allocation stream, extracted from
+        the image with tsk.icat <image> '<dir-inode>-160' (and the volume's
+        offset_sectors) into analysis/. Not the $MFT: deleted MFT records are
+        ez.mftecmd's job.
     output_path: optional output destination (analysis/exports/reports).
     """
     blocked = _access_workflow_refuse("tsk.indxparse")
@@ -842,10 +860,29 @@ def tsk_indxparse(mft_path: str, output_path: Optional[str] = None) -> dict:
         return missing_program_result(
             "tsk.tsk_indxparse", "INDXParse.py",
             "installed by install.sh (pip into the venv, pinned in install-versions.env)")
+    # On a remote SIFT host the file and the program are over there: this
+    # process can neither read the one nor patch the other.
+    from core import remote as _remote
+    local = not _remote.is_enabled()
+    from core.input_kind import refuse_non_indx
+    wrong = refuse_non_indx(index_path) if local else None
+    if wrong:
+        return wrong
     # INDXParse.py [-c | -b] [-d] [-v] [-t {dir,sdh,sii}] filename:
     # -d adds the entries found in slack space; the input is positional.
-    cmd = [*program_argv(prog), "-d", mft_path]
+    if local and importlib.util.find_spec("indxparse") is not None:
+        window = (_INDX_STOCK_WINDOW[0], (date.today() + timedelta(days=365)).isoformat())
+        cmd = [sys.executable, _INDX_RUNNER, window[1], "-d", index_path]
+    else:
+        window = _INDX_STOCK_WINDOW
+        cmd = [*program_argv(prog), "-d", index_path]
     result = run(cmd, timeout=600)
+    if result.get("success"):
+        result["slack_window"] = {"from": window[0], "to": window[1]}
+        result["coverage_note"] = (
+            f"Slack entries are listed only when all four of their timestamps fall between "
+            f"{window[0]} and {window[1]}; a deletion stamped outside that window is not "
+            "listed, so a name missing here is no evidence that it never existed.")
     if output_path and result.get("success") and result.get("stdout"):
         try:
             with open(output_path, "w") as f:

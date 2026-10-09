@@ -956,7 +956,8 @@ def refuse_answered_unseen_coverage(
 ) -> Optional[str]:
     """Refuse task ``answered`` while relevant ledger units remain ``unseen``.
 
-    Escape: ``coverage.mark_blocked`` / probe so status is probed|answered|blocked.
+    Escape: a read of each (probed), or ``coverage.mark_blocked`` once a read
+    of one has failed.
     """
     if not case_dir:
         return None
@@ -966,11 +967,8 @@ def refuse_answered_unseen_coverage(
         )
     except Exception:
         return None
-    unseen = [
-        str(u.get("path"))
-        for u in relevant
-        if str(u.get("status") or "unseen") == "unseen"
-    ]
+    pending = [u for u in relevant if str(u.get("status") or "unseen") == "unseen"]
+    unseen = [str(u.get("path")) for u in pending]
     if not unseen:
         return None
     sample = ", ".join(unseen[:limit])
@@ -978,9 +976,10 @@ def refuse_answered_unseen_coverage(
     return (
         "relevant_coverage_unseen: cannot mark task answered while "
         f"{len(unseen)} relevant high-value coverage unit(s) remain unseen "
-        f"[{sample}{more}]. Probe them (tool contact) or "
-        "coverage.mark_blocked(path, reason) after a real attempt — "
-        "claims alone are not disposition."
+        f"[{sample}{more}]. Read each one ({_read_hints(pending)}). "
+        "coverage.mark_blocked is for a unit whose read failed; it records "
+        "that failure and does not replace the read. Claims alone are not "
+        "disposition."
     )
 
 
@@ -1001,7 +1000,8 @@ def _any_path_match(unit_path: str, norms: set[str]) -> bool:
     return False
 
 
-def _source_images_for(root: Path, paths: list[str]) -> set[str]:
+def _source_images_for(root: Path, paths: list[str],
+                       plan: Optional[dict] = None) -> set[str]:
     """Normalised paths of the images the given paths reach.
 
     A run stops naming the image the moment it has a raw export: every later
@@ -1010,12 +1010,14 @@ def _source_images_for(root: Path, paths: list[str]) -> set[str]:
     ``mnt/<stem>/fs`` or the device ``mnt/<stem>/ewf/ewf1``. Without this the
     container unit for the image would sit "unseen" through an entire
     investigation of its own filesystem, and the run would be sent back to
-    touch the container for the ledger's sake.
+    touch the container for the ledger's sake. A caller resolving many calls
+    passes the access plan it loaded once.
     """
     out: set[str] = set()
     try:
         from core.mount_plan import load_mount_plan, mount_dir_for
-        plan = load_mount_plan(root)
+        if plan is None:
+            plan = load_mount_plan(root)
     except Exception:  # noqa: BLE001
         return out
     wanted = {os.path.basename(str(p)).casefold() for p in paths if p}
@@ -1073,17 +1075,22 @@ def mark_paths(
                 u.get("kind") == "derived" and any(n.startswith(up + "/") for n in norms)):
             continue
         cur = u.get("status") or "unseen"
-        # don't downgrade answered/blocked
-        if cur in ("answered", "blocked") and status == "probed":
+        # A finding that names a unit is the analyst's words, not a read: it
+        # answers a unit a call has read and moves no other off its status.
+        if status == "answered" and cur not in ("probed", "answered"):
             continue
-        if status == "probed" and cur == "probed":
+        # answered stays; a read replaces blocked, which records a failed
+        # examination and is no longer true once one succeeds.
+        if status == "probed" and cur in ("probed", "answered"):
             continue
         rank = {"unseen": 0, "probed": 1, "answered": 2, "blocked": 2}
-        if rank.get(status, 0) >= rank.get(cur, 0):
+        if (status == "probed" and cur == "blocked") or rank.get(status, 0) >= rank.get(cur, 0):
             u["status"] = status
             u["probed_at"] = _utcnow()
             if note:
                 u["note"] = note
+            elif cur == "blocked":
+                u["note"] = ""
             changed = True
     if status in ("probed", "answered"):
         try:
@@ -1120,6 +1127,29 @@ NON_PROBE_TOOLS = frozenset({
     # when the ledger would not credit the reads it had made through the
     # image's mount, and it left the image "probed" by its size and dates.
     "strings_stat_file",
+    # A disk or memory image is examined when a call reaches a file inside
+    # it, or for memory the structures a plugin walks. A call that reads no
+    # file inside the container identifies it; it does not examine it.
+    # Counted as probes, such a call would close the coverage floor over an
+    # image whose files nobody has read.
+    "tsk_mmls",               # the partition table
+    "tsk_mmstat",             # the partition table's type
+    # The filesystem opens, no file in it is read. It still opens the media
+    # for the Access Stage (core.evidence_access): access asks whether the
+    # filesystem opens, coverage whether a file inside it was reached.
+    "tsk_fsstat",
+    "vol_symbol_check",       # the file's existence and the symbol cache
+    "ewf_info",               # the container's acquisition metadata
+    "ewf_verify",             # integrity: every byte read, nothing learned
+    "img_vmdk_chain_info",    # the snapshot chain's descriptors
+    "img_bde_info",           # the encryption metadata
+    # A conversion reads every byte and learns nothing; the export is
+    # registered with its source image, so a read of the export credits it.
+    "img_vmdk_export_raw",
+    # Mounting stays a probe: later reads name only the mount point or the
+    # device, and the plan maps those back to the image only under the
+    # mnt/<stem>/ convention, so for a mount elsewhere the binding call is
+    # the one contact the image gets.
 })
 # Namespaces whose tools read a unit without examining it. An integrity hash
 # reads every byte to compare and learns nothing about the content; a run
@@ -1128,9 +1158,22 @@ NON_PROBE_TOOLS = frozenset({
 NON_PROBE_NAMESPACES = ("hash",)
 
 
+def listed_tool_name(tool_name: str) -> str:
+    """``tool_name`` as the tool list spells it. A trace names a tool by its
+    server name (``tsk_tsk_mmls``, ``<py>:hash_hash_file``), the playbook by
+    its dotted alias (``tsk.mmls``); the lists above hold the listed form."""
+    name = (tool_name or "").strip()
+    if name.startswith("<py>:"):
+        name = name[len("<py>:"):]
+    name = name.replace(".", "_")
+    namespace, _, rest = name.partition("_")
+    return rest if rest.startswith(namespace + "_") else name
+
+
 def is_probe_tool(tool_name: str) -> bool:
-    """Whether a call to ``tool_name`` counts as examining its input paths."""
-    name = tool_name or ""
+    """Whether a call to ``tool_name`` counts as examining its input paths.
+    Any spelling of the name does (listed, dotted or the server's)."""
+    name = listed_tool_name(tool_name)
     if name in NON_PROBE_TOOLS:
         return False
     return name.split("_", 1)[0] not in NON_PROBE_NAMESPACES
@@ -1144,7 +1187,7 @@ _LISTING_TOOL_RE = re.compile(r"(?:^|_)(?:list|ls|stat|identify|inventory|fls|mm
 def reads_content(tool_name: str) -> bool:
     """Whether a call to ``tool_name`` read the content of the paths it
     names: a probe (is_probe_tool) that is not a listing of them."""
-    name = tool_name or ""
+    name = listed_tool_name(tool_name)
     return is_probe_tool(name) and not _LISTING_TOOL_RE.search(name)
 
 
@@ -1167,52 +1210,227 @@ def unseen_container_units(case_dir: str | os.PathLike | None) -> list[str]:
     return unseen_unit_paths_of_kind(case_dir, CONTAINER_KIND)
 
 
+def _blob_paths(blob: str) -> list[str]:
+    """The path tokens in a tool cmd/args blob, as written."""
+    found = list(_PATH_IN_TEXT.findall(blob or ""))
+    found += [tok.rstrip("\",')}") for tok in _CASE_REL_TOKEN.findall(blob or "")]
+    return [p for p in found if p]
+
+
 def _paths_mentioned_in_blob(blob: str) -> set[str]:
     """Normalised path tokens from a tool cmd/args blob (path identity)."""
-    found: list[str] = []
-    for m in _PATH_IN_TEXT.findall(blob or ""):
-        found.append(m)
-    for tok in _CASE_REL_TOKEN.findall(blob or ""):
-        found.append(tok.rstrip("\",')}"))
-    norms = {_norm_rel(p).casefold() for p in found if p}
+    norms = {_norm_rel(p).casefold() for p in _blob_paths(blob)}
     norms.discard("")
     return norms
 
 
-def _trace_targeted_unit(
-    unit_path: str,
-    trace_entries: list[dict] | None,
-) -> bool:
-    """True when a tool_call targeted ``unit_path`` by path identity.
+# A trace entry of an analyst's tool call names its tool (``mcp_tool``, or
+# ``<py>:<tool>`` as the command). A bare program or path as the command is
+# a call the pre-run pass made itself; it examines nothing for the analyst.
+_TOOL_NAME_RE = re.compile(r"^[a-z][a-z0-9]*_[a-z0-9_]+$")
 
-    Uses the same match rules as ``mark_paths`` / ``_any_path_match``:
-    exact case-relative equality or path-segment suffix — never bare
-    basename. Probing one host's ``…/Security.evtx`` must not authorize
-    blocking another host's identically named file.
-    """
+
+def _entry_tool(entry: dict) -> str:
+    """The listed name of the analyst tool a trace entry records, "" when no
+    analyst tool made the call."""
+    name = str(entry.get("mcp_tool") or "")
+    if not name:
+        cmd = str(entry.get("cmd") or "").split()
+        first = cmd[0] if cmd else ""
+        if first.startswith("<py>:") or _TOOL_NAME_RE.match(first):
+            name = first
+    return listed_tool_name(name) if name else ""
+
+
+def _unit_rel(unit_path: str) -> str:
+    """A unit's case-relative identity for path matching, "" for a bare name:
+    a basename alone would match another host's identically named file."""
     up = str(unit_path or "").replace("\\", "/").casefold()
-    if not up:
-        return False
-    # Unit paths in the ledger are already case-relative; tolerate abs inputs.
-    if not up.startswith(_CASE_SUBDIRS):
+    if up and not up.startswith(_CASE_SUBDIRS):
         up = _norm_rel(up).casefold()
-    if not up or "/" not in up:
-        # Refuse basename-only unit identities — no multi-host twin match.
-        return False
+    return up if "/" in up else ""
+
+
+def _entry_view(root: Path, entry: dict, plan: Optional[dict]) -> tuple:
+    """What a trace entry names, worked out once per entry: its normalised
+    paths, its text, and the images it reaches through the mount or export
+    the access plan ties to them. A Python tool's command holds no path; its
+    recorded arguments and evidence reference do."""
+    blob = " ".join(str(entry.get(k) or "") for k in ("cmd", "args", "evidence_ref"))
+    raw = _blob_paths(blob)
+    norms = {_norm_rel(p).casefold() for p in raw} - {""}
+    images = _source_images_for(root, raw, plan) if raw else set()
+    return norms, blob.casefold().replace("\\", "/"), images
+
+
+def _view_reaches(view: tuple, up: str) -> bool:
+    """Whether an entry (its _entry_view) names the unit ``up``: by path
+    identity (exact case-relative path or a path-segment suffix, never a
+    bare basename; the whole path inside quoted or JSON arguments the token
+    regex split apart counts too), or as the image a mount or export read
+    belongs to."""
+    norms, text, images = view
+    return bool(up) and ((bool(norms) and _any_path_match(up, norms))
+                         or up in text or up in images)
+
+
+def _entry_reaches(root: Path, entry: dict, up: str, plan: Optional[dict]) -> bool:
+    return _view_reaches(_entry_view(root, entry, plan), up)
+
+
+# A filesystem that does not open is a failed read of its image; one that
+# opens has not been read yet (NON_PROBE_TOOLS).
+_OPEN_ATTEMPT_TOOLS = frozenset({"tsk_fsstat"})
+
+
+def _read_attempts(root: Path, trace_entries: list[dict] | None,
+                   plan: Optional[dict] = None) -> list[tuple[dict, tuple]]:
+    """The analyst's calls in the trace that tried to read something (an
+    examining tool, or an attempt to open an image's filesystem), with what
+    each names. A call in the analyst's own words (a finding, a coverage
+    verdict) names a path without reading it."""
+    if plan is None:
+        try:
+            from core.mount_plan import load_mount_plan
+            plan = load_mount_plan(root)
+        except Exception:  # noqa: BLE001 - path identity still applies
+            plan = {}
+    from core.forensic_citation import own_words_entry
+    out: list[tuple[dict, tuple]] = []
     for e in trace_entries or []:
-        if e.get("type") != "tool_call":
+        if e.get("type") != "tool_call" or own_words_entry(e):
             continue
-        blob = f"{e.get('cmd') or ''} {e.get('mcp_tool') or ''}"
-        norms = _paths_mentioned_in_blob(blob)
-        if norms and _any_path_match(up, norms):
-            return True
-        # Contiguous full relative path in the cmd (quoted/JSON args) when
-        # the regex missed a character class — still path-identity, never
-        # basename-only (``up`` always contains a slash here).
-        cmd = blob.casefold().replace("\\", "/")
-        if up in cmd:
-            return True
-    return False
+        tool = _entry_tool(e)
+        if tool and (is_probe_tool(tool) or tool in _OPEN_ATTEMPT_TOOLS):
+            out.append((e, _entry_view(root, e, plan)))
+    return out
+
+
+def _calls_reaching(root: Path, unit_path: str, trace_entries: list[dict] | None,
+                    plan: Optional[dict] = None) -> list[dict]:
+    """The read attempts in the trace (_read_attempts) that named
+    ``unit_path``, successful or not."""
+    up = _unit_rel(unit_path)
+    if not up:
+        return []
+    return [e for e, view in _read_attempts(root, trace_entries, plan)
+            if _view_reaches(view, up)]
+
+
+# A failed call is an attempt at the unit when the tool ran on it and failed.
+# One an Atlas gate turned away, one with invalid arguments and a search
+# verb's "no match" exit examined nothing. A gate that reports the unit's own
+# emptiness is the exception: it looked at the unit and found nothing in it.
+_NOT_AN_ATTEMPT = frozenset({"gate_refusal", "analyst_error", "expected_nonzero"})
+_UNIT_STATE_GATES = ("[empty_tabular]",)
+
+
+def _failed_attempt(entry: dict) -> bool:
+    if entry.get("success") is not False:
+        return False
+    if str(entry.get("failure_class") or "") not in _NOT_AN_ATTEMPT:
+        return True
+    return str(entry.get("stderr") or "").startswith(_UNIT_STATE_GATES)
+
+
+_NO_FS_TEXT = "cannot determine file system type"
+_OFFSET_ARG_RE = re.compile(r"(?:^|\s)-o\s")
+# A Python tool's recorded arguments (a JSON text, possibly cut short, or a
+# mapping) naming a volume offset other than the first sector.
+_OFFSET_KWARG_RE = re.compile(r"""(?:^|[\s{,"'])(?:offset_sectors|offset)["']?\s*:\s*["']?[1-9]""")
+
+
+def _offset_given(entry: dict) -> bool:
+    """Whether a read named a volume offset: ``-o`` on its command line, or
+    a non-zero ``offset_sectors``/``offset`` among a Python tool's recorded
+    arguments (the rule tools/sleuthkit applies to the call itself).
+
+    The middleware keeps a call's arguments as JSON cut at 400 characters,
+    keys sorted: a very long image path can push ``offset_sectors`` out of
+    it and the record reads as "no offset". The program's own record of the
+    same read (``fls -o N ...``) normally still names it, and a miss at the
+    first sector needs every failed record to look offset-less."""
+    return bool(_OFFSET_ARG_RE.search(str(entry.get("cmd") or ""))
+                or _OFFSET_KWARG_RE.search(str(entry.get("args") or "")))
+
+
+def _misses_at_sector_zero(root: Path, unit_path: str, failed: list[dict],
+                           trace_entries: list[dict] | None,
+                           plan: Optional[dict]) -> bool:
+    """Every failed read of an image looked for a filesystem at its first
+    sector while tsk.mmls found a partition table on it. Those reads asked
+    the wrong place and say nothing about the volume."""
+    if not failed or not all(
+            _NO_FS_TEXT in f"{e.get('stderr') or ''} {e.get('error') or ''}".casefold()
+            and not _offset_given(e)
+            for e in failed):
+        return False
+    up = _unit_rel(unit_path)
+    return any(e.get("type") == "tool_call" and e.get("success") is True
+               and _entry_tool(e) in ("tsk_mmls", "tsk_mmstat")
+               and _entry_reaches(root, e, up, plan)
+               for e in trace_entries or [])
+
+
+# What reading a unit means, by the ledger's kind, for the texts that ask
+# for a read: an image's own description is not a read of it.
+_KIND_LABEL = {CONTAINER_KIND: "an image", "tabular": "a table",
+               "eventlog": "an event log", "derived": "an extraction folder"}
+
+
+def read_hint(kind: str) -> str:
+    """How a unit of the ledger kind ``kind`` is read."""
+    if kind == CONTAINER_KIND:
+        return ("open its filesystem: tsk.fls or tsk.resolve_path (a single "
+                "volume is found by itself; tsk.mmls lists the offsets when "
+                "there are several), a mount or an export; for a memory image "
+                "a vol.* plugin. tsk.mmls, tsk.fsstat and vol.symbol_check "
+                "identify an image without reading a file in it")
+    if kind == "tabular":
+        return "query it with table.table_query or table.table_grep (table.table_schema first)"
+    if kind == "eventlog":
+        return "parse it with an event-log parser"
+    if kind == "derived":
+        return "read a file inside it with an applicable tool"
+    return "parse it with the tool for its file type"
+
+
+def _read_hints(units: list[dict]) -> str:
+    """One clause per kind among ``units``: how each is read."""
+    kinds = list(dict.fromkeys(str(u.get("kind") or "") for u in units))
+    if len(kinds) == 1:
+        return read_hint(kinds[0])
+    return "; ".join(f"{_KIND_LABEL.get(k, 'a file')}: {read_hint(k)}" for k in kinds)
+
+
+def open_units_read_hint(case_dir: str | os.PathLike | None, *, limit: int = 8) -> str:
+    """How the case's unseen units are read, one clause per kind, for the
+    nudges and gates that name them; every kind's way when the ledger names
+    none of them."""
+    units = open_units(case_dir, limit=limit) if case_dir else []
+    return _read_hints(units or [{"kind": k} for k in (CONTAINER_KIND, "tabular", "")])
+
+
+# The tool a work order names first for a kind of unit; a memory image is
+# a container like a disk image but is read by a plugin.
+_READ_TOOL = {"image": "tsk.fls", "memory": "vol.pslist", "tabular": "table.table_query"}
+
+
+def read_tools(case_dir: str | os.PathLike | None, *, limit: int = 8) -> list[str]:
+    """The tools that read the case's unseen units, one per kind."""
+    if not case_dir:
+        return []
+    ledger = load_ledger(case_dir)
+    from core.evidence_items import find as _find_item
+    tools: list[str] = []
+    for u in open_units(case_dir, limit=limit):
+        kind = str(u.get("kind") or "")
+        if kind == CONTAINER_KIND:
+            kind = str((_find_item(ledger, str(u.get("path") or "")) or {}).get("kind") or "image")
+        tool = _READ_TOOL.get(kind)
+        if tool and tool not in tools:
+            tools.append(tool)
+    return tools
 
 
 def _is_tabular_tool(tool_name: str) -> bool:
@@ -1281,15 +1499,12 @@ def observe_tool_paths(
         return None
     if result_text is not None and not tabular_contact_ok(tool_name, result_text):
         return None
-    blob = f"{tool_name} {cmd_or_args}"
-    found = _PATH_IN_TEXT.findall(blob)
-    # Also split on whitespace tokens that look like evidence paths
-    for tok in _CASE_REL_TOKEN.findall(blob):
-        found.append(tok.rstrip("\",')}"))
+    found = _blob_paths(f"{tool_name} {cmd_or_args}")
     if not found:
         return None
     status = "probed"
-    # record_finding success against a path can answer
+    # A finding that names a unit answers it once a call has read it
+    # (mark_paths).
     if "record_finding" in (tool_name or ""):
         status = "answered"
     try:
@@ -1365,9 +1580,10 @@ def mark_unit_blocked(
     """Explicitly mark one ledger unit blocked, with an auditable reason.
 
     Blocked counts toward the degraded-exit floor, so this verb is guarded:
-    the trace must contain at least one prior tool call that actually
-    targeted the path (successful or failed). An agent may not talk a unit
-    into "blocked" without ever attempting it.
+    blocked records a read that failed. The trace must hold a failed call
+    of an examining tool on the path, and no successful one. An agent may
+    not talk a unit into "blocked" without attempting it, nor block one a
+    call has read.
     Returns {success, unit, error?}.
     """
     reason = (reason or "").strip()
@@ -1450,20 +1666,32 @@ def mark_unit_blocked(
             "unexamined": left[:20],
         }
 
-    # Require a real probe attempt in the trace (success or failure), matched
-    # by path identity — not bare basename (multi-host EVTX twins).
-    trace_entries = _trace_or_log(trace_entries)
-    if not _trace_targeted_unit(str(target.get("path") or ""), trace_entries):
-        return {
-            "success": False,
-            "error": (
-                f"refusing to mark blocked: no tool call in the trace has "
-                f"targeted {target.get('path')} (path identity — probing a "
-                f"same-named file under another tree does not count). "
-                f"Attempt a real probe first (table.* / single-file parser); "
-                f"blocked documents a failed attempt, it does not replace one."
-            ),
-        }
+    # blocked records a failed examination: a unit a call has read is not
+    # blocked, and neither is one no call has tried. Calls are matched by
+    # path identity, never a bare basename (multi-host EVTX twins).
+    unit_path = str(target.get("path") or "")
+    kind = str(target.get("kind") or "")
+    trace_entries = _trace_or_log(trace_entries, root)
+    try:
+        from core.mount_plan import load_mount_plan
+        plan = load_mount_plan(root)
+    except Exception:  # noqa: BLE001 - path identity still applies
+        plan = {}
+    calls = _calls_reaching(root, unit_path, trace_entries, plan)
+    refusal = _blocked_refusal(unit_path, kind, calls)
+    if refusal is None and target.get("status") in ("probed", "answered"):
+        refusal = (f"refusing to mark blocked: {unit_path} was read; blocked "
+                   "records a failed examination, not a partial one.")
+    if refusal is None and kind == CONTAINER_KIND and _misses_at_sector_zero(
+            root, unit_path, [e for e in calls if _failed_attempt(e)],
+            trace_entries, plan):
+        refusal = (f"refusing to mark blocked: every failed read of {unit_path} "
+                   "looked for a filesystem at the image's first sector ('Cannot "
+                   "determine file system type', no offset_sectors) while tsk.mmls "
+                   "lists a partition table on it. Read the volume at the "
+                   "offset_sectors tsk.mmls gives; that read decides.")
+    if refusal is not None:
+        return {"success": False, "error": refusal}
 
     target["status"] = "blocked"
     target["probed_at"] = _utcnow()
@@ -1476,14 +1704,37 @@ def mark_unit_blocked(
     return {"success": True, "unit": dict(target)}
 
 
-def _trace_or_log(trace_entries: list[dict] | None) -> list[dict]:
+def _trace_or_log(trace_entries: list[dict] | None,
+                  root: Optional[Path] = None) -> list[dict]:
     if trace_entries is not None:
         return trace_entries
     try:
+        if root is not None:
+            from core.execution_log import trace_tool_calls
+            return trace_tool_calls(root) or []
         from core.execution_log import log as _elog
         return list(_elog._entries)
     except Exception:  # noqa: BLE001
         return []
+
+
+def _blocked_refusal(path: str, kind: str, calls: list[dict]) -> Optional[str]:
+    """Why ``path`` cannot be blocked on the examining calls that named it,
+    None when one of them failed on it and none read it."""
+    read = next((e for e in calls if e.get("success") is True
+                 and is_probe_tool(_entry_tool(e))), None)
+    if read is not None:
+        by = f" by call {read['call_id']}" if read.get("call_id") else ""
+        return (f"refusing to mark blocked: {path} was read{by}; blocked records "
+                "a failed examination, not a partial one.")
+    if not any(_failed_attempt(e) for e in calls):
+        return (f"refusing to mark blocked: no tool call in the trace is a failed "
+                f"attempt to read {path} (path identity: a same-named file under "
+                "another tree does not count; a call a gate refused or one with "
+                "invalid arguments read nothing). blocked records a read that "
+                f"failed; it does not replace one. Read it - {read_hint(kind)} - "
+                "and if that read fails, mark it blocked naming the failure.")
+    return None
 
 
 def _block_item(root: Path, ledger: dict[str, Any], item: dict[str, Any], reason: str,
@@ -1496,14 +1747,115 @@ def _block_item(root: Path, ledger: dict[str, Any], item: dict[str, Any], reason
                 "error": (f"refusing to mark blocked: {item['path']} was read"
                           + (f" by call {by['call_id']}" if by.get("call_id") else "")
                           + "; blocked documents a failed examination, not a partial one.")}
-    if not _trace_targeted_unit(str(item.get("path") or ""), _trace_or_log(trace_entries)):
-        return {"success": False,
-                "error": (f"refusing to mark blocked: no tool call in the trace has targeted "
-                          f"{item['path']}. Attempt a real read first; blocked documents a "
-                          f"failed attempt, it does not replace one.")}
+    kind = CONTAINER_KIND if item.get("kind") in ("image", "memory") else ""
+    calls = _calls_reaching(root, str(item.get("path") or ""), _trace_or_log(trace_entries, root))
+    refusal = _blocked_refusal(str(item.get("path") or ""), kind, calls)
+    if refusal is not None:
+        return {"success": False, "error": refusal}
     item.update(status="blocked", blocked_reason=reason[:500])
     save_ledger(root, ledger)
     return {"success": True, "item": dict(item)}
+
+
+def rederive_container_coverage(case_dir: str | os.PathLike) -> dict[str, Any]:
+    """Recount every disk and memory image from the trace by the rule the
+    live path applies call by call: a call that read a file in it examined
+    it, blocked stands on a failed read with no successful one, anything
+    else is unseen. The ledger is the trace's cache; statuses that disagree
+    with the trace (credited by a call that reads nothing, blocked without
+    a failed read, missed by an observation that failed) are brought back
+    in line before a rerun reads them. Pure function of the trace and the
+    access plan, so a second pass changes nothing.
+
+    Returns the paths it moved: ``demoted`` (counted as read, no call read
+    them), ``unblocked`` (blocked with no failed read, or with a successful
+    one), ``credited`` (read, counted as unseen); an empty dict when the
+    case has no trace."""
+    root = Path(case_dir).resolve()
+    try:
+        from core.execution_log import trace_tool_calls
+        entries = trace_tool_calls(root)
+    except Exception:  # noqa: BLE001 - no trace, nothing to derive from
+        entries = None
+    # No call to count from (no trace, a log just opened, a document that
+    # would not parse) says nothing about what was read: nothing is
+    # recounted, rather than every examined image demoted.
+    if not entries:
+        return {}
+    ledger = load_ledger(root)
+    units = [u for u in (ledger.get("units") or {}).values()
+             if isinstance(u, dict) and u.get("kind") == CONTAINER_KIND]
+    items = [i for i in (ledger.get("items") or {}).values()
+             if isinstance(i, dict) and i.get("kind") in ("image", "memory")]
+    if not units and not items:
+        return {}
+    try:
+        from core.mount_plan import load_mount_plan
+        plan = load_mount_plan(root)
+    except Exception:  # noqa: BLE001 - path identity still applies
+        plan = {}
+    moved: dict[str, list[str]] = {"demoted": [], "unblocked": [], "credited": []}
+    changed = False
+
+    def note(key: str, path: str) -> None:
+        # An image's unit and item move together; the path is named once.
+        if not any(path in v for v in moved.values()):
+            moved[key].append(path)
+
+    attempts = _read_attempts(root, entries, plan)
+
+    def calls_on(paths: list[str]) -> tuple[list[dict], bool]:
+        ups = [u for u in (_unit_rel(p) for p in paths) if u]
+        calls = [e for e, view in attempts if any(_view_reaches(view, u) for u in ups)]
+        reads = [e for e in calls if e.get("success") is True
+                 and is_probe_tool(_entry_tool(e))]
+        return reads, any(_failed_attempt(e) for e in calls)
+
+    for u in units:
+        path = str(u.get("path") or "")
+        reads, failed = calls_on([path])
+        cur = str(u.get("status") or "unseen")
+        if reads:
+            new = cur if cur in ("probed", "answered") else "probed"
+        elif cur == "blocked" and failed:
+            new = cur
+        else:
+            new = "unseen"
+        if new == cur:
+            continue
+        note("unblocked" if cur == "blocked" else
+             "credited" if new == "probed" else "demoted", path)
+        u.update(status=new, probed_at=_utcnow() if new != "unseen" else None)
+        if cur == "blocked":
+            u["note"] = ""
+        changed = True
+    for it in items:
+        path = str(it.get("path") or "")
+        reads, failed = calls_on([path, *(it.get("segments") or [])])
+        cur = str(it.get("status") or "unseen")
+        if reads:
+            # An item examined by a call the rule no longer counts names
+            # the first call that did read it.
+            by_tool = str((it.get("examined_by") or {}).get("tool") or "")
+            if cur == "examined" and is_probe_tool(by_tool):
+                continue
+            if cur != "examined":
+                note("unblocked" if cur == "blocked" else "credited", path)
+                it.update(status="examined", examined_at=_utcnow(), blocked_reason="")
+            from core.evidence_items import MAX_CALLS
+            ids = [str(e["call_id"]) for e in reads if e.get("call_id")]
+            it.update(examined_by={"call_id": ids[0] if ids else "",
+                                   "tool": _entry_tool(reads[0])},
+                      calls=list(dict.fromkeys(ids))[:MAX_CALLS])
+            changed = True
+        elif cur != "unseen" and not (cur == "blocked" and failed):
+            note("unblocked" if cur == "blocked" else "demoted", path)
+            it.update(status="unseen", touched=[], calls=[], examined_by=None,
+                      examined_at=None, blocked_reason="")
+            changed = True
+    if changed:
+        save_ledger(root, ledger)
+    return {k: v for k, v in moved.items() if v}
 
 
 def reset_unit_statuses(case_dir: str | os.PathLike) -> int:
@@ -1585,7 +1937,8 @@ def recent_gate_repair_active(entries: list[dict] | None, *, window: int = 12) -
 def format_ledger_nudge(case_dir: str | os.PathLike | None) -> str:
     if not case_dir:
         return ""
-    gaps = open_unit_paths(case_dir, limit=8)
+    units = open_units(case_dir, limit=8)
+    gaps = [str(u.get("path")) for u in units]
     stats = coverage_stats(load_ledger(case_dir))
     if not gaps:
         return (
@@ -1597,6 +1950,6 @@ def format_ledger_nudge(case_dir: str | os.PathLike | None) -> str:
     lines = ", ".join(gaps[:6])
     return (
         f"[coverage ledger] {stats.get('unseen', 0)} high-value units still "
-        f"unseen (total={stats.get('total', 0)}). Probe with table.* / "
-        f"single-file parsers before any report close-out. Examples: {lines}"
+        f"unseen (total={stats.get('total', 0)}). Read each before any report "
+        f"close-out ({_read_hints(units)}). Examples: {lines}"
     )

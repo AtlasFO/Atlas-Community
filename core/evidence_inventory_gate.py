@@ -136,6 +136,12 @@ _ABSENT_SKIP: dict[str, str] = {
     "email": "No email stores — skip mail extractors.",
     "live": "No live endpoint — skip live.*",
 }
+# Artifact classes a disk image holds as well as a package delivers them
+# loose: with an image present, their absence as loose files says nothing
+# about whether the case holds them.
+_INSIDE_DISK_CLASSES = frozenset({"windows_eventlog", "email"})
+_INSIDE_DISK_SKIP = ("Not delivered as loose files; the disk images may hold "
+                     "them — open an image to find out.")
 
 
 def _path_has_parsed_token(path: str) -> bool:
@@ -152,6 +158,7 @@ def build_processing_assessment(
     samples_by_class: dict[str, list[str]],
     top_level: Optional[list[dict[str, Any]]] = None,
     file_count: int = 0,
+    ambiguous: Optional[list[str]] = None,
 ) -> dict[str, Any]:
     """Build the evidence reference map + processing strategy.
 
@@ -348,9 +355,21 @@ def build_processing_assessment(
         })
 
     if "memory" in present_set:
+        unsure = list(ambiguous or [])
+        # A raw image with no signature is a memory image only perhaps: say
+        # which files those are, so a memory tool is neither forbidden nor
+        # promised.
+        reason = ("Memory image present — use when memory analysis is relevant."
+                  if (counts or {}).get("memory") or not unsure else "")
+        if unsure:
+            reason = (reason + " " if reason else "") + (
+                "Raw image(s) with no recognised disk or memory signature: "
+                + ", ".join(unsure[:5]) + (" and more" if len(unsure) > 5 else "")
+                + "; a memory tool (vol.*) or a disk tool (tsk.*) reading one "
+                "settles which it is.")
         needs_processing.append({
             "class": "memory",
-            "reason": "Memory image present — use when memory analysis is relevant.",
+            "reason": reason,
             "sample_raw": list((samples_by_class or {}).get("memory") or [])[:5],
         })
 
@@ -370,6 +389,10 @@ def build_processing_assessment(
 
     skip = [
         {
+            "class": cls,
+            "reason": _INSIDE_DISK_SKIP,
+            "meaning": "Not loose in the package; possibly inside the disk images.",
+        } if cls in _INSIDE_DISK_CLASSES and "disk" in present_set else {
             "class": cls,
             "reason": _ABSENT_SKIP[cls],
             "meaning": "Tool family unavailable — media class not in the package.",
@@ -444,12 +467,14 @@ def build_evidence_inventory(case_dir: str | os.PathLike) -> dict[str, Any]:
 
     from core.evidence_profile import (
         classify_path,
+        declared_kinds,
         ensure_evidence_profile,
         high_value_tabular_index,
         present_class_set,
     )
 
     profile = ensure_evidence_profile(root, refresh=True)
+    declared = declared_kinds(root)
     present = sorted(present_class_set(profile))
     absent = list(profile.get("absent_classes") or [])
     samples = profile.get("samples") or {}
@@ -462,7 +487,7 @@ def build_evidence_inventory(case_dir: str | os.PathLike) -> dict[str, Any]:
         if name.startswith("."):
             continue
         full = evidence / name
-        if full.is_file() and classify_path(full) == "tabular":
+        if full.is_file() and classify_path(full, declared.get(f"evidence/{name}", "")) == "tabular":
             rel = f"evidence/{name}"
             if rel not in high_value:
                 high_value.append(rel)
@@ -481,7 +506,7 @@ def build_evidence_inventory(case_dir: str | os.PathLike) -> dict[str, Any]:
         if full.is_file():
             try:
                 entry["size"] = full.stat().st_size
-                entry["class"] = classify_path(full)
+                entry["class"] = classify_path(full, declared.get(f"evidence/{name}", ""))
             except OSError:
                 pass
         else:
@@ -504,6 +529,7 @@ def build_evidence_inventory(case_dir: str | os.PathLike) -> dict[str, Any]:
         samples_by_class=samples,
         top_level=top,
         file_count=file_count,
+        ambiguous=list(profile.get("ambiguous") or []),
     )
 
     mark_inventory_complete(root, summary={

@@ -13,6 +13,7 @@ under review. The reviewer only ever consumes digests of it.
 """
 from __future__ import annotations
 
+import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -107,10 +108,39 @@ def find_latest_report(case_dir: Path) -> Path | None:
     for sub in ("reports", "analysis"):
         d = case_dir / sub
         if d.is_dir():
+            # The indicator list (<CASE_ID>_iocs.md) is written beside the
+            # report and is not it.
             candidates += [p for p in d.glob("*.md")
                            if p.is_file()
-                           and not p.name.endswith(_REVIEW_ARTIFACT_SUFFIXES)]
+                           and not p.name.endswith(_REVIEW_ARTIFACT_SUFFIXES)
+                           and not p.name.endswith("_iocs.md")]
     return max(candidates, key=lambda p: p.stat().st_mtime, default=None)
+
+
+def run_stats_from_disk(case_dir: Path, entries: list[dict]) -> dict:
+    """The run statistics a grading review reads, for a run not in this
+    process: counts from its trace entries, the rest from the case's
+    .atlas/run_status.json (absent for a copied or killed case)."""
+    try:
+        status = json.loads((Path(case_dir) / ".atlas" / "run_status.json")
+                            .read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        status = {}
+    if not isinstance(status, dict):
+        status = {}
+    calls = [{"name": str(e.get("mcp_tool") or (str(e.get("cmd") or "?").split() or ["?"])[0]),
+              "error": e.get("success") is False}
+             for e in entries if e.get("type") == "tool_call"]
+    return {
+        "stopped_reason": status.get("stopped_reason") or "(not recorded)",
+        "finish_status": status.get("finish_status"),
+        "turns": status.get("turns"),
+        "duration_seconds": status.get("duration_seconds"),
+        "input_tokens": status.get("input_tokens"),
+        "output_tokens": status.get("output_tokens"),
+        "findings_recorded": sum(1 for e in entries if e.get("type") == "finding"),
+        "tool_calls": calls,
+    }
 
 
 def ground_truth_path(case_dir: Path) -> Path | None:
@@ -680,7 +710,7 @@ class Reviewer:
                 f"process bound only to this case.")
         return entries, disk_case_id
 
-    def objective_metrics_data(self) -> dict:
+    def objective_metrics_data(self, entries: list[dict] | None = None) -> dict:
         """Structured accuracy_compare + coverage_report results against the
         live trace, when a ground-truth answer key ships with the case.
         Best-effort: unavailable sections are None with the reason kept."""
@@ -695,8 +725,16 @@ class Reviewer:
         if gt is not None:
             data["ground_truth"] = gt.name
             try:
-                from tools.accuracy import accuracy_compare
-                r = accuracy_compare(str(gt))
+                if entries is not None:
+                    # The run's own trace, read from disk: the process log
+                    # belongs to whatever this process ran, if anything.
+                    import json as _json
+                    from tools.accuracy import compare_findings
+                    r = compare_findings(_json.loads(gt.read_text(encoding="utf-8")),
+                                         [e for e in entries if e.get("type") == "finding"])
+                else:
+                    from tools.accuracy import accuracy_compare
+                    r = accuracy_compare(str(gt))
                 if r.get("unscorable"):
                     # A CTF flag/hash answer key, not finding-shaped GT — record
                     # it as unscorable so the reviewer does NOT read a false 0%.
@@ -725,10 +763,11 @@ class Reviewer:
             try:
                 import json as _json
                 from core.brain import gt_exposure as _gt_exposure
-                entries, _ = self._resolve_run_trace()
-                if entries:
+                run_entries = (entries if entries is not None
+                               else self._resolve_run_trace()[0])
+                if run_entries:
                     exp = _gt_exposure.audit(
-                        _json.loads(gt.read_text(encoding="utf-8")), entries)
+                        _json.loads(gt.read_text(encoding="utf-8")), run_entries)
                     data["gt_exposure"] = {
                         "summary": exp["summary"],
                         "not_reported": [
@@ -743,8 +782,15 @@ class Reviewer:
             except Exception as e:
                 data["errors"].append(f"gt exposure audit unavailable: {e}")
         try:
-            from tools.coverage import coverage_report
-            r = coverage_report()
+            if entries is not None:
+                # The run's own trace, read from disk: binding the process
+                # log to it would rewrite the trace.
+                from tools.coverage import trace_coverage
+                r = trace_coverage([e for e in entries if e.get("type") == "finding"],
+                                   [e for e in entries if e.get("type") == "dair_call"])
+            else:
+                from tools.coverage import coverage_report
+                r = coverage_report()
             if r.get("success", True) and r.get("summary"):
                 data["coverage"] = {
                     "summary": r["summary"],
@@ -808,9 +854,10 @@ class Reviewer:
                 "quality, evidence lineage, and internal consistency, exactly "
                 "as you would a case with no ground truth.")
         sections += [f"({e})" for e in data.get("errors") or []]
-        return "\n\n".join(sections) or "(no objective metrics available — " \
+        body = "\n\n".join(sections) or "(no objective metrics available — " \
             "no ground_truth.json ships with this case; judge on process " \
             "quality and internal consistency)"
+        return body
 
     def _build_context(self, run_stats: dict, question: str,
                        metrics: dict | None = None,
@@ -893,7 +940,8 @@ class Reviewer:
             self.ui.warn(f"verdict repair re-ask failed: {e}")
         return "NEEDS WORK"
 
-    def review(self, run_stats: dict, question: str = "") -> dict:
+    def review(self, run_stats: dict, question: str = "", *,
+               trace_path: Path | None = None) -> dict:
         """Grade the completed run; write and return the review.
 
         The trace digest, case_id, and output filename are bound to this
@@ -901,9 +949,22 @@ class Reviewer:
         session beacon. A case_id mismatch against the live singleton is a
         hard error (CrossCaseTraceError), because the objective-metrics tools
         read that singleton.
+
+        ``trace_path`` grades a run that is not in this process (``atlas
+        review``): entries and case id come from that file, read only. The
+        process log is never consulted, since binding it rewrites the trace
+        it binds to; accuracy and TTP coverage are computed from the file's
+        own entries.
         """
-        entries, case_id = self._resolve_run_trace()
-        metrics = self.objective_metrics_data()
+        if trace_path is not None:
+            # A run outside this process: its entries come from its trace
+            # file, read only, and nothing reads the process log.
+            case_id, entries = load_trace_from_disk(Path(trace_path))
+            case_id = case_id or self.case_dir.name
+            metrics = self.objective_metrics_data(entries=entries)
+        else:
+            entries, case_id = self._resolve_run_trace()
+            metrics = self.objective_metrics_data()
         context = self._build_context(run_stats, question, metrics=metrics,
                                       entries=entries, case_id=case_id)
         self.ui.info(f"reviewer model: {self.client.model} (independent pass)")

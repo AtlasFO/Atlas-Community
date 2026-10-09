@@ -128,6 +128,11 @@ def write_exit_report(case_dir: str | os.PathLike, reason: str, *,
     if not force and _report_already_written(root, agent):
         return {"written": False, "skipped": "official_report_exists"}
 
+    # What the floor owes without a model: the next steps that rest on what
+    # is still open, and the indicator files its Indicators section points
+    # at, both written before it is assembled, as the close-out does.
+    _derive_next_steps(root)
+    _write_indicator_files(root)
     out = exit_report_path(root)
     out.parent.mkdir(parents=True, exist_ok=True)
     _atomic_write(out, _with_banner(_deterministic_report(root), reason,
@@ -212,14 +217,10 @@ def close_out_reports(case_dir: str | os.PathLike, *, reason: str,
     root = Path(case_dir)
     reports = root / "reports"
     reports.mkdir(parents=True, exist_ok=True)
-    # The next investigative steps rest on what is still open at report
-    # time; they are recorded before the reports read the plan.
-    try:
-        from core.case_config import get_report_language
-        from core.recommendations import derive_next_steps
-        derive_next_steps(root, get_report_language(root))
-    except Exception as e:  # noqa: BLE001 - the reports are written
-        print(f"atlas: close-out could not derive the next steps ({e})", file=sys.stderr)
+    _derive_next_steps(root)
+    # The indicator list is a deliverable of its own, owed on this path as on
+    # the tool path, and written first: the reports point at it.
+    indicator_files = _write_indicator_files(root)
     targets = [(reports / f"host_{h}_report.md", h) for h in hosts_owed_a_report(root)]
     targets.append((reports / "estate_report.md", ""))
     written: list[str] = []
@@ -234,15 +235,7 @@ def close_out_reports(case_dir: str | os.PathLike, *, reason: str,
             errors[str(path)] = str(e)
             print(f"atlas: close-out could not write {path.name} ({e})",
                   file=sys.stderr)
-    indicator_files: dict[str, Any] = {}
     if written:
-        # The indicator list is a deliverable of its own, owed on this
-        # path as on the tool path.
-        try:
-            from core.ioc_catalog import write_indicator_files
-            indicator_files = write_indicator_files(root) or {}
-        except Exception as e:  # noqa: BLE001 - the reports are written
-            print(f"atlas: close-out could not write the indicator files ({e})", file=sys.stderr)
         last = Path(written[-1])
         record_report_stage(root, STAGE_COMPLETE, reason, path=last,
                             source=CLOSE_OUT_SOURCE)
@@ -250,6 +243,28 @@ def close_out_reports(case_dir: str | os.PathLike, *, reason: str,
     return {"written": written, "errors": errors,
             "hosts": [h for _p, h in targets if h], "source": CLOSE_OUT_SOURCE,
             "indicator_files": indicator_files}
+
+
+def _derive_next_steps(root: Path) -> None:
+    """Record the next investigative steps that rest on what is still open,
+    before a report reads the plan. Local: no model call."""
+    try:
+        from core.case_config import get_report_language
+        from core.recommendations import derive_next_steps
+        derive_next_steps(root, get_report_language(root))
+    except Exception as e:  # noqa: BLE001 - the report is written whatever the plan does
+        print(f"atlas: could not derive the next steps ({e})", file=sys.stderr)
+
+
+def _write_indicator_files(root: Path) -> dict[str, Any]:
+    """Write reports/<CASE_ID>_iocs.md and .csv from the recorded beliefs.
+    Local: no model call."""
+    try:
+        from core.ioc_catalog import write_indicator_files
+        return write_indicator_files(root) or {}
+    except Exception as e:  # noqa: BLE001 - the report is written without them
+        print(f"atlas: could not write the indicator files ({e})", file=sys.stderr)
+        return {}
 
 
 def _projected_report(root: Path, path: Path, *, allow_llm: bool) -> str:

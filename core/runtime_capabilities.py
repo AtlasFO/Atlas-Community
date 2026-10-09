@@ -32,12 +32,6 @@ _LOOP_FUSE_OPEN_TOOLS = frozenset({
     "ewf.mount_ntfs",
 })
 
-_TSK_OPEN_TOOLS = frozenset({
-    "tsk_mmls", "tsk.mmls",
-    "tsk_fls", "tsk.fls",
-})
-
-
 def is_loop_fuse_open_tool(tool_name: str) -> bool:
     n = (tool_name or "").strip()
     if not n:
@@ -53,7 +47,11 @@ def is_loop_fuse_open_tool(tool_name: str) -> bool:
 
 
 def tsk_disk_open_attempted(case_dir: str | None = None) -> bool:
-    """True when disk media is opened (access stage) or TSK succeeded this process."""
+    """True when disk media is opened (access stage) or TSK succeeded this process.
+
+    Orientation for a mount, not the Access Stage's open: the partition
+    table tsk.mmls lists is what an offset mount needs, so it counts here
+    while it opens no media (core.evidence_access.is_tsk_open_tool)."""
     try:
         from core.evidence_access import any_media_opened
         if any_media_opened(case_dir):

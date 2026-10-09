@@ -161,3 +161,34 @@ def test_a_one_part_answer_taken_on_a_link_is_itemised_in_the_report():
     assert any("answered through the linked finding" in x and "F-004" in x for x in lines)
     task["parts"][0].pop("bound_by")
     assert _part_lines(task, {"C1": "F-004"}, "en") == []
+
+
+def test_a_belief_stating_two_values_of_the_kind_is_refused_with_both_until_one_is_typed(tmp_path):
+    d = tmp_path / "N"
+    (d / ".atlas").mkdir(parents=True)
+    (d / "CASE.md").write_text("**Case ID:** N\n\n## Investigation Requests\n- Network — the C2 IP.\n",
+                               encoding="utf-8")
+    reconcile_case_md(d)
+    tid = load_tasks(d)["tasks"][0]["id"]
+    cid = _claim(d, "Beacon traffic left 10.0.0.5 for 203.0.113.9 every 60 s.")
+    r = update_task(d, tid, parts={"p1": {"claim_ids": [cid]}})
+    assert not r["success"] and r["gate"] == "task_part_unsupported"
+    assert "2 ip values (10.0.0.5, 203.0.113.9)" in r["error"] and "claim.add_indicators" in r["error"]
+    cg.set_claim_indicators(d, cid, [{"type": "ip", "value": "203.0.113.9", "side": "attacker"}])
+    r = update_task(d, tid, parts={"p1": {"claim_ids": [cid]}})
+    assert r["success"], r
+    assert next(p for p in r["task"]["parts"] if p["id"] == "p1")["value"] == "203.0.113.9"
+
+
+def test_a_belief_typing_every_value_it_states_is_not_told_to_type_one(tmp_path):
+    d = tmp_path / "N"
+    (d / ".atlas").mkdir(parents=True)
+    (d / "CASE.md").write_text("**Case ID:** N\n\n## Investigation Requests\n- Network — the C2 IP.\n",
+                               encoding="utf-8")
+    reconcile_case_md(d)
+    tid = load_tasks(d)["tasks"][0]["id"]
+    cid = _claim(d, "Beacon traffic left 10.0.0.5 for 203.0.113.9 every 60 s.")
+    cg.set_claim_indicators(d, cid, [{"type": "ip", "value": "10.0.0.5", "side": "victim"},
+                                     {"type": "ip", "value": "203.0.113.9", "side": "attacker"}])
+    r = update_task(d, tid, parts={"p1": {"claim_ids": [cid]}})
+    assert not r["success"] and "already typed" in r["error"] and "claim.add_indicators" not in r["error"]

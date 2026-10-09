@@ -99,13 +99,19 @@ class TestKnownArtifacts:
         """A run that wrote the listing cannot claim not to know."""
         case = _case(tmp_path, listing=[("h1", "Security.evtx", "20971520")])
         known = av.known_artifacts(case)
-        assert "security.evtx" in known
-        assert known["security.evtx"]["size"] == 20_971_520
+        assert "h1|security.evtx" in known
+        assert known["h1|security.evtx"]["size"] == 20_971_520
 
     def test_the_largest_sighting_wins(self, tmp_path):
         case = _case(tmp_path, listing=[("h1", "Security.evtx", str(EMPTY_EVTX)),
+                                        ("h1", "Security.evtx", "134217728")])
+        assert av.known_artifacts(case)["h1|security.evtx"]["size"] == 134_217_728
+
+    def test_two_hosts_copies_are_two_artifacts(self, tmp_path):
+        case = _case(tmp_path, listing=[("h1", "Security.evtx", "20971520"),
                                         ("h2", "Security.evtx", "134217728")])
-        assert av.known_artifacts(case)["security.evtx"]["size"] == 134_217_728
+        assert sorted(v["host"] for v in av.known_artifacts(case).values()
+                      if v["name"] == "Security.evtx") == ["h1", "h2"]
 
 
 class TestUnexaminedHighValue:
@@ -653,3 +659,93 @@ class TestWhatCountsAsARead:
             {"type": "finding", "description": "browser history was reviewed"},
             {"type": "tool_call", "mcp_tool": "misc_sqlite_query", "cmd": "sqlite3 /x/chrome_history_export.db"}])
         assert "History" in self._owed(case)
+
+
+def _hosts_case(tmp_path, listings, *, trace_cmds=()):
+    """A case whose Evidence Links name CORP-WS01 and CORP-WS02 and whose
+    analysis/ holds MFT-style listings without a host column."""
+    case = _case(tmp_path, trace_cmds=trace_cmds)
+    (case / ".atlas" / "evidence_links.json").write_text(json.dumps({
+        "schema_version": "1.0", "entries": [{"label": "CORP-WS01"}, {"label": "CORP-WS02"}]}),
+        encoding="utf-8")
+    for name, rows in listings.items():
+        lines = ["EntryNumber,ParentPath,FileName,FileSize"]
+        lines += [f"{i},{parent},{fname},{size}" for i, (parent, fname, size) in enumerate(rows, start=40)]
+        (case / "analysis" / name).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return case
+
+
+PROFILES = {
+    "ws01_mft.csv": [(".\\Users\\jane.doe", "NTUSER.DAT", 262_144),
+                     (".\\Users\\john.roe", "NTUSER.DAT", 524_288)],
+    "ws02_mft.csv": [(".\\Users\\jane.doe", "NTUSER.DAT", 786_432)],
+}
+
+
+class TestListingRowsByHostAndPath:
+    """A listing row is one artifact per host and path in the image: two
+    profiles' or two hosts' NTUSER.DAT are three things to read, not one."""
+
+    def test_each_profile_on_each_host_is_its_own_entry(self, tmp_path):
+        case = _hosts_case(tmp_path, PROFILES)
+        rows = sorted((v["host"], v["lpath"]) for v in av.known_artifacts(case).values()
+                      if v["name"] == "NTUSER.DAT")
+        assert rows == [("CORP-WS01", "Users/jane.doe/NTUSER.DAT"), ("CORP-WS01", "Users/john.roe/NTUSER.DAT"),
+                        ("CORP-WS02", "Users/jane.doe/NTUSER.DAT")]
+
+    def test_reading_one_profiles_copy_leaves_the_others_owed(self, tmp_path):
+        case = _hosts_case(tmp_path, PROFILES, trace_cmds=[
+            "ez_recmd_hive -f evidence/ws01/Users/john.roe/NTUSER.DAT --csv analysis/john"])
+        owed = sorted((a["host"], a["lpath"]) for a in av.unexamined_high_value(case, limit=50)
+                      if a["name"] == "NTUSER.DAT")
+        assert owed == [("CORP-WS01", "Users/jane.doe/NTUSER.DAT"), ("CORP-WS02", "Users/jane.doe/NTUSER.DAT")]
+
+    def test_an_extracted_copy_credits_the_rows_of_its_name(self, tmp_path):
+        case = _hosts_case(tmp_path, PROFILES, trace_cmds=[
+            "tsk_icat image 41 exports/NTUSER.DAT", "ez_recmd_hive -f exports/NTUSER.DAT --csv analysis/out"])
+        assert not [a for a in av.unexamined_high_value(case, limit=50) if a["name"] == "NTUSER.DAT"]
+
+    def test_a_folder_row_is_read_by_a_call_under_it(self):
+        row = {"name": "Recent", "lpath": "Users/jane.doe/AppData/Roaming/Microsoft/Windows/Recent"}
+        assert av._examined_in_trace(
+            row, "ez_lecmd -d mnt/ws01/fs/users/jane.doe/appdata/roaming/microsoft/windows/recent/ --csv analysis")
+        assert av._examined_in_trace(row, 'ez_lecmd -d "c:\\users\\jane.doe\\appdata\\roaming\\microsoft'
+                                          '\\windows\\recent"')
+        assert not av._examined_in_trace(row, "ez_lecmd -d mnt/ws01/fs/users/jane.doe/appdata/roaming/microsoft/windows")
+
+    def test_two_listings_of_one_volume_give_one_entry_per_path(self, tmp_path):
+        rows = [(".\\Users\\jane.doe", "NTUSER.DAT", 262_144)]
+        case = _hosts_case(tmp_path, {"mft.csv": rows, "usn.csv": rows})
+        assert [v["lpath"] for v in av.known_artifacts(case).values()
+                if v["name"] == "NTUSER.DAT"] == ["Users/jane.doe/NTUSER.DAT"]
+
+    def test_a_listing_without_host_or_folder_folds_by_name(self, tmp_path):
+        case = _case(tmp_path)
+        (case / "analysis" / "names.csv").write_text(
+            "FileName,FileSize\nNTUSER.DAT,262144\nNTUSER.DAT,524288\n", encoding="utf-8")
+        known = av.known_artifacts(case)
+        assert [k for k, v in known.items() if v["name"] == "NTUSER.DAT"] == ["ntuser.dat"]
+        assert known["ntuser.dat"]["size"] == 524_288
+
+    def test_a_volume_with_no_host_shows_a_host_tagged_row(self, tmp_path):
+        from core.mount_plan import save_mount_plan
+        case = _hosts_case(tmp_path, {"ws01_mft.csv": PROFILES["ws01_mft.csv"]})
+        profile = case / "mnt" / "disk" / "fs" / "Users" / "jane.doe"
+        profile.mkdir(parents=True)
+        (profile / "NTUSER.DAT").write_bytes(b"regf" + b"\x00" * 64)
+        os.truncate(profile / "NTUSER.DAT", 262_144)
+        (case / "evidence").mkdir(exist_ok=True)
+        (case / "evidence" / "disk.E01").write_bytes(b"EVF" * 16)
+        save_mount_plan(case, {"images": [{"path": str(case / "evidence" / "disk.E01"), "stem": "disk",
+                                           "status": "mounted",
+                                           "mount_result": {"success": True,
+                                                            "mount_point": str(case / "mnt" / "disk" / "fs")}}]})
+        owed = [a for a in av.unexamined_high_value(case, limit=50) if a["name"] == "NTUSER.DAT"]
+        assert sorted(a["path"] or a["lpath"] for a in owed) == [
+            "Users/john.roe/NTUSER.DAT", "mnt/disk/fs/Users/jane.doe/NTUSER.DAT"]
+
+    def test_the_nudge_names_the_profile_and_the_host(self, tmp_path):
+        case = _hosts_case(tmp_path, PROFILES)
+        text = av.format_value_nudge(av.unexamined_high_value(case, limit=50))
+        assert "at Users/john.roe/NTUSER.DAT [CORP-WS01]" in text
+        assert "at Users/jane.doe/NTUSER.DAT [CORP-WS02]" in text

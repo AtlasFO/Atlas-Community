@@ -373,14 +373,16 @@ def _event_log_obligations(root: Path) -> list[dict[str, Any]]:
 
 
 def _ioc_pivot_obligations(root: Path) -> list[dict[str, Any]]:
-    """Indicators found mid-run must be carried back across the evidence.
+    """Indicators found mid-run, and those the analyst named, must be
+    carried across the evidence.
 
     See core/ioc_pivots.py — a belief that names an IP, account or host
     creates a search obligation against the relevant sources the case
-    actually holds, including other hosts' material.
+    actually holds, including other hosts' material; so does an indicator
+    in the brief's prior knowledge.
     """
     try:
-        from core.ioc_pivots import open_pivots
+        from core.ioc_pivots import _ANALYST_ORIGIN, open_pivots
         pending = open_pivots(root)
     except Exception:  # noqa: BLE001
         return []
@@ -388,13 +390,17 @@ def _ioc_pivot_obligations(root: Path) -> list[dict[str, Any]]:
         return []
     preview = [f"{p['ioc']} ({len(p['pending'])} source(s))"
                for p in pending[:6]]
+    named = sum(1 for p in pending if p.get("origin") == _ANALYST_ORIGIN)
     return [{
         "id": "ioc_pivots_closed",
         "kind": "pivot",
         "met": False,
         "detail": (
-            f"{len(pending)} indicator(s) recorded but not searched for "
-            f"across relevant evidence: {preview}"
+            f"{len(pending)} indicator(s) not yet searched for across "
+            "relevant evidence"
+            + (f" ({named} named by the analyst in CASE.md; judge a hit "
+               "against their statement)" if named else "")
+            + f": {preview}"
         ),
     }]
 

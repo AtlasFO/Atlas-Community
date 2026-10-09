@@ -12,6 +12,7 @@
   .md-msg { font-size: var(--fs-small); margin-left: 4px; }
   .md-msg.err { color: var(--bad); }
   .md-msg.ok { color: var(--ok); }
+  .md-msg.warn { color: var(--warn); }
   .md-msg.dirty { color: var(--fg-2); }
   #md-editor {
     width: 100%; box-sizing: border-box; min-height: 60vh;
@@ -64,6 +65,15 @@ function setMsg(text, cls) {
   if (el) { el.textContent = text; el.className = `md-msg ${cls || ''}`; }
 }
 
+// A ``` line that never closes turns the rest of CASE.md into code that no
+// parser reads; the same words the CLI prints at a run's start.
+function fenceNote(f) {
+  return `CASE.md line ${f.line} opens a code block (\`\`\`) that is never closed, so everything after it `
+    + 'reads as code and is not read'
+    + (f.hidden_requests ? `; ${f.hidden_requests} investigation request(s) are hidden by it` : '')
+    + '. Close the block with a ``` line of its own.';
+}
+
 function markDirty() {
   const ta = document.getElementById('md-editor');
   if (ta && ta.value !== savedContent) setMsg('Unsaved changes. Ctrl/Cmd+S to save.', 'dirty');
@@ -74,11 +84,12 @@ async function save() {
   const ta = document.getElementById('md-editor');
   setMsg('Saving…', 'dirty');
   try {
-    await AtlasShell.apiPost('case/case_md/save', {
+    const r = await AtlasShell.apiPost('case/case_md/save', {
       case: currentCase, content: ta.value,
     });
     savedContent = ta.value;
-    setMsg('Saved.', 'ok');
+    if (r && r.unclosed_fence) setMsg(`Saved, but ${fenceNote(r.unclosed_fence)}`, 'warn');
+    else setMsg('Saved.', 'ok');
   } catch (e) { setMsg(e.message, 'err'); }
 }
 
@@ -258,6 +269,7 @@ function render(cd, data, canEdit) {
     <textarea id="md-editor" spellcheck="false" ${canEdit ? '' : 'readonly'}>${esc(savedContent)}</textarea>
     ${canEdit ? '' : '<p class="field-hint" style="margin-top:6px;">Viewer role — read only. Ask an analyst or admin to make changes.</p>'}`;
   const ta = document.getElementById('md-editor');
+  if (data.unclosed_fence) setMsg(fenceNote(data.unclosed_fence), 'warn');
   if (canEdit) {
     ta.addEventListener('input', markDirty);
     document.getElementById('md-save-btn').addEventListener('click', save);

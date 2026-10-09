@@ -147,9 +147,16 @@ _ABSENCE_RE = re.compile(
     r")"
 )
 
-# Column names an artifact listing may use for name and size.
+# Column names an artifact listing may use for name, size and the folder
+# the name sits in.
 _NAME_COLS = ("filename", "name", "file", "path", "filepath", "file_name")
 _SIZE_COLS = ("filesize", "size", "file_size", "bytes", "length")
+_PARENT_COLS = ("parentpath", "parent_path", "parent path", "directory")
+# The ways a listing writes the root of the image it lists: a drive letter,
+# "./", the NT long-path, device and volume prefixes, a leading "/".
+# Universal path shapes, not a case's.
+_ROOT_PREFIX_RE = re.compile(
+    r"(?i)^(?:\./+|//\?/|[a-z]:/+|/*device/harddiskvolume\d+/+|/*volume\{[^}]*\}/+|/+)+")
 
 MAX_INDEXED_ROWS = 200_000
 HIGH_VALUE_THRESHOLD = 70
@@ -202,8 +209,15 @@ def rank_artifacts(entries: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
         item["why"] = why
         item["empty"] = looks_empty(name, size)
         scored.append(item)
-    scored.sort(key=lambda i: (-i["score"], -(i.get("size") or 0), i["name"]))
+    scored.sort(key=_rank_order)
     return scored
+
+
+def _rank_order(item: dict[str, Any]) -> tuple:
+    """Richest first; equal ones by name, host and where they sit, so two
+    profiles' copies of one file keep a stable order."""
+    return (-item["score"], -(item.get("size") or 0), item["name"], item.get("host") or "",
+            item.get("path") or item.get("lpath") or "")
 
 
 # ── what an opened volume holds ──────────────────────────────────────────
@@ -388,10 +402,25 @@ def volume_artifacts(case_dir: str | os.PathLike) -> list[dict[str, Any]]:
 
 # ── what the case knows exists ───────────────────────────────────────────
 
+def _listing_path(value: str, parent: str = "") -> str:
+    """A listing row's path inside its image ("Users/jane.doe/NTUSER.DAT"):
+    the name column when it holds a whole path, else the parent column and
+    the name; "" when the row gives no folder."""
+    v = str(value or "").replace("\\", "/").strip()
+    if "/" not in v:
+        folder = str(parent or "").replace("\\", "/").strip().rstrip("/")
+        if not folder:
+            return ""
+        v = f"{folder}/{v}"
+    return _ROOT_PREFIX_RE.sub("", v).strip("/")
+
+
 def known_artifacts(case_dir: str | os.PathLike) -> dict[str, dict[str, Any]]:
-    """Every artifact the case has evidence of, keyed by lowercase name
-    for a pathless sighting (a listing row) and by case-relative path for
-    one found on a volume.
+    """Every artifact the case has evidence of, keyed by case-relative path
+    for one found on a volume, by host and path inside the image for a
+    listing row ("CORP-WS01|users/jane.doe/ntuser.dat"; the host is "" when
+    the listing does not say), and by lowercase name for a sighting that
+    gives neither.
 
     Two sources, both things the run produced or was given: listings it
     generated (MFT/directory CSVs under analysis/, which is how a run learns
@@ -404,20 +433,27 @@ def known_artifacts(case_dir: str | os.PathLike) -> dict[str, dict[str, Any]]:
 
     def _add(name: str, size: Optional[int], where: str, host: str = "",
              path: str = "", abs_path: str = "", kind: str = "file",
-             roots: Optional[list[str]] = None) -> None:
+             roots: Optional[list[str]] = None, lpath: str = "") -> None:
         base = str(name or "").replace("\\", "/").rsplit("/", 1)[-1].strip()
         if not base or len(base) > 200:
             return
         # A sighting with a path is its own entry (every profile's NTUSER.DAT,
-        # every volume's SYSTEM); a pathless one (a listing row) folds by name.
-        key = path.lower() if path else base.lower()
+        # every volume's SYSTEM), and so is a listing row on its host and
+        # path in the image: two profiles' or two hosts' copies are two
+        # things to read. Only a row that says neither folds by name.
+        if path:
+            key = path.lower()
+        elif host or lpath:
+            key = f"{host.casefold()}|{(lpath or base).lower()}"
+        else:
+            key = base.lower()
         prev = out.get(key)
         # Keep the largest sighting: an empty copy must not mask a full one.
         if prev is not None and (prev.get("size") or 0) >= (size or 0):
             return
         out[key] = {"name": base, "size": size, "source": where, "host": host,
                     "path": path, "abs": abs_path, "kind": kind,
-                    "roots": list(roots or [])}
+                    "roots": list(roots or []), "lpath": lpath}
 
     # What an opened volume holds: the value table's artifacts at the
     # places the platform keeps them, looked at directly on the mount. Once
@@ -434,6 +470,7 @@ def known_artifacts(case_dir: str | os.PathLike) -> dict[str, dict[str, Any]]:
     analysis = root / "analysis"
     if analysis.is_dir():
         rows_seen = 0
+        case_hosts = _case_hosts(root)
         for csv_path in sorted(analysis.glob("*.csv")):
             try:
                 with csv_path.open(encoding="utf-8", errors="replace",
@@ -448,6 +485,19 @@ def known_artifacts(case_dir: str | os.PathLike) -> dict[str, dict[str, Any]]:
                     size_col = next((cols[c] for c in _SIZE_COLS if c in cols),
                                     None)
                     host_col = cols.get("_host") or cols.get("host")
+                    parent_col = next((cols[c] for c in _PARENT_COLS if c in cols), None)
+                    # No listing tool writes a host column: a listing is the
+                    # host's whose name its file name carries, when it carries
+                    # exactly one case host's. One that names none stays
+                    # hostless; its file name is no host.
+                    file_host = ""
+                    if not host_col:
+                        try:
+                            from core.forensic_citation import host_mentioned
+                            hit = [h for h in case_hosts if host_mentioned(h, csv_path.name)]
+                            file_host = hit[0] if len(hit) == 1 else ""
+                        except Exception:  # noqa: BLE001
+                            file_host = ""
                     for row in reader:
                         rows_seen += 1
                         if rows_seen > MAX_INDEXED_ROWS:
@@ -459,9 +509,10 @@ def known_artifacts(case_dir: str | os.PathLike) -> dict[str, dict[str, Any]]:
                                            or 0)
                             except (TypeError, ValueError):
                                 size = None
-                        _add(str(row.get(name_col) or ""), size,
-                             f"listing:{csv_path.name}",
-                             str(row.get(host_col) or "") if host_col else "")
+                        raw = str(row.get(name_col) or "")
+                        _add(raw, size, f"listing:{csv_path.name}",
+                             str(row.get(host_col) or "").strip() if host_col else file_host,
+                             lpath=_listing_path(raw, str(row.get(parent_col) or "") if parent_col else ""))
             except (OSError, csv.Error):
                 continue
 
@@ -531,18 +582,30 @@ def unexamined_high_value(
     blob = _trace_text(case_dir)
     blocked = _blocked_basenames(case_dir)
     named = question_named_artifacts(case_dir)
-    candidates = [
-        {"name": v["name"], "size": v.get("size"), "host": v.get("host", ""),
-         "source": v.get("source", ""), "path": v.get("path", ""),
-         "abs": v.get("abs", ""), "kind": v.get("kind", "file"),
-         "roots": v.get("roots") or []}
-        for v in known.values()
-    ]
-    # A listing row of a file the volume also shows is the same artifact:
-    # the sighting with a path is the one that can be read and credited.
-    with_path = {c["name"].casefold() for c in candidates if c.get("path")}
-    candidates = [c for c in candidates
-                  if c.get("path") or c["name"].casefold() not in with_path]
+
+    def _candidate(key: str, v: dict[str, Any]) -> dict[str, Any]:
+        return {"key": key, "name": v["name"], "size": v.get("size"), "host": v.get("host", ""),
+                "source": v.get("source", ""), "path": v.get("path", ""), "lpath": v.get("lpath", ""),
+                "abs": v.get("abs", ""), "kind": v.get("kind", "file"), "roots": v.get("roots") or []}
+
+    # A listing row of a file a volume of its host also shows is the same
+    # artifact: the sighting with a path is the one that can be read and
+    # credited. A row with its path in the image is that file on the volume
+    # only; a row with a name alone, any file of that name there.
+    on_volume: dict[str, list[dict[str, Any]]] = {}
+    for v in known.values():
+        if v.get("path"):
+            on_volume.setdefault(v["name"].casefold(), []).append(v)
+
+    def _shown_on_volume(c: dict[str, Any]) -> bool:
+        if c.get("path"):
+            return False
+        tail = "/" + str(c.get("lpath") or "").lower()
+        return any(_same_host(c.get("host"), v.get("host"))
+                   and (tail == "/" or str(v["path"]).lower().endswith(tail))
+                   for v in on_volume.get(c["name"].casefold(), ()))
+
+    candidates = [c for c in (_candidate(k, v) for k, v in known.items()) if not _shown_on_volume(c)]
     ranked = rank_artifacts(candidates)
     # What the case's own questions name outranks the value table: the
     # author pointed at it, whatever kind of artifact it is.
@@ -554,20 +617,16 @@ def unexamined_high_value(
             if item["name"].casefold() in named:
                 item["score"] = 100
                 item["why"] = "named in the case's own questions"
-                lifted.add(item.get("path") or item["name"].casefold())
-        for v in known.values():
-            key = v["name"].casefold()
-            if key not in named or (v.get("path") or key) in lifted:
+                lifted.add(item["key"])
+        for k, v in known.items():
+            if v["name"].casefold() not in named or k in lifted:
                 continue
-            if not v.get("path") and key in with_path:
+            c = _candidate(k, v)
+            if _shown_on_volume(c):
                 continue      # a listing row of a file the volume shows: read by path
-            ranked.append({"name": v["name"], "size": v.get("size"), "host": v.get("host", ""),
-                           "source": v.get("source", ""), "path": v.get("path", ""),
-                           "abs": v.get("abs", ""), "kind": v.get("kind", "file"),
-                           "roots": v.get("roots") or [],
-                           "empty": looks_empty(v["name"], v.get("size")),
+            ranked.append({**c, "empty": looks_empty(v["name"], v.get("size")),
                            "score": 100, "why": "named in the case's own questions"})
-        ranked.sort(key=lambda i: (-i["score"], -(i.get("size") or 0), i["name"]))
+        ranked.sort(key=_rank_order)
     out: list[dict[str, Any]] = []
     for item in ranked:
         if item["score"] < threshold or item.get("empty"):
@@ -582,6 +641,14 @@ def unexamined_high_value(
     return out
 
 
+def _same_host(a: Any, b: Any) -> bool:
+    """Two sightings may be one artifact unless both name a host and the
+    hosts differ: a volume the Evidence Links tie to no host, or a listing
+    whose name carries none, is not on another host."""
+    a, b = str(a or "").strip().casefold(), str(b or "").strip().casefold()
+    return not a or not b or a == b
+
+
 _EXTRACTED_RE: dict[str, re.Pattern[str]] = {}
 
 
@@ -592,10 +659,27 @@ def _examined_in_trace(item: dict[str, Any], blob: str) -> bool:
     did. One found on a mounted volume is read in place, by its path, or
     extracted under analysis/ or exports/ under its own name; its bare name
     is a common word there ("system", "software", "sam") that appears in
-    any trace, so it proves nothing on its own.
+    any trace, so it proves nothing on its own. A listing row with its path
+    in the image is read through that path (a mounted volume's, an
+    extract's, a parser's argument, with either separator) or through a
+    copy extracted under its own name.
     """
     name = str(item.get("name") or "").lower()
     path = str(item.get("path") or "").lower()
+    lpath = str(item.get("lpath") or "").lower()
+    if lpath and not path:
+        comps = [re.escape(c) for c in lpath.split("/") if c]
+        if comps and re.search(r"(?:^|[\s\"'=/\\])" + r"[/\\]+".join(comps)
+                               + r"[/\\]?(?=$|[\s\"',;)\]])", blob):
+            return True
+        # ponytail: an unmounted image is read by extracting the file (icat
+        # <image> <inode> exports/NTUSER.DAT) and parsing the copy, and no
+        # call names the in-image path; the copy's name credits every row of
+        # that name. Map the listing's entry number to the icat inode when
+        # one profile's copy must not stand for another's. Likewise a read of
+        # the path on another host's volume credits this host's row; map the
+        # mount's stem to its host (_volume_host) when that matters.
+        return _extracted(name).search(blob) is not None
     if not path:
         # A whole name in a read, not a word inside another one: "history"
         # occurs in any trace.
@@ -615,12 +699,17 @@ def _examined_in_trace(item: dict[str, Any], blob: str) -> bool:
         r = str(root_dir).lower()
         if r and re.search(re.escape(r) + r"(?=/?(?:$|[\s\"',;)\]]))", blob):
             return True
+    return _extracted(name).search(blob) is not None
+
+
+def _extracted(name: str) -> re.Pattern[str]:
+    """A copy of ``name`` under analysis/ or exports/ named in a call."""
     pat = _EXTRACTED_RE.get(name)
     if pat is None:
         pat = re.compile(r"(?:analysis|exports)/[^\s\"']*" + re.escape(name)
                          + r"(?=$|[\s\"',;)])")
         _EXTRACTED_RE[name] = pat
-    return pat.search(blob) is not None
+    return pat
 
 
 def _blocked_basenames(case_dir: str | os.PathLike) -> set[str]:
@@ -855,10 +944,11 @@ def format_value_nudge(
                 measure = f" ({size:,} file{'s' if size != 1 else ''})" if size else ""
             else:
                 measure = f" ({size:,} bytes)" if size else ""
+            where = a.get("path") or a.get("lpath")
             lines.append(
                 f"- {a['name']}"
                 + measure
-                + (f" at {a['path']}" if a.get("path") else "")
+                + (f" at {where}" if where else "")
                 + (f" [{a['host']}]" if a.get("host") and not a.get("path") else "")
                 + f" — {a['why']}")
     return "\n".join(lines)

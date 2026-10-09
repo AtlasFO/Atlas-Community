@@ -513,3 +513,157 @@ def test_the_subjects_stated_identifiers_are_sided_as_the_subject(tmp_path):
     assert rows["CORP\\jroe"]["side"] == "subject" and "subject" in rows["CORP\\jroe"]["note"]
     assert rows["198.51.100.7"]["side"] == "attacker" and rows["plans.docx"]["side"] == "victim"
     assert [r["value"] for r in out["resided"]] == ["CORP\\jroe"]
+
+
+# ── typed rows refused at record time stay visible ───────────────────────
+
+_SHA = "ab" * 32                     # an invented 64-hex digest
+_SLIP = _SHA + "c"                   # the same, one character too long
+
+
+def _shown(text):
+    return lambda ids: [(1, {"type": "tool_call", "cmd": "hash_file", "stdout_excerpt": text})] if 1 in ids else []
+
+
+def test_a_near_length_hash_is_named_by_its_length():
+    row, why = I.normalize_row({"type": "sha256", "value": _SLIP, "side": "attacker"})
+    assert row is None and why.startswith("65 hex characters")
+
+
+def test_a_hash_slip_is_suggested_from_the_cited_output():
+    with patch("core.indicators._evidence_entries", _shown(f"sha256 {_SHA.upper()}  C:\\Temp\\m.exe")):
+        out = I.validate([{"type": "sha256", "value": _SLIP, "side": "attacker"},
+                          {"type": "hash", "value": _SHA[:-1] + "0", "side": "attacker"}],
+                         call_ids=[1], case_dir=None)
+    shape, presence = out["dropped"]
+    assert shape["type"] == "hash" and shape["suggested"] == _SHA and "the cited output shows" in shape["reason"]
+    assert presence["suggested"] == _SHA                # a wrong digit fails presence, not shape
+
+
+def test_two_close_digests_suggest_neither():
+    other = _SHA[:-1] + "0"            # also within two edits of the slip
+    with patch("core.indicators._evidence_entries", _shown(f"{_SHA} a.exe\n{other} b.exe")):
+        out = I.validate([{"type": "hash", "value": _SLIP, "side": "attacker"}], call_ids=[1], case_dir=None)
+    assert "suggested" not in out["dropped"][0]
+
+
+def _refused_case(tmp_path):
+    from tools.claim_tools import add_indicators
+    d = _case(tmp_path, nodes=[{"host": "CORP-WS01", "statement": "m.exe dumped credentials on CORP-WS01",
+                                "source_finding_call_id": 7, "input_call_ids": [1]}])
+    with patch("core.indicators._evidence_entries", _shown(f"{_SHA}  C:\\Temp\\m.exe")):
+        out = add_indicators("C0001", [{"type": "hash", "value": _SLIP, "side": "attacker"}], case_dir=str(d))
+    return d, out
+
+
+def test_a_refused_row_is_kept_on_the_claim_and_listed_as_not_exported(tmp_path):
+    d, out = _refused_case(tmp_path)
+    assert out["success"] and out["kept"] == [] and out["dropped"][0]["value"] == _SLIP
+    node = json.loads((d / ".atlas" / "claim_graph.json").read_text())["nodes"]["C0001"]
+    assert node["indicators_dropped"][0]["value"] == _SLIP
+    cat = build_catalog(d)
+    assert cat["iocs"] == [] and cat["not_exported_total"] == 1
+    row = cat["not_exported"][0]
+    assert row["claim_ids"] == ["C0001"] and row["hosts"] == ["CORP-WS01"]
+    text = render_markdown(cat, case_id="X")
+    assert "## Not exported" in text and _SLIP in text
+    assert _SLIP not in render_csv(cat, d)
+
+
+def test_the_suggested_value_clears_the_refused_row(tmp_path):
+    from tools.claim_tools import add_indicators
+    d, _out = _refused_case(tmp_path)
+    with patch("core.indicators._evidence_entries", _shown(f"{_SHA}  C:\\Temp\\m.exe")):
+        add_indicators("C0001", [{"type": "hash", "value": _SHA, "side": "attacker"}], case_dir=str(d))
+    node = json.loads((d / ".atlas" / "claim_graph.json").read_text())["nodes"]["C0001"]
+    assert "indicators_dropped" not in node
+    assert build_catalog(d)["not_exported"] == []
+
+
+def test_the_advisory_names_the_refused_row_until_its_finding_is_superseded(tmp_path):
+    from core.claim_graph import supersede
+    d, _out = _refused_case(tmp_path)
+    text = I.dropped_warning(d)
+    assert "C0001" in text and "Malformed" in text and "claim.add_indicators" in text
+    assert "nothing here blocks the report" in text
+    supersede(d, "C0001", reason="withdrawn by the analyst")
+    assert I.dropped_warning(d) == ""
+
+
+def test_a_successor_inherits_only_the_rows_it_does_not_resolve(tmp_path):
+    from core.claim_graph import load_graph, save_graph, supersede
+    d, _out = _refused_case(tmp_path)
+    g = load_graph(d)
+    g["nodes"]["C0002"] = {"id": "C0002", "kind": "claim", "status": "new", "confidence": "LIKELY",
+                           "host": "CORP-WS01", "statement": "m.exe dumped credentials on CORP-WS01"}
+    save_graph(d, g)
+    supersede(d, "C0001", "C0002", reason="re-recorded")
+    assert load_graph(d)["nodes"]["C0002"]["indicators_dropped"][0]["carried_from"] == "C0001"
+    g = load_graph(d)
+    g["nodes"]["C0003"] = {"id": "C0003", "kind": "claim", "status": "new", "confidence": "LIKELY",
+                           "host": "CORP-WS01", "statement": "m.exe dumped credentials on CORP-WS01",
+                           "indicators": [{"type": "hash", "value": _SHA, "side": "attacker"}]}
+    save_graph(d, g)
+    supersede(d, "C0002", "C0003", reason="re-recorded with the digest")
+    assert "indicators_dropped" not in load_graph(d)["nodes"]["C0003"]
+
+
+def test_the_record_path_can_hand_its_refused_rows_to_the_claim(tmp_path):
+    """The interface the finding recorder passes its refused rows through."""
+    from core.claim_graph import load_graph, upsert_claim_from_finding
+    d = _case(tmp_path)
+    res = upsert_claim_from_finding(d, statement="m.exe ran on CORP-WS01", confidence="LIKELY",
+                                    host="CORP-WS01", finding_call_id=11,
+                                    indicators_dropped=[{"type": "hash", "value": _SLIP, "reason": "65 hex characters"}])
+    assert load_graph(d)["nodes"][res["claim_id"]]["indicators_dropped"][0]["value"] == _SLIP
+
+
+def test_a_value_its_calls_do_not_show_is_sent_to_a_re_record(tmp_path):
+    from tools.claim_tools import add_indicators
+    d = _case(tmp_path, nodes=[{"host": "CORP-WS01", "statement": "svc.exe beaconed out",
+                                "source_finding_call_id": 41, "input_call_ids": [1]}])
+    with patch("core.indicators._evidence_entries", _shown("conn 198.51.100.7:443 svc.exe")):
+        add_indicators("C0001", [{"type": "ip", "value": "198.51.100.9", "side": "attacker"}], case_dir=str(d))
+    text = I.dropped_warning(d)
+    assert "Not shown by the finding's cited calls" in text and "finding call 41" in text
+    assert "supersedes=" in text and "Malformed" not in text
+
+
+def test_a_refused_row_re_typed_under_another_type_is_resolved(tmp_path):
+    from tools.claim_tools import add_indicators
+    d = _case(tmp_path, nodes=[{"host": "CORP-WS01", "statement": "m.exe ran",
+                                "source_finding_call_id": 7, "input_call_ids": [1]}])
+    with patch("core.indicators._evidence_entries", _shown("C:\\Temp\\m.exe started")):
+        out = add_indicators("C0001", [{"type": "path", "value": "m.exe", "side": "attacker"}], case_dir=str(d))
+        assert out["dropped"][0]["refusal"] == "shape"
+        add_indicators("C0001", [{"type": "file", "value": "m.exe", "side": "attacker"}], case_dir=str(d))
+    node = json.loads((d / ".atlas" / "claim_graph.json").read_text())["nodes"]["C0001"]
+    assert "indicators_dropped" not in node
+
+
+def test_a_value_another_finding_typed_is_not_listed_as_refused(tmp_path):
+    d = _case(tmp_path, nodes=[
+        {"host": "CORP-WS01", "statement": "svc.exe beaconed out",
+         "indicators_dropped": [{"type": "ip", "value": "198.51.100.7", "reason": "not in the output",
+                                 "refusal": "presence"}]},
+        {"host": "CORP-WS01", "statement": "the firewall logged 198.51.100.7",
+         "indicators": [{"type": "ip", "value": "198.51.100.7", "side": "attacker"}]},
+    ])
+    assert build_catalog(d)["not_exported"] == []
+
+
+def test_only_claims_and_conclusions_contribute_refused_rows(tmp_path):
+    d = _case(tmp_path, nodes=[{"host": "CORP-WS01", "statement": "isolate CORP-WS01", "kind": "recommendation",
+                                "indicators_dropped": [{"type": "hash", "value": _SLIP, "reason": "x"}]}])
+    assert build_catalog(d)["not_exported"] == []
+
+
+def test_a_refused_value_with_a_newline_and_a_pipe_is_one_table_row():
+    with patch("core.indicators._evidence_entries", _shown("nothing relevant")):
+        out = I.validate([{"type": "ip", "value": "198.51.100.9 |\nx", "side": "attacker"}],
+                         call_ids=[1], case_dir=None)
+    drop = out["dropped"][0]
+    assert "\n" not in drop["value"]
+    text = render_markdown({"not_exported": [dict(drop, category=drop["type"], claim_ids=["C0001"])]}, case_id="X")
+    rows = [l for l in text.splitlines() if l.startswith("| ") and "C0001" in l]
+    assert len(rows) == 1 and "\\|" in rows[0]

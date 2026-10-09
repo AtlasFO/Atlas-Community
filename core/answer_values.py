@@ -128,7 +128,51 @@ def _same_word(a: str, b: str, core: set[str] | frozenset[str] = frozenset()) ->
                 and rest not in core and not any(rest.startswith(c) or c.startswith(rest) for c in core if len(c) >= 3):
             return False
         return True
-    return len(b) >= 4 and a.startswith(b) and not _agent_ending(b, a[len(b):])
+    if len(b) >= 4 and a.startswith(b):
+        return not _agent_ending(b, a[len(b):])
+    return _same_stem(a, b)
+
+
+# One inflection a word may carry over its stem, longest first. "er" is not
+# among them: the installer is not the install (_agent_ending).
+_STEM_SUFFIXES = ("ations", "ation", "ions", "ion", "ings", "ing", "ments", "ment", "ness",
+                  "ungen", "ung", "ed", "es", "ly", "en", "s", "e")
+
+
+# The inflections of a verb: a three-letter stem counts only when both words
+# carry one ("wiping", "wiped"); a noun ending ("ration") is no such pair.
+_VERB_SUFFIXES = frozenset({"ings", "ing", "ed", "es", "s", "e", "en"})
+
+
+def _stems(word: str) -> set[tuple[str, str]]:
+    """``word`` without each inflection it may carry, one at a time, with
+    the inflection taken ("" for the word itself): a doubled final
+    consonant is undone and "copies"/"copied" read back to "copy". Every
+    one is kept, so "exfiltration" (less "ion") meets "exfiltrated" (less
+    "ed")."""
+    out = {(word, "")}
+    for suffix in _STEM_SUFFIXES:
+        if word.endswith(suffix) and len(word) - len(suffix) >= 3:
+            stem = word[:-len(suffix)]
+            if len(stem) >= 4 and stem[-1] == stem[-2] and stem[-1] not in "aeiou":
+                stem = stem[:-1]
+            if suffix in ("es", "ed") and stem.endswith("i"):
+                stem = stem[:-1] + "y"
+            out.add((stem, suffix))
+    return out
+
+
+def _same_stem(a: str, b: str) -> bool:
+    """Two inflections of one stem ("encrypted" and "encryption", "wiping"
+    and "wiped"), or a short word and its plural ("key" and "keys"). A
+    three-letter stem counts only when both words carried a verb's
+    inflection, so "same" is not "SAM", "note" not "not" nor "ration"
+    "rated". Lexical ceiling: two words that reduce to one stem by accident
+    ("files", "filled") match."""
+    if b in (a + "s", a + "es") or a in (b + "s", b + "es"):
+        return True
+    return any(sa == sb and (len(sa) >= 4 or (len(sa) == 3 and {fa, fb} <= _VERB_SUFFIXES))
+               for sa, fa in _stems(a) for sb, fb in _stems(b))
 
 
 def _agent_ending(stem: str, rest: str) -> bool:
@@ -187,10 +231,20 @@ _TLDS = (
     "local|onion|internal|lan|corp|home"
 )
 _DOMAIN_RE = re.compile(r"(?i)\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:" + _TLDS + r")\b(?![\w.-]*\.[a-z]{2,4}\b(?:$|[^\w.]))")
-_URL_RE = re.compile(r"\bhttps?://[^\s\"'<>)\]]+", re.I)
+# Closing quotes, backticks and braces end a URL, as in core.entities.
+_URL_RE = re.compile(r"\bhttps?://[^\s\"'<>)\]`”’»}]+", re.I)
 _EMAIL_RE = re.compile(r"\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b(?![\w.-]*\[\d+\])")
 _DOMAIN_USER_RE = re.compile(r"\b([A-Za-z][\w-]{1,30})\\([A-Za-z][\w.$-]{1,30})\b(?!\\)")
 _SID_RE = re.compile(r"\bS-1-\d+(?:-\d+){1,14}\b")
+# One principal written twice, its name and its SID in apposition:
+# "jane.doe (S-1-5-21-...)" or "S-1-5-21-... (jane.doe)". A name is one
+# token, DOMAIN\user or two capitalised words ("Jane Doe"), on either side.
+_SID_APPOSITION_RE = re.compile(
+    r"(?P<name>\b(?:[A-Za-z][\w-]{1,30}\\[A-Za-z][\w.$-]{1,63}|[A-Z][\w.'’-]+\s+[A-Z][\w.'’-]+"
+    r"|[A-Za-z][\w.$-]{1,63}))\s*\(\s*(?:SID\s*:?\s*)?"
+    r"(?P<sid>S-1-\d+(?:-\d+){1,14})\s*\)"
+    r"|(?P<sid2>\bS-1-\d+(?:-\d+){1,14})\s*\(\s*(?P<name2>[A-Za-z][\w-]{1,30}\\[A-Za-z][\w.$-]{1,63}"
+    r"|[A-Z][a-z]+ [A-Z][a-z]+|[A-Za-z][\w.$-]{1,63})\s*\)")
 # A quoted principal follows its cue directly ("account 'jdoe'") or a
 # naming verb after it ("the user of the notebook is 'Mr. Smith'"); a quoted
 # title elsewhere in the sentence is not a name.
@@ -291,10 +345,11 @@ _HASH_RE = re.compile(r"\b(?:[0-9a-fA-F]{64}|[0-9a-fA-F]{40}|[0-9a-fA-F]{32})\b"
 # A Windows path whose segments may carry spaces ("C:\\FileShare\\Secret\\Szechuan
 # Sauce.txt"): the final segment ends at an extension; a directory path keeps
 # the no-space form.
+# A backtick is the code span around a path in prose, never part of it.
 _WIN_PATH_RE = re.compile(
-    r"\b[A-Za-z]:\\(?:[^\\:*?\"<>|\s][^\\:*?\"<>|\n]*?\\)*[^\\:*?\"<>|\s][^\\:*?\"<>|\n]*?\.[A-Za-z0-9]{1,5}(?=[\s,;:)\]\"']|\.(?:\s|$)|$)"
-    r"|\b[A-Za-z]:\\(?:[^\\:*?\"<>|\s][^\\:*?\"<>|\n]*?\\)+"
-    r"|\b[A-Za-z]:\\(?:[^\\\s:*?\"<>|]+\\)*[^\\\s:*?\"<>|]*")
+    r"\b[A-Za-z]:\\(?:[^\\:*?\"<>|\s`][^\\:*?\"<>|\n`]*?\\)*[^\\:*?\"<>|\s`][^\\:*?\"<>|\n`]*?\.[A-Za-z0-9]{1,5}(?=[\s,;:)\]\"'`\u201d\u2019\u00bb]|\.(?:\s|$)|$)"
+    r"|\b[A-Za-z]:\\(?:[^\\:*?\"<>|\s`][^\\:*?\"<>|\n`]*?\\)+"
+    r"|\b[A-Za-z]:\\(?:[^\\\s:*?\"<>|`]+\\)*[^\\\s:*?\"<>|`]*")
 _QUOTED_FILE_RE = re.compile(r"[\"“‘']([^\"”’'\n]{1,120}?\.[A-Za-z0-9]{1,5})[\"”’']")
 _UNIX_PATH_RE = re.compile(r"(?<![\w.])/(?:[\w.+-]+/)+[\w.+-]+")
 # A relative forward-slash path as prose writes a profile folder
@@ -305,8 +360,9 @@ _UNIX_PATH_RE = re.compile(r"(?<![\w.])/(?:[\w.+-]+/)+[\w.+-]+")
 # before the path mostly stays out of it; "and/or", "TCP/IP", a date or a
 # time-zone name is no path. Ceiling: a capitalised word and one short word
 # just before a path ("Found in Windows/...") join its first segment.
-_REL_WORD = r"[^\s/\\,;:()\"'<>|]+"
-_REL_CAP_WORD = r"[A-Z0-9][^\s/\\,;:()\"'<>|]*"
+# A backtick is the code span around a relative path, never part of it.
+_REL_WORD = r"[^\s/\\,;:()\"'<>|`]+"
+_REL_CAP_WORD = r"[A-Z0-9][^\s/\\,;:()\"'<>|`]*"
 _REL_SEG = (rf"(?:{_REL_CAP_WORD}(?: {_REL_CAP_WORD})*(?: [a-z]{{1,3}}(?: {_REL_CAP_WORD})+)?"
             rf"|{_REL_WORD})")
 _REL_SLASH_PATH_RE = re.compile(rf"(?<![\w./\\:@-])((?:{_REL_SEG}/){{2,}})({_REL_SEG})?")
@@ -480,6 +536,26 @@ def values(text: str, kind: str, *, known_hosts: Iterable[str] = (), exclude: It
                     out.append((tok, m.start(1)))
         except Exception:  # noqa: BLE001 - the catalog's readers are an aid, not a need
             pass
+        # One principal named twice is one candidate carrying both, at the
+        # name, in place of the bare SID and any other reading at the name's
+        # offset. A generic word before the parenthesis ("the account
+        # (S-1-...)") is no name; a well-known account keeps its name.
+        def _generic(word: str) -> bool:
+            w = word.split("\\")[-1].rstrip(".").lower()
+            return w not in _WELL_KNOWN_ACCOUNTS and (w in _NOT_A_NAME or w in _NOT_A_PRINCIPAL)
+        for m in _SID_APPOSITION_RE.finditer(text):
+            name, sid = (m.group("name"), m.group("sid")) if m.group("name") else (m.group("name2"), m.group("sid2"))
+            npos, spos = ((m.start("name"), m.start("sid")) if m.group("name")
+                          else (m.start("name2"), m.start("sid2")))
+            words = name.split()
+            if len(words) == 2 and _generic(words[0]):
+                # "The Administrator (S-1-...)": the name is the second word
+                npos += name.index(words[1], len(words[0]))
+                name = words[1]
+            if _generic(name.split()[0]):
+                continue
+            out = [(v, p) for v, p in out if p not in (npos, spos)]
+            out.append((f"{name} ({sid})", npos))
         # A folder or file name is not an account: "C:\\Users\\jdoe\\Desktop"
         # holds no "jdoe\\Desktop", nor "Default/Login Data" a user "Data".
         # A SID stays an account wherever it is written: a registry path
@@ -497,6 +573,11 @@ def values(text: str, kind: str, *, known_hosts: Iterable[str] = (), exclude: It
                 and len(v) >= 4 and sum(ch.isalpha() for ch in v) >= 2]
         out += [(v, p) for v, p in _spans(_FQDN_RE, text) if not _EMAIL_RE.search(v)]
         out = [(v, p) for v, p in out if v.upper() not in _TECH_TOKENS and not _NODE_ID_RE.match(v)]
+        # A name inside a longer host name ("WS01" in "CORP-WS01", a host in
+        # its FQDN) is a piece of that name, never another host.
+        spans = [(p, p + len(v)) for v, p in out]
+        out = [(v, p) for v, p in out
+               if not any(a <= p and p + len(v) <= b and b - a > len(v) for a, b in spans)]
         if known:
             def _named_as_name(tok: str) -> bool:
                 esc = re.escape(tok)
@@ -733,9 +814,46 @@ def _rank(kind: str, clause: str, value: str, pos: int, qpos: list[int], qual: s
 _WHERE_RE = re.compile(r"(?i)^(?:where|wo)\b")
 
 
+def _distinct(hits: list[tuple[str, str]], kind: str) -> list[tuple[str, str]]:
+    """The values among ``hits`` the part could mean, after the kind's own
+    preferences: a file over a shortcut to it, a UTC time over its local
+    twin. A host's known-first order is not one: it would put a victim's
+    host first for "the attacker's host"."""
+    if kind == "path" and any(not _shortcut(v) for v, _c in hits):
+        hits = [(v, c) for v, c in hits if not _shortcut(v)]
+    if kind == "datetime" and any(_UTC_MARK_RE.search(v) for v, _c in hits):
+        hits = [(v, c) for v, c in hits if _UTC_MARK_RE.search(v)]
+    seen: dict[str, tuple[str, str]] = {}
+    for v, c in hits:
+        seen.setdefault(v.lower(), (v, c))
+    return list(seen.values())
+
+
+def explicit_candidates(part_text: str, kind: str, statement: str, *, question: str = "",
+                        known_hosts: Iterable[str] = (), prefer: Iterable[str] = ()) -> list[str]:
+    """The values of the part's kind a belief named for it states when no
+    clause carries the part's words and more than one could be meant: what
+    a refusal names so the analyst can say which. Empty otherwise."""
+    found: list[str] = []
+    value, _clause = bind(part_text, kind, statement, question=question, known_hosts=known_hosts,
+                          explicit=True, prefer=prefer, _candidates=found)
+    return [] if value else found
+
+
+def file_class_named(part_text: str) -> str:
+    """The file class a part's head noun names ("an executable", "the log
+    file"), "" for none. Only the head before a relative or prepositional
+    tail counts: "the log of the executable" asks for a log."""
+    from core.entities import FILE_CLASS_NOUNS
+    head = _TAIL_RE.sub("", _RELATIVE_TAIL_RE.sub("", " ".join(str(part_text or "").split())))
+    return next((FILE_CLASS_NOUNS[w] for w in re.findall(r"[a-z]+", head.casefold())
+                 if w in FILE_CLASS_NOUNS), "")
+
+
 def bind(part_text: str, kind: str, statement: str, *, question: str = "",
          known_hosts: Iterable[str] = (), explicit: bool = False,
-         prefer: Iterable[str] = ()) -> tuple[str | None, str]:
+         prefer: Iterable[str] = (),
+         _candidates: list[str] | None = None) -> tuple[str | None, str]:
     """The value of ``kind`` in ``statement`` that answers the part, with
     the clause it came from, or ``(None, "")``.
 
@@ -758,22 +876,39 @@ def bind(part_text: str, kind: str, statement: str, *, question: str = "",
     preferred = {str(v).strip().lower() for v in prefer if str(v).strip()}
 
     def untyped(value: str) -> bool:
-        return value.lower() not in preferred
+        # A principal read with its SID ("jane.doe (S-1-...)") is typed when
+        # either half is.
+        keys = {value.lower()}
+        merged = re.fullmatch(r"(.+) \((S-1-[\d-]+)\)", value)
+        if merged:
+            keys |= {merged.group(1).lower(), merged.group(2).lower()}
+        return not (keys & preferred)
 
     qual = qualifier(part_text)
     core = _tokens(part_text)
+    # A path part that names a file class ("an executable") takes no value
+    # of another class, and its class word is checked on the value rather
+    # than looked for in the clause. A value of no class (no extension, an
+    # unlisted one) stays a candidate. Only "executable", "binary" and
+    # "document" make a part a path part on their own (type_for); "script",
+    # "archive" and "log" name a class beside a path word ("the log file").
+    from core.entities import FILE_CLASS_NOUNS, file_class_of
+    cls = file_class_named(part_text) if kind == "path" else ""
+    if cls:
+        qual = {w for w in qual if FILE_CLASS_NOUNS.get(w) != cls}
     exclude = set(re.findall(r"[\w'’.-]+", question or "")) | set(re.findall(r"[\w'’.-]+", part_text or ""))
     name_part = kind == "host" and bool(_NAME_PART_RE.search(part_text or ""))
     where = kind == "path" and bool(_WHERE_RE.match(" ".join(str(part_text or "").split())))
 
-    def values(text, kind, **kw):   # noqa: F811 - the module's values, narrowed for a where-part
+    def values(text, kind, **kw):   # noqa: F811 - the module's values, narrowed for the part
         hits = _values(text, kind, **kw)
-        return [h for h in hits if not where or re.search(r"[\\/]", h[0])]
+        return [h for h in hits if (not where or re.search(r"[\\/]", h[0]))
+                and (not cls or file_class_of(h[0]) in ("", cls))]
 
     if explicit:
         # The analyst named the belief for this part: a value of the kind
-        # suffices, the one nearest a qualifier word where a clause has
-        # one, else the first the statement states.
+        # suffices, the one nearest a qualifier word where a clause has one.
+        from core.answer_synthesis import ABSENCE, GAP, classify_statement
         if qual:
             for clause, off in clauses(statement):
                 if _overlap(qual, _tokens(clause), core):
@@ -784,15 +919,37 @@ def bind(part_text: str, kind: str, statement: str, *, question: str = "",
                         best_hit = min(hits, key=lambda h: (untyped(h[0]),
                                                             _rank(kind, clause, h[0], h[1], qpos, qual, spans)))
                         return best_hit[0], clause
+                    if _ABSENT_RE.search(clause) or classify_statement(clause) in (GAP, ABSENCE):
+                        # The clause that carries the part's words says its
+                        # value is not there ("the C2 IP could not be
+                        # established"): another clause's value is no answer.
+                        # A negator about something else ("the attacker's host
+                        # was not a domain member") says nothing of the value.
+                        return None, ""
+        ordered: list[tuple[str, str]] = []
         for clause, off in clauses(statement):
             hits = values(clause, kind, known_hosts=known_hosts, exclude=exclude, name_part=name_part)
             if kind == "count":
                 hits = _count_near_noun(clause, qual, hits)
             if kind == "path":
                 hits = sorted(hits, key=lambda h: (_shortcut(h[0]), h[1]))
-            hits = sorted(hits, key=lambda h: untyped(h[0]))
-            if hits:
-                return hits[0][0], clause
+            ordered += [(v, clause) for v, _p in sorted(hits, key=lambda h: untyped(h[0]))]
+        if not ordered:
+            return None, ""
+        if not qual or kind not in STRONG_TYPES:
+            return ordered[0]
+        # A qualifier no clause carries: the one value the statement states
+        # (or its one typed value) answers. With several the binder could only
+        # guess which one the part asks for, a victim's host for "the
+        # attacker's host", so it binds none; the refusal names them. A name
+        # or a list item is shown through the belief's headline, not printed
+        # as the answer, so its first value stands.
+        typed = [h for h in ordered if not untyped(h[0])]
+        choice = _distinct(typed or ordered, kind)
+        if len(choice) == 1:
+            return choice[0]
+        if _candidates is not None:
+            _candidates.extend(v for v, _c in choice)
         return None, ""
     if not qual:
         sentence, off = first_sentence_span(statement)

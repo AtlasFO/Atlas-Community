@@ -12,6 +12,7 @@ import re
 import json
 import os
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator, Optional
@@ -102,7 +103,9 @@ def fingerprint_file(
     *,
     force_full: bool = False,
 ) -> dict[str, Any]:
-    """Return size/mtime/inode + content hash (full or sampled)."""
+    """Return size/mtime/inode + content hash (full or sampled), and when the
+    hash was taken (``hashed_at_ns``, read by the reuse check)."""
+    hashed_at_ns = time.time_ns()
     st = abs_path.stat()
     size = int(st.st_size)
     mtime_ns = getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9))
@@ -138,7 +141,47 @@ def fingerprint_file(
         "mtime_ns": mtime_ns,
         "inode": inode,
         "fingerprint_mode": mode,
+        "hashed_at_ns": hashed_at_ns,
     }
+
+
+# A write within this long before a hash was taken can leave size and mtime as
+# recorded on a coarse clock (FAT keeps two seconds, NFS caches attributes for
+# a few): such a hash is taken again rather than trusted.
+_RACY_WINDOW_NS = 5_000_000_000
+
+
+def _reused_fingerprint(abs_path: Path, prev: dict[str, Any] | None) -> dict[str, Any] | None:
+    """``prev``'s fingerprint when the file at ``abs_path`` is still the one
+    it was taken from: same size, modification time and inode, and a hash
+    taken well after the last write. None means read the file again.
+
+    The quick check git and rsync use. It trusts a file that was changed in
+    place and had its time set back (``touch -r``); the first scan of a file
+    always reads it, and ``--full-hash`` reads every file again. A
+    filesystem that reports no inode or no mtime cannot vouch for a file.
+    """
+    if (not isinstance(prev, dict) or prev.get("status") != "current"
+            or not prev.get("content_sha256")
+            or prev.get("fingerprint_mode") not in ("full", "sampled")):
+        return None
+    st = abs_path.stat()
+    mtime_ns = getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9))
+    inode = getattr(st, "st_ino", 0)
+    if not mtime_ns or not inode:
+        return None
+    if (prev.get("size"), prev.get("mtime_ns"), prev.get("inode")) != (int(st.st_size), mtime_ns, inode):
+        return None
+    hashed_at = prev.get("hashed_at_ns")
+    # A unit recorded before the hash time was kept has no stamp: the stat
+    # match alone decides for it.
+    if hashed_at and mtime_ns >= int(hashed_at) - _RACY_WINDOW_NS:
+        return None
+    out = {k: prev[k] for k in ("content_sha256", "size", "mtime_ns", "inode",
+                                "fingerprint_mode") if k in prev}
+    if hashed_at:
+        out["hashed_at_ns"] = int(hashed_at)
+    return out
 
 
 def iter_evidence_files(case_dir: str | os.PathLike) -> Iterator[tuple[str, Path]]:
@@ -323,16 +366,63 @@ def iter_case_files(
                 yield rel, abs_p
 
 
+# How often the scan reports its progress, at most.
+_PROGRESS_SECONDS = 2.0
+
+
 def scan_evidence(
     case_dir: str | os.PathLike,
     *,
     force_full_hash: bool = False,
+    previous: dict[str, Any] | None = None,
+    progress: Optional[Any] = None,
 ) -> dict[str, dict[str, Any]]:
-    """Fingerprint all evidence files. Returns units keyed by evidence_id."""
-    units: dict[str, dict[str, Any]] = {}
-    for rel, abs_p in iter_evidence_files(case_dir):
+    """Fingerprint all evidence files. Returns units keyed by evidence_id.
+
+    A file the ``previous`` catalog fingerprinted and that has not changed
+    since (``_reused_fingerprint``) keeps that fingerprint instead of being
+    read again: a rerun over a large unchanged evidence set costs a stat per
+    file, not hours of hashing. ``force_full_hash`` reads every file, in full.
+
+    ``progress(done, total, done_bytes, total_bytes)``, when given, hears
+    where the scan stands: before the first file, at most every
+    ``_PROGRESS_SECONDS``, and after the last. A failing listener never
+    stops the scan.
+    """
+    prev_by_path: dict[str, dict[str, Any]] = {}
+    if not force_full_hash:
+        for unit in ((previous or {}).get("units") or {}).values():
+            if isinstance(unit, dict) and unit.get("path"):
+                prev_by_path[unit["path"]] = unit
+    files = list(iter_evidence_files(case_dir))
+    sizes = [0] * len(files)
+    if progress is not None:
+        for n, (_rel, abs_p) in enumerate(files):
+            try:
+                sizes[n] = abs_p.stat().st_size
+            except OSError:
+                pass
+    total_bytes, done_bytes, said_at = sum(sizes), 0, 0.0
+
+    def report(done: int) -> None:
+        nonlocal said_at
+        if progress is None:
+            return
+        now = time.monotonic()
+        if 0 < done < len(files) and now - said_at < _PROGRESS_SECONDS:
+            return
+        said_at = now
         try:
-            fp = fingerprint_file(abs_p, force_full=force_full_hash)
+            progress(done, len(files), done_bytes, total_bytes)
+        except Exception:  # noqa: BLE001 - a listener never stops the scan
+            pass
+
+    report(0)
+    units: dict[str, dict[str, Any]] = {}
+    for done, ((rel, abs_p), size) in enumerate(zip(files, sizes), 1):
+        try:
+            fp = (_reused_fingerprint(abs_p, prev_by_path.get(rel))
+                  or fingerprint_file(abs_p, force_full=force_full_hash))
         except OSError as e:
             units[f"ev_err_{hashlib.sha256(rel.encode()).hexdigest()[:12]}"] = {
                 "evidence_id": f"ev_err_{hashlib.sha256(rel.encode()).hexdigest()[:12]}",
@@ -340,15 +430,17 @@ def scan_evidence(
                 "status": "unreadable",
                 "error": str(e)[:200],
             }
-            continue
-        eid = evidence_id_for(rel, fp["content_sha256"])
-        units[eid] = {
-            "evidence_id": eid,
-            "path": rel,
-            "status": "current",
-            "parser_outputs": [],
-            **fp,
-        }
+        else:
+            eid = evidence_id_for(rel, fp["content_sha256"])
+            units[eid] = {
+                "evidence_id": eid,
+                "path": rel,
+                "status": "current",
+                "parser_outputs": [],
+                **fp,
+            }
+        done_bytes += size
+        report(done)
     return units
 
 

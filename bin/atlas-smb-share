@@ -87,10 +87,12 @@ cmd_enable() {
 # overwritten on the next \`atlas share enable\`. Remove via
 # \`atlas share disable\` or uninstall.sh --purge-system-packages.
 #
-# [global] here is included after the host's own smb.conf [global] section —
-# Samba takes the last value it reads per scalar parameter, so these apply
-# regardless of what the host's own config sets, without this script ever
-# parsing or rewriting that file.
+# The [global] options below are server-wide: included after the host's own
+# smb.conf [global] section, they apply to the whole Samba server (every share
+# it serves), since Samba keeps the last value it reads. A share-level
+# option set in [global] is only a default for shares defined after it, so
+# the Atlas share sets its own encryption itself. This script never parses
+# or rewrites the host's smb.conf.
 [global]
     server min protocol = SMB2
     smb encrypt = required
@@ -103,6 +105,7 @@ cmd_enable() {
     browseable = yes
     guest ok = no
     hide dot files = yes
+    smb encrypt = required
 EOF
     chmod 0644 "$SHARE_CONF"
 

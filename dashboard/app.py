@@ -74,6 +74,12 @@ PUBLIC_ASSET_NAMES = frozenset({"login.html", "reset_password.html"})
 PUBLIC_ASSET_PREFIXES = ("assets/", "vendor/")
 
 DASHBOARD_SRC = os.path.dirname(os.path.abspath(__file__))
+# What is served from DASHBOARD_SRC, which also holds the server's own Python:
+# the top-level pages and the files of the static directories (one level, no
+# dotfiles). The pages load nothing else.
+DASHBOARD_PAGE_RE = re.compile(r"[A-Za-z0-9_-]+\.html")
+DASHBOARD_STATIC_RE = re.compile(
+    "(?:" + "|".join(re.escape(p) for p in PUBLIC_ASSET_PREFIXES) + r")(?!\.)[A-Za-z0-9_.-]+")
 DASHBOARD_PREFIX = "/_dashboard/"
 API_PREFIX = "/_dashboard/api/"
 TRACE_RE = re.compile(r".*_trace\.json$", re.IGNORECASE)
@@ -432,6 +438,28 @@ def _guess_content_type(rel: str) -> str:
     return _IMAGE_CONTENT_TYPES.get(ext, "application/octet-stream")
 
 
+# Markup, script, style and SVG (markup too): what the dashboard serves as
+# active from its own files, readable as text when a case holds it.
+_CASE_TEXT_EXTENSIONS = frozenset({".html", ".js", ".css", ".svg"})
+
+
+def _case_content_type(rel: str) -> str:
+    """A case file's type, from a closed list a browser never runs or applies:
+    JSON and raster images keep theirs (the trace viewer reads the one, an
+    image is an image), what would run comes as plain text, and anything else
+    is a download. With nosniff, no page can then run a script or a style
+    sheet from a case file, whatever the dashboard's own mapping learns later.
+    """
+    ext = os.path.splitext(rel)[1].lower()
+    if ext == ".json":
+        return "application/json; charset=utf-8"
+    if ext in _IMAGE_CONTENT_TYPES:
+        return _IMAGE_CONTENT_TYPES[ext]
+    if ext in _CASE_TEXT_EXTENSIONS:
+        return "text/plain; charset=utf-8"
+    return "application/octet-stream"
+
+
 # ── application context and request helpers ───────────────────────────────
 
 class Ctx:
@@ -465,8 +493,15 @@ def _error_json(prefix: str, exc: Exception, status: int = 503) -> JSONResponse:
 
 
 def _bytes(body: bytes, *, content_type: str, filename: str) -> Response:
+    # Header values travel as Latin-1: a name that needs escaping (one outside
+    # it, or one holding a quote) goes in RFC 6266's filename*= form, the way
+    # Starlette's FileResponse writes it.
+    from urllib.parse import quote
+    quoted = quote(filename)
+    disposition = (f'attachment; filename="{filename}"' if quoted == filename
+                   else f"attachment; filename*=utf-8''{quoted}")
     return Response(body, media_type=content_type, headers={
-        "Content-Disposition": f'attachment; filename="{filename}"',
+        "Content-Disposition": disposition,
         "Cache-Control": "no-store",
     })
 
@@ -928,6 +963,11 @@ def _get_brain_knowledge(ctx, request, q):
 def _get_report_export(ctx, request, q):
     """One report file as markdown, HTML or PDF.
 
+    The name is looked up in the listing the Report tab is built from
+    (read_models.list_report_files), never joined to a directory here: every
+    report the tab lists can be downloaded, including one that sits in a
+    rerun snapshot, and the download is the file the tab previews.
+
     Markdown is served as it stands; the other two are rendered on request
     from that same file, so what a reader downloads always matches the report
     on disk rather than a copy that went stale when the run wrote again.
@@ -939,24 +979,28 @@ def _get_report_export(ctx, request, q):
     if fmt not in ("md", "markdown", "html", "pdf"):
         return _json({"error": f"unsupported format {fmt!r} — "
                                "use md, html or pdf"}, 400)
+    from dashboard import read_models
     name = os.path.basename(q.get("name") or "")
-    source = os.path.realpath(os.path.join(full, "reports", name))
-    # The name is a path component from the caller: keep it inside the case's
-    # own reports directory and refuse anything that climbed out of it.
+    entry = next((f for f in read_models.list_report_files(full)
+                  if f["kind"] == "report" and f["name"] == name), None)
+    # The listing keeps to the case's own reports directory already; this
+    # route reads what it is given, so it checks that again itself.
     root = os.path.realpath(os.path.join(full, "reports"))
-    if not name or not source.startswith(root + os.sep) \
-            or not os.path.isfile(source) or not source.endswith(".md"):
+    source = os.path.realpath(entry["abs_path"]) if entry else ""
+    if not source.startswith(root + os.sep) or not os.path.isfile(source):
         return _json({"error": "no such report file for this case"}, 404)
     case = os.path.basename(full)
     stem = os.path.splitext(name)[0]
     try:
         from pathlib import Path as _Path
-        text = _Path(source).read_text(encoding="utf-8")
+        raw = _Path(source).read_bytes()
     except OSError as e:  # noqa: BLE001
         return _error_json("report unreadable", e)
     if fmt in ("md", "markdown"):
-        return _bytes(text.encode("utf-8"), content_type="text/markdown",
-                      filename=name)
+        return _bytes(raw, content_type="text/markdown", filename=name)
+    # The renderers take text. A byte that is not UTF-8 shows as U+FFFD in
+    # the rendered copy; the Markdown download above keeps the exact bytes.
+    text = raw.decode("utf-8", errors="replace")
     if fmt == "html":
         from agent.report import render_html
         body = render_html(text, title=f"{case} report")
@@ -2198,11 +2242,19 @@ class _Files(StaticFiles):
     scripts use ``no-cache`` (revalidated with ETag/304, so an edit is picked
     up on the next reload without re-downloading unchanged files) while case
     files use ``no-store`` — evidence and findings do not belong in a browser
-    cache. A binary image under the dashboard may be cached for a day."""
+    cache. A binary image under the dashboard may be cached for a day.
 
-    def __init__(self, *, directory: str, cache_control: str):
+    ``content_type`` maps a path to its type, and ``policy``, when given,
+    replaces the dashboard's Content-Security-Policy, with nosniff set here,
+    on every answer that carries a file (a 304 or a refusal carries none):
+    case files are served as data (_case_content_type, CASE_FILE_POLICY)."""
+
+    def __init__(self, *, directory: str, cache_control: str,
+                 content_type=_guess_content_type, policy: str = ""):
         super().__init__(directory=directory)
         self.cache_control = cache_control
+        self.content_type = content_type
+        self.policy = policy
 
     def file_response(self, full_path, stat_result, scope, status_code=200):
         # A case under a handling stop never serves an image or a video.
@@ -2217,11 +2269,14 @@ class _Files(StaticFiles):
                                      status_code=403, headers={"cache-control": "no-store"})
         resp = FileResponse(full_path, status_code=status_code,
                             stat_result=stat_result,
-                            media_type=_guess_content_type(str(full_path)))
+                            media_type=self.content_type(str(full_path)))
         cacheable = (self.cache_control != "no-store"
                      and _is_cacheable_image(str(full_path)))
         resp.headers["cache-control"] = (
             "public, max-age=86400" if cacheable else self.cache_control)
+        if self.policy:
+            resp.headers["content-security-policy"] = self.policy
+            resp.headers["x-content-type-options"] = "nosniff"
         if self.is_not_modified(resp.headers, Headers(scope=scope)):
             return NotModifiedResponse(resp.headers)
         return resp
@@ -2278,6 +2333,21 @@ CONTENT_SECURITY_POLICY = "; ".join((
     "frame-ancestors 'none'",
 ))
 
+# A case file is data the dashboard reads (evidence, the run's analysis, its
+# reports), never part of the dashboard. Opened as a page, it is answered with
+# this policy in place of the dashboard's: a sandbox, so it gets an origin of
+# its own and no script, form or plugin, and nothing it may load. Inline style
+# only lays out the browser's own view of an image or a text. The directives
+# that do not fall back to default-src are named as well.
+CASE_FILE_POLICY = "; ".join((
+    "sandbox",
+    "default-src 'none'",
+    "style-src 'unsafe-inline'",
+    "base-uri 'none'",
+    "form-action 'none'",
+    "frame-ancestors 'none'",
+))
+
 
 # ── the application ───────────────────────────────────────────────────────
 
@@ -2285,7 +2355,9 @@ def create_app(cases_root: str, *, use_tls: bool = False,
                host_allowlist: frozenset[str] | None = None) -> Starlette:
     ctx = Ctx(cases_root, use_tls=use_tls, host_allowlist=host_allowlist)
     pages = _Files(directory=DASHBOARD_SRC, cache_control="no-cache")
-    case_files = _Files(directory=cases_root, cache_control="no-store")
+    case_files = _Files(directory=cases_root, cache_control="no-store",
+                        content_type=_case_content_type,
+                        policy=CASE_FILE_POLICY)
     feed = ChangeFeed(cases_root) if ChangeFeed is not None else None
     if feed is None:
         sys.stderr.write("[dashboard] live updates off: watchfiles is not "
@@ -2396,6 +2468,10 @@ def create_app(cases_root: str, *, use_tls: bool = False,
             rel = "dashboard.html"
         if ".." in rel.split("/") or rel.startswith("/"):
             return PlainTextResponse("forbidden", 403)
+        # Decided on the path alone, before any session lookup: the server's
+        # own files are not there for anyone, signed in or not.
+        if not (DASHBOARD_PAGE_RE.fullmatch(rel) or DASHBOARD_STATIC_RE.fullmatch(rel)):
+            return PlainTextResponse(f"not found: {rel}", 404)
         is_public = rel in PUBLIC_ASSET_NAMES or rel.startswith(PUBLIC_ASSET_PREFIXES)
         if not is_public and await user_of(request) is None:
             return _redirect_to_login(_path_and_query(request))

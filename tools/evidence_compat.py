@@ -204,10 +204,11 @@ def named_input_classes(
     there tells nothing about what the tool would read. Relative paths are
     resolved against the case directory the way the wrappers resolve them.
     """
-    from core.evidence_profile import classify_path
+    from core.evidence_profile import declared_kinds, path_classes
     from core.paths import INPUT_PATH_PARAM_NAMES
 
     classes: set[str] = set()
+    declared: dict[str, str] | None = None
     for key in INPUT_PATH_PARAM_NAMES:
         raw = (args or {}).get(key)
         if not isinstance(raw, str) or not raw.strip():
@@ -216,8 +217,17 @@ def named_input_classes(
         if not path.is_absolute() and case_dir:
             path = Path(case_dir) / path
         try:
-            if path.is_file():
-                classes.add(classify_path(path))
+            if not path.is_file():
+                continue
+            if declared is None:
+                declared = declared_kinds(case_dir) if case_dir else {}
+            try:
+                rel = str(path.resolve().relative_to(Path(case_dir).resolve())) if case_dir else ""
+            except ValueError:
+                rel = ""
+            # Every class a tool of which may read the file: an image with no
+            # signature serves a disk tool and a memory tool alike.
+            classes.update(path_classes(path, declared.get(rel, "")))
         except OSError:
             continue
     return classes

@@ -746,3 +746,88 @@ def test_a_refused_close_offers_the_reading_that_answers_the_open_part_first(tmp
     assert not r.get("success") and r["candidates"][0].startswith(o + " ")
     r = update_task(case, tid, status="answered", related_claim_ids=[o])
     assert r.get("success") and r["task"]["parts"][0]["status"] == "answered"
+
+
+_FENCED_BRIEF = (
+    "# Case CASE-A\n"
+    "\n"
+    "## What you already know\n"
+    "\n"
+    "- CORP-DC01 is the admin jump host.\n"
+    "\n"
+    "```\n"
+    "2031-03-04 10:02 logon jane.doe CORP-DC01\n"
+    "\n"
+    "## Investigation Requests\n"
+    "\n"
+    "1. Which account logged on to CORP-DC01?\n"
+    "2. When did the copy start?\n"
+)
+
+
+class TestUnclosedFence:
+    """A block that never closes hides everything after it from the parsers;
+    the helper says where, and what it hides."""
+
+    def test_names_the_opening_line_and_what_it_hides(self):
+        from core.investigation_tasks import unclosed_fence
+        fence = unclosed_fence(_FENCED_BRIEF)
+        assert fence["line"] == 7
+        assert "## Investigation Requests" in fence["hidden"]
+        assert fence["hidden_requests"] == 2
+
+    def test_closed_blocks_and_fences_in_comments_are_quiet(self):
+        from core.investigation_tasks import unclosed_fence
+        closed = _FENCED_BRIEF.replace("CORP-DC01\n\n## Inv", "CORP-DC01\n```\n\n## Inv")
+        assert unclosed_fence(closed) is None
+        assert unclosed_fence("<!--\n```\n-->\n## Investigation Requests\n\n- One?\n") is None
+
+    def test_numbering_is_the_files_own_across_a_comment(self):
+        from core.investigation_tasks import unclosed_fence
+        brief = "<!-- a two-line\n     comment -->\n```\n## Investigation Requests\n- One?\n"
+        assert unclosed_fence(brief)["line"] == 3
+
+    def test_a_trailing_paste_that_hides_nothing_is_quiet(self):
+        from core.investigation_tasks import unclosed_fence
+        assert unclosed_fence("## Investigation Requests\n\n- One?\n\n```\nlog line\nlog line\n") is None
+
+    def test_reconcile_drops_no_task_the_block_hides(self, tmp_path: Path):
+        case = tmp_path / "case"
+        case.mkdir()
+        three = ("## Investigation Requests\n\n- Which account logged on to CORP-DC01?\n"
+                 "- When did the copy start?\n- Was data sent to 203.0.113.9?\n")
+        (case / "CASE.md").write_text(three, encoding="utf-8")
+        reconcile_case_md(case, persist=True)
+        hidden = three.replace("- When did", "```\n- When did")
+        (case / "CASE.md").write_text(hidden, encoding="utf-8")
+        r = reconcile_case_md(case, persist=True)
+        assert r["dropped"] == [] and r["drops_skipped"] is True
+        assert r["unclosed_fence"]["line"] == 4
+        assert all(t["status"] != "dropped" for t in load_tasks(case)["tasks"])
+
+
+class TestThematicBreaksAreNoRequests:
+    """A CommonMark thematic break (`* * *`, `- - -`, `***`) separates; it is never a request, a request's
+    continuation or a child, at any indentation."""
+
+    BRIEF = ("**Case ID:** CASE-A\n\n## Investigation Requests\n"
+             "- Was data taken from CORP-FS01?\n* * *\n"
+             "- Who logged on to CORP-WS01?\n  - over which protocol\n- - -\n"
+             "1. Which tools ran?\n    * * *\n"
+             "* item with a star\n\t- - -\n***\n")
+
+    def test_breaks_create_no_request_and_end_the_item_above(self):
+        assert parse_case_requests(self.BRIEF) == [
+            "Was data taken from CORP-FS01?", "Who logged on to CORP-WS01?", "Which tools ran?",
+            "item with a star"]
+        children = {i["text"]: i["children"] for i in parse_case_request_items(self.BRIEF)}
+        assert children["Who logged on to CORP-WS01?"] == ["over which protocol"]
+        assert children["Which tools ran?"] == []
+
+    def test_a_reconciled_brief_holds_no_break_task(self, tmp_path):
+        case = tmp_path / "CASE-A"
+        (case / ".atlas").mkdir(parents=True)
+        (case / "CASE.md").write_text(self.BRIEF, encoding="utf-8")
+        reconcile_case_md(case)
+        texts = [t["text"] for t in load_tasks(case)["tasks"]]
+        assert "* *" not in texts and "- -" not in texts and len(texts) == 4

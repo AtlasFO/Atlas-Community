@@ -170,6 +170,26 @@ class TestAssessmentGate:
         assert any(x["class"] == "windows_eventlog"
                    for x in a["no_processing_needed"])
 
+    def test_event_logs_absent_loose_are_not_unavailable_beside_disk_images(self):
+        """A disk image holds event logs and mail stores as well as a package
+        delivers them loose: with images present, their absence as loose
+        files is no reason to skip the parsers."""
+        from core.evidence_inventory_gate import build_processing_assessment
+
+        def skip(present):
+            a = build_processing_assessment(
+                present=present, absent=["windows_eventlog", "email", "pcap"],
+                counts={c: 1 for c in present}, high_value_parsed=[],
+                samples_by_class={"disk": ["evidence/CORP-DC01.dd"]})
+            return {x["class"]: x for x in a["skip"]}
+
+        beside_disk = skip(["disk", "tabular"])
+        for cls in ("windows_eventlog", "email"):
+            assert "disk images may hold" in beside_disk[cls]["reason"]
+            assert "unavailable" not in beside_disk[cls]["meaning"]
+        assert "unavailable" in beside_disk["pcap"]["meaning"]
+        assert "do not run" in skip(["tabular"])["windows_eventlog"]["reason"]
+
     def test_refusal_points_at_inventory_only(self):
         from core.evidence_inventory_gate import inventory_gate_refusal
         msg = inventory_gate_refusal("ez_ez_recmd_hive")

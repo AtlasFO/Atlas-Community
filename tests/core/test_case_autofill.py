@@ -191,6 +191,17 @@ def test_reformat_prior_knowledge_names_indicators_the_rewrite_lost():
     assert out["dropped"] == ["email:jane.doe@example.test"]
 
 
+def test_a_fenced_block_reaches_the_rewrite_and_its_loss_is_named(tmp_path):
+    sha = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+    fenced = f"- We suspect data theft from CORP-WS01.\n\n```\nsha256 {sha}\n```"
+    case = _case_with(tmp_path, {}, md=_md_with_intake(fenced))
+    prior = build_proposal(case)["prior_knowledge"]
+    assert sha in prior
+    out = ask_llm_to_reformat_prior_knowledge(
+        prior, FakeClient('{"knowledge": ["We suspect data theft from CORP-WS01."], "requests": []}'))
+    assert out["dropped"] == [f"sha256:{sha}"]
+
+
 def test_reformat_prior_knowledge_unusable_reply_is_none():
     assert ask_llm_to_reformat_prior_knowledge(INTAKE, FakeClient("no json here")) is None
     assert ask_llm_to_reformat_prior_knowledge(INTAKE, FakeClient('{"knowledge": []}')) is None
@@ -239,3 +250,18 @@ def test_append_requests_creates_the_section_when_missing():
     assert out.endswith("## Investigation Requests\n\n- Was data taken?\n")
     assert "- a fact" in out
     assert append_requests(out, ["- was DATA taken?"]) == out
+
+
+def test_hidden_requests_are_not_an_empty_section(tmp_path):
+    """Requests an unclosed block hides are still the analyst's: autofill
+    reports the block and adds no standard question on top of them."""
+    from core.case_autofill import build_proposal
+    case = tmp_path / "case"
+    (case / "evidence").mkdir(parents=True)
+    (case / "CASE.md").write_text(
+        "# Case CASE-A\n\n## What you already know\n\n```\npasted line\n\n"
+        "## Investigation Requests\n\n- Which account logged on to CORP-DC01?\n",
+        encoding="utf-8")
+    proposal = build_proposal(case)
+    assert proposal["unclosed_fence"]["line"] == 5
+    assert proposal["investigation_requests_empty"] is False

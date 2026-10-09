@@ -169,3 +169,20 @@ def test_an_abbreviation_only_widens_the_scope():
     desc = "No events were recorded in the logs, e.g. Security.evtx and the rest."
     r = g.check(_ctx(desc, {1: CUT_EVTX}, [1]))
     assert r is not None and r["incomplete_call_id"] == 1
+
+
+def test_a_bounded_table_scan_is_not_a_complete_view():
+    """A scan stopped at a row bound saw only the head of the file, whether
+    the result says so in its flags or only by the row count it stopped at."""
+    from core.middleware import _result_meta
+    from tools._gates.universal_from_truncated import incomplete_reason
+    meta = _result_meta({"success": True, "hit_count": 0, "scan_capped": True,
+                         "scanned_rows": 5, "scan_capped_at": 5})
+    assert meta == {"hit_count": 0, "scan_capped": True, "scanned_rows": 5}
+    assert incomplete_reason({"result_meta": meta}) == \
+        "it scanned only the first 5 rows of the file"
+    count_only = {"stdout_excerpt": '{"hit_count": 0, "scan_capped_at": 200000}'}
+    assert "first 200000 rows" in incomplete_reason(count_only)
+    assert incomplete_reason({"result_meta": {"scan_capped": False, "scanned_rows": 9}}) == ""
+    assert incomplete_reason({"result_meta": {"hit_count": 50, "max_hits": 50}}) == \
+        "it stopped at the 50-hit cap"

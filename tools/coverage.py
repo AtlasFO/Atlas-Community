@@ -70,12 +70,16 @@ def coverage_report(relevant_tactics: str = "") -> dict:
               _atlas_call_id}.
     """
     from core.execution_log import log
-    from tools.mitre import load_techniques
 
-    idx = log.index()
-    findings = idx.by_type.get("finding", [])
-    dair_calls = idx.by_type.get("dair_call", [])
-    tool_calls = idx.by_type.get("tool_call", [])
+    by_type = log.index().by_type
+    return trace_coverage(by_type.get("finding", []), by_type.get("dair_call", []), relevant_tactics)
+
+
+def trace_coverage(findings: list[dict], dair_calls: list[dict], relevant_tactics: str = "") -> dict:
+    """coverage_report over the given finding and dair_call entries of a
+    trace: for a run graded from its trace file (atlas review), which must
+    not bind the process log."""
+    from tools.mitre import load_techniques
 
     # Checked: any T-ID appearing in a finding's description OR stamped on the
     # finding as a gate-validated technique (record_finding's mitre_techniques
@@ -278,12 +282,16 @@ def ledger_status() -> dict:
 @output_safe
 def mark_blocked(path: str, reason: str) -> dict:
     """
-    Mark ONE coverage-ledger unit as blocked with an auditable reason —
-    e.g. the file is corrupt, empty, unparseable, or its media class is
-    absent. Blocked counts toward the exit floor, so this is guarded: the
-    trace must contain at least one real tool call that targeted the path
-    (successful or failed). Attempt a probe first; blocked documents a
-    failed attempt, it does not replace one.
+    Mark ONE coverage-ledger unit as blocked with an auditable reason: a
+    read of it failed - the file is corrupt, empty or unparseable, the
+    image's filesystem does not open. Blocked counts toward the exit floor,
+    so this is guarded: the trace must hold a failed read of the path (an
+    applicable tool that ran on it and failed; a call a gate refused or one
+    with invalid arguments read nothing) and no successful one. Read the
+    unit first; blocked records the read that failed, it does not replace
+    one. An image is read through its filesystem (tsk.fls or
+    tsk.resolve_path, a mount or an export); tsk.mmls and tsk.fsstat only
+    identify it.
 
     path: case-relative evidence path as shown by coverage.ledger_status
         (e.g. "evidence/WS02/.../Security.evtx"), or a delivered evidence

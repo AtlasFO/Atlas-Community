@@ -69,3 +69,86 @@ def test_append_and_remove_write_the_case_file(tmp_path):
     assert case_knowledge.remove_fact(case, "A new fact.") is True
     assert "A new fact." not in case_knowledge.facts(case)
     assert case_knowledge.remove_fact(case, "A new fact.") is False
+
+
+# ── a fenced block is the analyst's pasted data ─────────────────────────
+
+SHA = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+FENCED = (
+    "# Case: Demo\n\n## What you already know\n\n"
+    "- We suspect data theft from CORP-WS01.\n\n"
+    "```\n"
+    "# pasted from the proxy export\n"
+    "- 203.0.113.7 upload 2031-01-02\n"
+    f"sha256 {SHA}\n"
+    "```\n\n"
+    "## Evidence Links\n\n| Label | Kind | Path | Notes |\n|---|---|---|---|\n"
+)
+
+
+def test_a_fenced_block_is_read_whole_but_not_split_into_facts():
+    text = case_knowledge.section_text(FENCED)
+    assert SHA in text
+    # A shell comment inside the fence is no heading and ends nothing.
+    assert "# pasted from the proxy export" in text
+    assert case_knowledge.facts_in(FENCED) == ["We suspect data theft from CORP-WS01."]
+
+
+def test_a_heading_like_line_in_a_fence_does_not_move_an_appended_fact():
+    out = case_knowledge.append_facts_text(FENCED, ["Backups were verified in 2031."])
+    body = out.split("## What you already know", 1)[1].split("## Evidence Links", 1)[0]
+    assert body.rindex("```") < body.index("- Backups were verified in 2031.")
+
+
+def test_remove_leaves_a_fenced_line_that_reads_like_the_fact():
+    md = FENCED.replace("- We suspect data theft from CORP-WS01.\n",
+                        "- 203.0.113.7 upload 2031-01-02\n")
+    out = case_knowledge.remove_fact_text(md, "203.0.113.7 upload 2031-01-02")
+    assert out.count("- 203.0.113.7 upload 2031-01-02") == 1
+    assert case_knowledge.facts_in(out) == []
+
+
+def test_a_section_holding_only_a_fence_is_present_and_seeds_it(tmp_path):
+    (tmp_path / "evidence").mkdir()
+    (tmp_path / "CASE.md").write_text(
+        f"# Case: Demo\n\n## What you already know\n\n```\nsha256 {SHA}\n```\n",
+        encoding="utf-8")
+    info = case_knowledge.read(tmp_path)
+    assert info["present"] and f"sha256:{SHA}" in info["indicators"]
+
+
+SEPARATED = (
+    "# CASE-A\n\n"
+    "## What you already know\n\n"
+    "- We suspect data theft from CORP-WS01.\n\n"
+    "* * *\n\n"
+    "- jane.doe received a phishing mail on 2031-01-02.\n\n"
+    "```\n"
+    "---\n"
+    "```\n\n"
+    "{brk}\n\n"
+    "## Evidence Links\n\n| Label | Kind | Path | Notes |\n|---|---|---|---|\n"
+)
+
+
+def test_the_break_before_the_next_heading_is_not_part_of_the_section():
+    for brk in ("---", "***", "___", "- - -", " * * *"):
+        text = case_knowledge.section_text(SEPARATED.format(brk=brk))
+        assert text.endswith("```"), brk
+        # An interior break and a break inside a fence are the analyst's text.
+        assert "* * *" in text and "---" in text
+
+
+def test_a_break_is_never_a_fact():
+    assert case_knowledge.facts_in(SEPARATED.format(brk="---")) == [
+        "We suspect data theft from CORP-WS01.",
+        "jane.doe received a phishing mail on 2031-01-02."]
+
+
+def test_the_prompt_block_ends_with_the_statements(tmp_path):
+    (tmp_path / "CASE.md").write_text(
+        "# CASE-A\n\n## What you already know\n\n- Backups of CORP-WS01 were verified.\n\n"
+        "---\n\n## Investigation Requests\n\n- What happened?\n", encoding="utf-8")
+    note = case_knowledge.prompt_note(tmp_path)
+    block = note.split("<<<PRIOR KNOWLEDGE", 1)[1].split("PRIOR KNOWLEDGE>>>", 1)[0]
+    assert block.strip().endswith("Backups of CORP-WS01 were verified.")

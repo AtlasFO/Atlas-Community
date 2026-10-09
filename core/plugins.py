@@ -28,7 +28,7 @@ from typing import Protocol, runtime_checkable
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _PLUGINS_PKG = "plugins"
-ATLAS_VERSION = "1.0.0"
+ATLAS_VERSION = "1.0.1"
 
 # Matches agent/cli.py's cmd_addon_create — an addon name is a Python
 # package name (plugins/<name>/ becomes `import plugins.<name>`).

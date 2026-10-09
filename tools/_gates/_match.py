@@ -147,16 +147,25 @@ _PROFILE_ROOTS = frozenset({"users", "documents and settings", "home", "user"})
 
 
 # A noun that labels a thing, followed within a few words by the quotation
-# that names it ('the sync job (id 4f2a) "Nightly Sync"', 'a file titled
-# "Q3 Plan"'). Universal vocabulary, not case knowledge. Nouns for people
-# (user, owner, account, person) are left out on purpose: a quoted name after
-# them may be exactly whom a finding accuses. Double quotes only, since a
-# single quote is also an apostrophe.
+# that names it ('the sync job (id 4f2a) "Nightly Sync"', "a file titled
+# 'Q3 Plan'"). Universal vocabulary, not case knowledge. Nouns for people are
+# left out on purpose, and the words between the noun and the quotation may
+# not hold one, nor an attribution cue ("by", "as"): a quoted name after them
+# may be exactly whom a finding accuses ('the task owner "Jane Doe"', 'the job
+# created by "Jane Doe"'). A single quote counts only as a quotation mark
+# standing apart from words, since it is also an apostrophe.
+_PEOPLE_NOUNS = (
+    r"user|owner|account|person|people|member|employee|author|sender|recipient|"
+    r"operator|admin|administrator|attacker|actor|suspect|subject|individual|"
+    r"insider|analyst|examiner|investigator|colleague|manager|contractor|"
+    r"customer|client|victim|witness")
 _THING_LABEL_RE = re.compile(
     r"(?i)\b(?:job|task|title|document|file|folder|field|tag|label|window|service|"
     r"bucket|project|sheet|slide|volume|share|playlist|column|rule|schedule|"
-    r"template|setting|entry|item)s?\b[^.!?\"\u201c\u201d\n]{0,40}?"
-    r"[\"\u201c]([^\"\u201d\n]{1,80})[\"\u201d]")
+    r"template|setting|entry|item)s?\b"
+    r"(?:(?!\b(?:(?:" + _PEOPLE_NOUNS + r")s?|by|as)\b)[^.!?\"\u201c\u201d\n]){0,40}?"
+    r"(?:[\"\u201c]([^\"\u201d\n]{1,80})[\"\u201d]"
+    r"|(?<![\w'])'([^'\n]{1,80})'(?![\w']))")
 
 
 def labelled_quote_words(text: str) -> set[str]:
@@ -164,7 +173,8 @@ def labelled_quote_words(text: str) -> set[str]:
     name for a job, a file or a field, not a person the finding names."""
     out: set[str] = set()
     for m in _THING_LABEL_RE.finditer(text or ""):
-        out.update(w.casefold() for w in re.findall(r"[A-Za-z][\w'-]*", m.group(1)))
+        quoted = m.group(1) or m.group(2)
+        out.update(w.casefold() for w in re.findall(r"[A-Za-z][\w'-]*", quoted))
     return out
 
 

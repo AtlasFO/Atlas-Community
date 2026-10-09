@@ -202,10 +202,12 @@ class TestLimitationsThroughTheTool:
         from core.investigation_tasks import update_task
         case, tid = self._case(tmp_path)
         monkeypatch.setattr("core.artifact_value.known_artifacts",
-                            lambda cd: {"evidence/tree/Windows/System32/config/SAM": {}})
+                            lambda cd: {"evidence/tree/windows/system32/config/sam": {
+                                "name": "SAM", "path": "evidence/tree/Windows/System32/config/SAM"}})
         r = update_task(case, tid, parts={"p2": {"limitation": {
             "basis": "source_absent", "reason": "no SAM hive was collected for the notebook"}}})
-        assert not r["success"] and r["gate"] == "task_part_limitation" and "SAM" in r["error"]
+        assert not r["success"] and r["gate"] == "task_part_limitation"
+        assert "'evidence/tree/Windows/System32/config/SAM' is present" in r["error"]
         r = update_task(case, tid, parts={"p2": {"limitation": {
             "basis": "source_absent", "reason": "no SECURITY hive was collected for the notebook"}}})
         assert r["success"] and r["task"]["parts"][1]["status"] == "limited"
@@ -569,3 +571,60 @@ def test_a_single_part_is_not_answered_through_its_requests_label():
     pid = t["parts"][0]["id"]
     rp.assign(t, {"C1": node}, ["C1"], explicit={pid: ["C1"]}, lenient=True)
     assert t["parts"][0]["status"] == "open"
+
+
+class TestNumberedNames:
+    """"USB#2" and "USB#3" share every word the part tests compare: a belief
+    answers the part's numbered name only when it writes that number."""
+
+    USB3 = _node("C1", "Files were copied to USB#3 at 2031-03-04 10:00 UTC.")
+
+    @pytest.mark.parametrize("text, carried", [
+        ("copied to usb #2", True), ("USB-2", True), ("USB 2", True), ("USB2", True), ("USB#02", True),
+        ("USB#3", False), ("USB#20", False), ("XUSB#2", False),
+    ])
+    def test_the_number_is_carried_with_any_separator(self, text, carried):
+        assert rp.anchors_carried("on USB#2", text) is carried
+
+    def test_the_hyphen_form_counts_in_capitals_only(self):
+        assert rp.anchors_carried("Was RM-3 accessed?", "rm3 was accessed")
+        assert not rp.anchors_carried("Was RM-3 accessed?", "RM-4 was accessed")
+        assert rp.anchors_carried("the Windows-10 build", "Windows 11")
+        assert rp.anchors_carried("on CORP-DC-01", "CORP-DC02")
+
+    @pytest.mark.parametrize("named", [False, True])
+    def test_a_belief_about_one_numbered_device_leaves_its_sibling_open(self, named):
+        t = {"text": "Removable media — activity on USB#2, activity on USB#3.", "status": "open",
+             "related_claim_ids": []}
+        rp.ensure_parts(t)
+        explicit = {"p1": ["C1"], "p2": ["C1"]} if named else None
+        assert rp.assign(t, {"C1": self.USB3}, ["C1"], explicit=explicit, lenient=True) == ["p2"]
+
+    @pytest.mark.parametrize("named", [False, True])
+    def test_a_value_part_takes_no_value_from_its_siblings_belief(self, named):
+        t = {"text": "Removable media — the serial number of USB#2, the serial number of USB#3.",
+             "status": "open", "related_claim_ids": []}
+        rp.ensure_parts(t)
+        node = _node("C1", "USB#3 (serial 1234567890AB) was attached to CORP-WS01 on 2031-03-04.")
+        explicit = {"p1": ["C1"], "p2": ["C1"]} if named else None
+        assert rp.assign(t, {"C1": node}, ["C1"], explicit=explicit, lenient=True) == ["p2"]
+
+    def test_a_kinds_own_name_is_no_numbered_name(self):
+        assert rp.anchors_carried("the SHA-256 of the dropper", "The dropper hashes to 3f2a...")
+
+    def test_a_yes_no_part_reads_the_number_in_the_clause(self):
+        t = {"text": "Removable media — whether files were copied to USB#2.", "status": "open",
+             "related_claim_ids": []}
+        rp.ensure_parts(t)
+        assert rp.assign(t, {"C1": self.USB3}, ["C1"], explicit={"p1": ["C1"]}, lenient=True) == []
+        usb2 = _node("C2", "Files were copied to USB #2 at 2031-03-04 10:00 UTC.")
+        assert rp.assign(t, {"C2": usb2}, ["C2"], explicit={"p1": ["C2"]}, lenient=True) == ["p1"]
+
+
+def test_a_yes_no_part_is_answered_by_a_lead_that_asserts_it_despite_a_trailing_caveat():
+    # "encrypted" and "encryption" share a stem; the caveat after "; " is no gap.
+    t = {"text": "Ransomware — was the share encrypted?", "status": "open", "related_claim_ids": []}
+    rp.ensure_parts(t)
+    node = _node("C1", "Encryption of the share began at 2031-01-01 10:00 UTC; the ransom note could not "
+                       "be recovered.")
+    assert rp.assign(t, {"C1": node}, ["C1"], lenient=True) == ["p1"]

@@ -327,6 +327,61 @@ def find_matching_node_ids(
     return sorted(hit)
 
 
+_RT = {
+    "en": {
+        "title": "Analyst's prior knowledge",
+        "lead": ("the analyst's statements from CASE.md ('What you already know'), "
+                 "not evidence. For each, the findings that name an address, "
+                 "account or host it names:"),
+        "named": "named in {fids}",
+        "none": "named in no finding",
+        "nothing": "names no address, account or host",
+        "more": "... and {n} more statement(s)",
+    },
+    "de": {
+        "title": "Vorwissen",
+        "lead": ("Aussagen aus CASE.md ('What you already know'), keine Belege. "
+                 "Je Aussage die Befunde, die eine darin genannte Adresse, ein "
+                 "Konto oder einen Host nennen:"),
+        "named": "genannt in {fids}",
+        "none": "in keinem Befund genannt",
+        "nothing": "nennt keine Adresse, kein Konto und keinen Host",
+        "more": "... und {n} weitere Aussage(n)",
+    },
+}
+_REPORT_MAX = 20
+
+
+def report_lines(case_dir: str | os.PathLike, findings: list[dict[str, Any]] | None = None,
+                 language: str = "en") -> list[str]:
+    """The Scope and Evidence block on the analyst's prior knowledge: each
+    standing statement with the report's findings that name what it names,
+    by the matcher that re-opens findings when a statement changes. A
+    statement that names no address, account or host says so; no match is
+    no verdict on it."""
+    active = list_context(case_dir, active_only=True)
+    if not active:
+        return []
+    tx = _RT["de" if language == "de" else "en"]
+    shown = {str(f.get("id")): str(f.get("finding_id") or f.get("id"))
+             for f in findings or [] if f.get("id")}
+    lines = [f"**{tx['title']}:** {tx['lead']}", ""]
+    for e in active[:_REPORT_MAX]:
+        text = " ".join(str(e.get("text") or "").split())
+        tokens = list(e.get("entities") or extract_entities(text))
+        if not tokens:
+            tail = tx["nothing"]
+        else:
+            fids = list(dict.fromkeys(shown[n] for n in find_matching_node_ids(
+                case_dir, entities=tokens) if n in shown))
+            tail = tx["named"].format(fids=", ".join(fids)) if fids else tx["none"]
+        shown_text = text if len(text) <= 300 else text[:299].rstrip() + "…"
+        lines.append(f"- `{e.get('id')}`: {shown_text} — {tail}")
+    if len(active) > _REPORT_MAX:
+        lines.append(tx["more"].format(n=len(active) - _REPORT_MAX))
+    return lines
+
+
 def apply_feedback(
     case_dir: str | os.PathLike,
     *,

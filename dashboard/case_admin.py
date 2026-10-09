@@ -23,7 +23,7 @@ import shutil
 from pathlib import Path
 from typing import Optional
 
-from core.investigation_tasks import reconcile_case_md
+from core.investigation_tasks import reconcile_case_md, unclosed_fence
 from core.mounts import unmount_all_under
 
 _CASE_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -177,7 +177,8 @@ def read_case_md(cases_root: str, case_id: str) -> dict:
     case_md = case_dir / "CASE.md"
     if not case_md.is_file():
         return {"exists": False, "content": ""}
-    return {"exists": True, "content": case_md.read_text(encoding="utf-8")}
+    content = case_md.read_text(encoding="utf-8")
+    return {"exists": True, "content": content, "unclosed_fence": unclosed_fence(content)}
 
 
 def write_case_md(cases_root: str, case_id: str, content: str) -> dict:
@@ -193,7 +194,9 @@ def write_case_md(cases_root: str, case_id: str, content: str) -> dict:
         raise CaseAdminError(f"no such case: {case_id!r}")
     write_case_markdown(case_dir, content)
     _sync_tasks(case_dir, case_id)
-    return {"success": True}
+    # A ``` line that never closes hides the rest of the brief from every
+    # parser: the editor says so instead of a plain "Saved.".
+    return {"success": True, "unclosed_fence": unclosed_fence(content)}
 
 
 def append_to_brief(cases_root: str, case_id: str, *,

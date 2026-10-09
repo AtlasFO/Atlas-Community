@@ -104,3 +104,12 @@ def test_sync_and_plan_seeds(tmp_path: Path):
     )
     el = plan.get("evidence_links") or {}
     assert el.get("aliases", {}).get("FILESRV01") == "FILESRV02"
+
+
+def test_a_thematic_break_in_the_evidence_links_section_is_no_entry():
+    brief = ("## Evidence Links\n"
+             "- CORP-WS01 | disk | evidence/CORP-WS01/disk.E01 | workstation\n"
+             "* * *\n- - -\n---\n"
+             "- CORP-WS02 | disk | evidence/CORP-WS02/disk.E01 | workstation\n")
+    labels = [e.get("label") for e in parse_evidence_links(brief).get("entries", [])]
+    assert labels == ["CORP-WS01", "CORP-WS02"]

@@ -219,3 +219,24 @@ class TestTheAnalystIsToldWhatIsMounted:
             msg = initial_user_message("who?", "ns", case_id="X",
                                        case_dir=tmp_path)
         assert "ALREADY MOUNTED" in msg and "mnt/imgA/fs" in msg
+
+
+_HIDDEN_REQUESTS_BRIEF = (
+    "# Case CASE-A\n\n## What you already know\n\n```\npasted line\n\n"
+    "## Investigation Requests\n\n- Which account logged on to CORP-DC01?\n")
+
+
+def test_a_start_whose_requests_a_block_hides_is_refused(tmp_path, capsys):
+    from types import SimpleNamespace
+    from agent import cli
+    case = tmp_path / "case"
+    case.mkdir()
+    (case / "CASE.md").write_text(_HIDDEN_REQUESTS_BRIEF, encoding="utf-8")
+    with pytest.raises(SystemExit) as stop:
+        cli._check_brief_fences(SimpleNamespace(question=""), case, refuse=True)
+    assert "line 5" in str(stop.value) and "nothing was started" in str(stop.value)
+    # -q names the objective: the start goes on, warned.
+    cli._check_brief_fences(SimpleNamespace(question="Who logged on?"), case, refuse=True)
+    # A rerun warns only.
+    cli._check_brief_fences(SimpleNamespace(), case, refuse=False)
+    assert capsys.readouterr().err.count("never closed") == 2

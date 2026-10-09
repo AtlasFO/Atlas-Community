@@ -54,7 +54,6 @@ _SECTION_HEADINGS = frozenset({
 # An angle-bracket token is a template placeholder, never a host or a path.
 _PLACEHOLDER_RE = re.compile(r"<[^<>\s]+>")
 _HEADING_RE = re.compile(r"^#{1,6}\s+(.+?)\s*$")
-_BULLET_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+(.+?)\s*$")
 _ALIAS_ARROW_RE = re.compile(
     r"^\s*(.+?)\s*(?:->|→|=)\s*(.+?)\s*$"
 )
@@ -244,6 +243,9 @@ def parse_evidence_links(
     entries: list[dict[str, Any]] = []
     in_section = False
     saw_table_header = False
+
+    # One bullet reader for the brief: a thematic break is no entry.
+    from core.investigation_tasks import _BULLET_RE
 
     # Strip HTML comments / fenced examples (same rules as investigation requests)
     try:

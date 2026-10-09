@@ -191,6 +191,26 @@ class TestReportEntryCoverageGate:
         assert all("report_entry_coverage" in n for n in notes[:3])
         assert notes[3] == ""  # deferral budget exhausted — never a deadlock
 
+    def test_an_unread_image_is_ordered_read_through_its_filesystem(self, tmp_path):
+        """The work order for an unseen disk image names a filesystem read,
+        not a table query: a table tool cannot read an image."""
+        from core.coverage_ledger import build_coverage_ledger
+        from tools import dair
+        case = tmp_path / "CASE-A"
+        (case / "evidence").mkdir(parents=True)
+        (case / ".atlas").mkdir()
+        (case / "analysis").mkdir()
+        (case / "evidence" / "CORP-DC01.dd").write_bytes(b"\x00" * 4096)
+        build_coverage_ledger(case)
+        dair._report_gate_deferrals = 0
+        try:
+            with patch.object(dair, "_case_root", return_value=str(case)):
+                note, tools = dair._report_entry_coverage_gate()
+        finally:
+            dair._report_gate_deferrals = 0
+        assert "evidence/CORP-DC01.dd" in note and "tsk.fls" in note
+        assert tools == ["coverage.ledger_status", "tsk.fls"]
+
     def test_ledger_ready_passes(self, tmp_path):
         from core.coverage_ledger import load_ledger, mark_paths, save_ledger
         from tools import dair

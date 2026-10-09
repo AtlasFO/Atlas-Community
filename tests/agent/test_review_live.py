@@ -549,3 +549,109 @@ def test_beacon_pointing_at_deleted_trace_falls_back(tmp_path, monkeypatch):
     trace, warn = resolve_review_trace(tmp_path, case_explicit=False)
     assert trace == fresh
     assert "missing trace" in warn
+
+
+# ── review without --live: the grade, for a run not in this process ────────
+
+GRADE_OK = "VERDICT: STRONG\n\n## Assessment\nSolid run.\n"
+GRADE_NEEDS_WORK = "VERDICT: NEEDS WORK\n\n## Assessment\nStalled in Triage.\n"
+
+
+def _case_with_trace(tmp_path: Path, case_id: str = "CASE-A") -> tuple[Path, Path]:
+    case = tmp_path / "cases" / "case-a"
+    (case / "analysis").mkdir(parents=True)
+    (case / "CASE.md").write_text("# Case CASE-A\n", encoding="utf-8")
+    entries = _healthy_entries() + [{
+        "type": "finding", "call_id": 900, "confidence": "LIKELY",
+        "description": "jane.doe logged on to CORP-DC01 at 2031-03-04 10:02 UTC."}]
+    trace = case / "analysis" / f"{case_id}_trace.json"
+    trace.write_text(json.dumps({"case_id": case_id, "entries": entries}), encoding="utf-8")
+    return case, trace
+
+
+def _args(trace=None, case=None, live=False):
+    return argparse.Namespace(live=live, case=case, trace=str(trace) if trace else None,
+                              question="", review_model="", json=False)
+
+
+def test_review_grades_the_run_into_the_traces_case(tmp_path, monkeypatch):
+    import agent.cli as cli
+    case, trace = _case_with_trace(tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    (elsewhere / "analysis").mkdir(parents=True)   # looks like a case to the old fallback
+    monkeypatch.chdir(elsewhere)
+    monkeypatch.setattr(cli, "_build_reviewer_client", lambda *a, **k: StubClient(GRADE_OK))
+    cli.cmd_review(_args(trace=trace))
+    assert (case / "reports" / "CASE-A_run_review.md").is_file()
+    assert not (elsewhere / "reports").exists()
+
+
+def test_a_graded_run_that_needs_work_exits_3(tmp_path, monkeypatch):
+    import agent.cli as cli
+    case, trace = _case_with_trace(tmp_path)
+    monkeypatch.setattr(cli, "_build_reviewer_client", lambda *a, **k: StubClient(GRADE_NEEDS_WORK))
+    with pytest.raises(SystemExit) as stop:
+        cli.cmd_review(_args(trace=trace, case=str(case)))
+    assert stop.value.code == 3
+
+
+def test_the_grade_never_binds_the_process_log(tmp_path, monkeypatch):
+    from core.execution_log import log
+    case, trace = _case_with_trace(tmp_path)
+    _beacon(tmp_path, monkeypatch, trace)     # a beacon naming that very trace
+    before_path, before_bytes = log._path, trace.read_bytes()
+    client = StubClient(GRADE_OK)
+    from agent.review import run_stats_from_disk
+    _cid, entries = load_trace_from_disk(trace)
+    result = Reviewer(client, case, UI(quiet=True)).review(
+        run_stats_from_disk(case, entries), trace_path=trace)
+    assert result["verdict"] == "STRONG"
+    assert log._path == before_path
+    assert trace.read_bytes() == before_bytes
+    context = client.messages[1]["content"]
+    assert "findings_recorded: 3" in context        # counted from the trace file
+    assert "TTP coverage: " in context and "not computed" not in context   # read from the file
+
+
+def test_a_trace_outside_any_case_is_refused(tmp_path, monkeypatch):
+    import agent.cli as cli
+    loose = tmp_path / "loose"
+    loose.mkdir()
+    trace = _write_trace(loose, _healthy_entries())
+    monkeypatch.setattr(cli, "_build_reviewer_client", lambda *a, **k: StubClient(GRADE_OK))
+    with pytest.raises(SystemExit) as stop:
+        cli.cmd_review(_args(trace=trace))
+    assert "pass --case" in str(stop.value)
+
+
+def test_a_live_review_without_case_lands_in_the_traces_case(tmp_path, monkeypatch):
+    import agent.cli as cli
+    case, trace = _case_with_trace(tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    (elsewhere / "analysis").mkdir(parents=True)
+    monkeypatch.chdir(elsewhere)
+    monkeypatch.setattr(cli, "_build_reviewer_client", lambda *a, **k: StubClient(LIVE_OUT))
+    try:
+        cli.cmd_review(_args(trace=trace, live=True))
+    except SystemExit:
+        pass
+    assert (case / "reports" / "CASE-A_live_review.md").is_file()
+    assert not (elsewhere / "reports").exists()
+
+
+def test_the_grade_reads_nothing_of_the_process_log(tmp_path, monkeypatch):
+    """Any read of the process log from the trace-file grade is a failure:
+    the log may belong to another run, and binding it rewrites a trace."""
+    import core.execution_log as el
+    from agent.review import run_stats_from_disk
+
+    class _Untouchable:
+        def __getattr__(self, name):
+            raise AssertionError(f"the review read the process log ({name})")
+
+    case, trace = _case_with_trace(tmp_path)
+    _cid, entries = load_trace_from_disk(trace)
+    monkeypatch.setattr(el, "log", _Untouchable())
+    result = Reviewer(StubClient(GRADE_OK), case, UI(quiet=True)).review(
+        run_stats_from_disk(case, entries), trace_path=trace)
+    assert result["verdict"] == "STRONG"

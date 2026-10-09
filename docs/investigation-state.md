@@ -13,7 +13,7 @@ This is separate from:
 | `evidence/` | Immutable inputs (read-only contract) |
 | `analysis/` | Derived artifacts + **execution trace** (process audit) |
 | `reports/` | Client deliverables (projections — not source of truth) |
-| `CASE.md` | Investigator **work inbox** (Investigation Requests, plus an optional *What you already know* section for prior knowledge — Atlas seeds searches from its indicators and treats its theory as a lead, never as a finding) — not the state store. See [architecture-case-driven.md](architecture-case-driven.md). |
+| `CASE.md` | Investigator **work inbox** (Investigation Requests, plus an optional *What you already know* section for prior knowledge — Atlas seeds searches from its indicators, treats a theory as a lead and an environment fact as context, never as a finding or an allowlist) — not the state store. See [architecture-case-driven.md](architecture-case-driven.md). |
 
 Lazy bootstrap: the first `atlas rerun` creates missing `.atlas/` files automatically. No manual migration.
 
@@ -129,7 +129,7 @@ atlas rerun --correct-context ac-0001 -q "updated wording" --no-agent
 
 ### `rerun_brief.md`
 
-Human/AI-readable continuity brief for the next investigation step. Regenerated each persist `atlas rerun`. Includes evidence dirty set, claims requiring review, **new/active analyst context**, claims matched by context, and an explicit rule: context is not a blind allowlist.
+Human/AI-readable continuity brief for the next investigation step. Regenerated each persist `atlas rerun`. Includes evidence dirty set, claims requiring review, **new and withdrawn analyst context** (every standing statement is in the system prompt's PRIOR KNOWLEDGE block, with its id), claims matched by context, and the rule: context is not a blind allowlist.
 
 ### `run_history/run-NNNN.json`
 

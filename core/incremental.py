@@ -140,13 +140,15 @@ def plane_a_scan(
     analyst_feedback: str | None = None,
     withdraw_context_id: str | None = None,
     correct_context_id: str | None = None,
+    progress: Any = None,
 ) -> dict[str, Any]:
     """
     Plane A (6a–6d): bootstrap + fingerprint + diff + invalidate + brief + journal.
 
     Does not launch an AI agent. Dirty set is a starting point only.
     Optional analyst_feedback / withdraw / correct mutate investigation_memory
-    (not evidence) and mark matching claims needs_review.
+    (not evidence) and mark matching claims needs_review. ``progress`` hears
+    the fingerprinting's progress (core.evidence_catalog.scan_evidence).
     """
     started_at = _utcnow()
     root = Path(case_dir).resolve()
@@ -158,7 +160,8 @@ def plane_a_scan(
     previous = load_catalog(root)
     first_scan = not (previous.get("units"))
 
-    current_units = scan_evidence(root, force_full_hash=force_full_hash)
+    current_units = scan_evidence(root, force_full_hash=force_full_hash, previous=previous,
+                                  progress=progress)
     diff = diff_catalogs(previous, current_units)
 
     # Analyst context. The brief's "What you already know" bullets are its
@@ -557,6 +560,26 @@ def plane_a_scan(
             ".atlas/report_projection/."
         ),
     }
+    # Disk and memory images are counted by the calls that read them, as the
+    # live run counts each call; ledger statuses that disagree with the
+    # trace are recounted from it before the work list reads them.
+    if persist:
+        try:
+            from core.coverage_ledger import rederive_container_coverage
+            rederived = rederive_container_coverage(root)
+        except Exception as e:  # noqa: BLE001 - the work list stands without it
+            rederived = {}
+            result["coverage_rederive_error"] = str(e)[:200]
+        if rederived:
+            result["coverage_rederived"] = rederived
+            recounted = sorted({p for v in rederived.values() for p in v})
+            journal_hints.append({
+                "reason": "coverage_rederived",
+                "summary": (f"Coverage recounted from the trace: "
+                            f"{_count(len(recounted), 'image')} moved"),
+                "related_ids": [],
+                "details": rederived,
+            })
     # The task store as it stands after the reconcile, the reopens and the
     # derived follow-ups above; a dry run only has the reconcile's own list.
     if persist:
@@ -725,7 +748,11 @@ def summarize_work(result: dict[str, Any], *, open_tasks: list[dict[str, Any]]) 
     except Exception:  # noqa: BLE001
         not_read = []
     if not_read:
-        reasons.append(f"{_count(len(not_read), 'delivered item')} not yet examined")
+        rederived = result.get("coverage_rederived") or {}
+        recounted = set(rederived.get("demoted") or []) | set(rederived.get("unblocked") or [])
+        reasons.append(f"{_count(len(not_read), 'delivered item')} not yet examined"
+                       + (f" ({len(recounted)} recounted from the trace: no call had "
+                          "read them)" if recounted else ""))
     pending = bool(any(evidence.values()) or review or conflicts or open_questions
                    or followups or context_added or context_gone or not_read)
     return {
@@ -828,6 +855,19 @@ def format_plane_a_report(result: dict[str, Any]) -> str:
         [{"id": s} for s in (result.get("affected_report_sections") or [])],
         key="id",
     )
+    rederived = result.get("coverage_rederived") or {}
+    if rederived:
+        lines.append("Coverage recounted from the trace:")
+        for key, label in (("demoted", "counted as read, but no call read it"),
+                           ("unblocked", "blocked, but no read of it failed"),
+                           ("credited", "read, but counted as not examined")):
+            paths = rederived.get(key) or []
+            if paths:
+                lines.append(f"  {label}: {len(paths)}")
+                lines.extend(f"    - {p}" for p in paths[:10])
+                if len(paths) > 10:
+                    lines.append(f"    … {len(paths) - 10} more")
+        lines.append("")
     work = result.get("work") or {}
     if work.get("pending"):
         lines.append("Work for the investigator:")

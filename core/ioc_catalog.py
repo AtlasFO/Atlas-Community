@@ -997,6 +997,34 @@ def _suppressed(category: str, value: str) -> bool:
 
 # ── the catalog ──────────────────────────────────────────────────────────
 
+def _not_exported(refused: list[dict[str, Any]], *buckets: dict[tuple[str, str], Ioc]) -> list[dict[str, Any]]:
+    """The refused rows still owed to the reader, one per value with every
+    finding that typed it. A value the catalog lists anyway (typed by another
+    belief under any type, or read from a belief's wording) is left out, as
+    is one whose suggested digest is listed and a hash within two edits of
+    a listed one (the slip it was)."""
+    from core.indicators import within_edits
+    listed = {i.value.lower() for b in buckets for i in b.values()}
+    hashes = [i.value.lower() for b in buckets for i in b.values() if i.category == "hash"]
+    rows: dict[tuple[str, str], dict[str, Any]] = {}
+    for r in refused:
+        key = (r["category"], r["value"].lower())
+        if (key[1] in listed or (r["suggested"] and r["suggested"].lower() in listed)
+                or (r["category"] == "hash" and any(within_edits(key[1], h) is not None for h in hashes))):
+            continue
+        prev = rows.get(key)
+        if prev is None:
+            rows[key] = dict(r)
+            continue
+        prev["claim_ids"] += [c for c in r["claim_ids"] if c not in prev["claim_ids"]]
+        prev["finding_call_ids"] += [c for c in r["finding_call_ids"]
+                                     if c not in prev["finding_call_ids"]]
+        prev["hosts"] += [h for h in r["hosts"] if h not in prev["hosts"]]
+        if r["confidence"] in ("CONFIRMED", "LIKELY"):
+            prev["confidence"] = r["confidence"]
+    return list(rows.values())
+
+
 def build_catalog(case_dir: str | os.PathLike) -> dict[str, Any]:
     """Curated indicators for a case, derived purely from recorded beliefs.
 
@@ -1026,6 +1054,7 @@ def build_catalog(case_dir: str | os.PathLike) -> dict[str, Any]:
     actionable: dict[tuple[str, str], Ioc] = {}
     review: dict[tuple[str, str], Ioc] = {}
     affected: dict[tuple[str, str], Ioc] = {}
+    refused: list[dict[str, Any]] = []
 
     def place(ioc: Ioc) -> None:
         bucket = (affected if ioc.side == own_side and ioc.role in (AFFECTED_ASSET, COMPROMISED_HOST, SUBJECT_IDENTIFIER) and frame != "subject"
@@ -1070,6 +1099,18 @@ def build_catalog(case_dir: str | os.PathLike) -> dict[str, Any]:
                       first_seen=str(r.get("first_seen") or ""), last_seen=str(r.get("last_seen") or ""),
                       compromised=bool(r.get("compromised")), note=str(r.get("note") or "")))
 
+        # Typed rows refused at record time: listed as not exported, never
+        # as an indicator.
+        for d in (node.get("indicators_dropped") or []) if node.get("kind") in ("claim", "conclusion") else []:
+            if isinstance(d, dict) and d.get("value"):
+                refused.append({"value": str(d["value"]), "category": str(d.get("type") or ""),
+                                "reason": str(d.get("reason") or ""),
+                                "refusal": str(d.get("refusal") or ""),
+                                "suggested": str(d.get("suggested") or ""),
+                                "claim_ids": [node_id] if node_id else [],
+                                "finding_call_ids": [src] if isinstance(src, int) else [],
+                                "hosts": [host] if host else [],
+                                "confidence": str(node.get("confidence") or "").upper()})
         if not prose_usable:
             continue
         cands = [(c, v) for c, v in _candidates(statement, tool_terms)
@@ -1130,6 +1171,7 @@ def build_catalog(case_dir: str | os.PathLike) -> dict[str, Any]:
         target = actionable.get(key) or affected.get(key)
         if target is not None:
             _fold(target, review.pop(key))
+    not_exported = _not_exported(refused, actionable, affected, review)
     iocs = sorted(actionable.values(), key=_sort_key)
     review_rows = sorted(review.values(), key=_sort_key)
     affected_rows = sorted(affected.values(), key=_sort_key)
@@ -1158,6 +1200,8 @@ def build_catalog(case_dir: str | os.PathLike) -> dict[str, Any]:
         "by_role": by_role,
         "iocs": [i.to_dict() for i in iocs],
         "review": [i.to_dict() for i in review_rows],
+        "not_exported": not_exported,
+        "not_exported_total": len(not_exported),
         "affected_assets": [i.to_dict() for i in affected_rows],
         "tld_list_missing": tld_list_missing(),
     }
@@ -1245,6 +1289,20 @@ def _table(rows: list[dict[str, Any]], columns: list[tuple[str, str]]) -> list[s
     return lines
 
 
+def _not_exported_lines(catalog: dict[str, Any]) -> list[str]:
+    """The rows typed for a finding but refused when it was recorded: in no
+    list above and never in the CSV, listed so the reader knows of them."""
+    rows = catalog.get("not_exported") or []
+    if not rows:
+        return []
+    return (["## Not exported", "",
+             "Named by the analyst for a finding but refused when it was recorded (malformed, "
+             "or not shown by the calls the finding cites): in no list above and never in the "
+             "CSV.", ""]
+            + _table(rows, [("Value", "value"), ("Type", "category"),
+                            ("Why it was refused", "reason"), ("Finding", "claim_ids")]) + [""])
+
+
 def render_markdown(catalog: dict[str, Any], *, case_id: str = "") -> str:
     """The deliverable: a list a responder can act on, with provenance."""
     frame = catalog.get("frame") or "incident"
@@ -1263,7 +1321,7 @@ def render_markdown(catalog: dict[str, Any], *, case_id: str = "") -> str:
                   "This is a statement about the recorded beliefs, not about "
                   "the evidence: indicators are derived only from findings "
                   "the investigation actually recorded.", ""]
-        return "\n".join(lines)
+        return "\n".join(lines + _not_exported_lines(catalog))
     lines += [f"{len(iocs)} typed indicator(s), {len(affected)} own asset(s) and "
               f"{len(review)} prose-derived candidate(s) from "
               f"{catalog.get('beliefs_considered', 0)} recorded belief(s). Every row cites the "
@@ -1306,7 +1364,7 @@ def render_markdown(catalog: dict[str, Any], *, case_id: str = "") -> str:
                   "each value against its finding before it enters a block list or a hunt.", ""]
         lines += _table(review, [("Value", "value"), ("Type", "category"), ("What the belief says", "explanation"),
                                  ("Finding", "claim_ids")]) + [""]
-    return "\n".join(lines)
+    return "\n".join(lines + _not_exported_lines(catalog))
 
 
 def _csv_safe(value: str) -> str:
@@ -1368,6 +1426,7 @@ def write_indicator_files(case_dir: str | os.PathLike) -> dict[str, Any]:
         return {"markdown": str(md_path), "csv": str(csv_path), "total": catalog.get("total") or 0,
                 "review_total": catalog.get("review_total") or 0,
                 "affected_total": catalog.get("affected_total") or 0, "frame": catalog.get("frame"),
+                "not_exported_total": catalog.get("not_exported_total") or 0,
                 "by_use": catalog.get("by_use") or {}}
     except Exception:  # noqa: BLE001
         return {}
