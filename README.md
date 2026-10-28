@@ -157,6 +157,8 @@ Full command list: [docs/cli-reference.md](docs/cli-reference.md), or `atlas --h
 
 ## The dashboard
 
+![A 34-second walkthrough of the dashboard: the Overview of a finished case, creating a new case with two questions, starting its run, then the finished case's Questions, Case Findings, IoCs, Response and Process tabs and its report's executive summary](docs/media/dashboard-walkthrough.gif)
+
 `./dashboard.sh` serves it on `http://127.0.0.1:8765` (LAN and HTTPS via `install.sh --with-dashboard-lan`). The first visit creates the admin account; users get one of three roles (viewer, analyst, admin), and sessions end after an idle timeout and an absolute limit the admin sets. Pages update themselves as a run writes; nothing needs a reload.
 
 <table>
