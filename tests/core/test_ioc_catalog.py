@@ -15,6 +15,15 @@ from core.ioc_catalog import (
     _ACTION_PHRASES,
 )
 
+
+@pytest.fixture(autouse=True)
+def _catalogue_before_sightings(monkeypatch):
+    """This module pins the indicator lists built from recorded beliefs
+    alone (ATLAS_IOC_SIGHTED_CATALOG=0); the sighted lists are pinned in
+    tests/core/test_sighted_catalog.py."""
+    monkeypatch.setenv("ATLAS_IOC_SIGHTED_CATALOG", "0")
+
+
 # The identities the fixtures below invent. The guard at the end of the
 # module checks that none of them reaches core/ioc_catalog.py's logic.
 HOST = "FILESRV01"
@@ -23,7 +32,7 @@ CREATOR = "jane.doe"
 DOMAIN = "EXAMPLE"
 RANSOM_EXT = ".locked"
 DROPPED_TOOL = "toolx"
-FIXTURE_IDENTITIES = (HOST, ACCOUNT, CREATOR, DOMAIN, RANSOM_EXT, DROPPED_TOOL)
+FIXTURE_IDENTITIES = (HOST, ACCOUNT, CREATOR, DOMAIN, RANSOM_EXT, DROPPED_TOOL, "Jdoe", "Admin2", "svc_backup")
 
 
 def _case(tmp_path, *statements):
@@ -38,6 +47,9 @@ def _case(tmp_path, *statements):
         for i, s in enumerate(statements, start=1)
     }
     (atlas / "claim_graph.json").write_text(json.dumps({"nodes": nodes}))
+    # The incident frame these lists are pinned in is the brief's statement.
+    if not (tmp_path / "CASE.md").exists():
+        (tmp_path / "CASE.md").write_text("**Case ID:** CASE-A\n**System owner:** victim\n", encoding="utf-8")
     return tmp_path
 
 
@@ -415,7 +427,7 @@ def test_corroborated_binary_still_lists(tmp_path):
     ("analysis/hostile_data.csv", "host", False),
 ])
 def test_host_attribution_needs_no_naming_convention(rel, host, expect):
-    """An earlier version guessed from name prefixes ("srv", "dc", "ws")."""
+    """A guess from name prefixes ("srv", "dc", "ws") must not decide it."""
     from core.ioc_pivots import _source_is_about_host
     assert _source_is_about_host(rel, host) is expect
 
@@ -563,6 +575,17 @@ def test_an_email_needs_a_real_top_level_domain(tmp_path):
     assert emails == {"spy@example.net"}
 
 
+def test_an_address_host_is_never_read_by_the_file_name_rules():
+    # pl, sh and md are file extensions and delegated top-level domains: after
+    # "@" they name a host. A bare readme.md stays a file, a special-use
+    # host stays out.
+    cands = _candidates("Mail from anna.przyklad@corp.example.pl, ops@build.example.sh, a@b.example.md "
+                        "and jane@corp.local reached the host; the notes sat in readme.md.", set())
+    assert {v for c, v in cands if c == "email"} == {
+        "anna.przyklad@corp.example.pl", "ops@build.example.sh", "a@b.example.md"}
+    assert ("file", "readme.md") in cands
+
+
 def test_a_special_use_name_is_never_an_account_or_infrastructure(tmp_path):
     cat = build_catalog(_case(
         tmp_path,
@@ -589,3 +612,160 @@ def test_a_lexicon_name_alone_never_promotes(tmp_path):
         "The attacker ran mimikatz.exe from C:\\\\Users\\\\Public\\\\ to dump credentials, "
         "a malicious credential theft."))
     assert _by_value(used, "mimikatz.exe")["role"] == "attacker_tool"
+
+
+def test_statement_candidates_is_the_public_name_of_the_harvester():
+    """The answer check reads a statement's names through the catalogue's
+    own harvester, with or without tool terms."""
+    from core.ioc_catalog import _candidates, statement_candidates
+    statement = "CORP\\jane.doe ran C:\\Users\\jane.doe\\Downloads\\dropper.exe and reached 203.0.113.7."
+    assert statement_candidates(statement) == _candidates(statement, set())
+    pairs = dict(statement_candidates(statement, ["rclone"]))
+    assert pairs.get("ip") == "203.0.113.7" and pairs.get("account") == "jane.doe"
+    assert ("file", "rclone") in statement_candidates("An rclone upload followed.", ["rclone"])
+
+
+# ── group names, bare tool terms, onion services ─────────────────────────
+
+def test_a_multi_word_group_name_is_no_principal_and_a_logon_name_stays():
+    cands = _candidates(
+        r"Members of BUILTIN\Remote Desktop Users and EXAMPLE\Remote Management Users; BUILTIN\Administrators "
+        r"gained a member; "
+        r"EXAMPLE\jane.doe Logged on twice and EXAMPLE\tempadmin was added.", set())
+    accounts = {v.lower() for c, v in cands if c == "account"}
+    assert accounts == {CREATOR, ACCOUNT}
+
+
+def test_the_group_shape_rule_keeps_the_row_when_in_doubt():
+    # A logon name carries a digit, a dot or an underscore, is mixed or lower
+    # case, or is followed by capitalised words that do not end in a plural.
+    for statement, name in ((r"EXAMPLE\Admin2 Created a task", "admin2"),
+                            (r"EXAMPLE\svc_backup Started it", "svc_backup"),
+                            (r"EXAMPLE\Operator logged on, then EXAMPLE\Operator Left", "operator"),
+                            (r"EXAMPLE\Administrator Logon Type 10 from 203.0.113.7", "administrator"),
+                            (r"EXAMPLE\Svcbackup RDP session to the server", "svcbackup"),
+                            (r"EXAMPLE\McAdmin Remote Users were listed", "mcadmin"),
+                            (r"EXAMPLE\Jdoe Remote Access granted", "jdoe")):
+        assert name in {v.lower() for c, v in _candidates(statement, set()) if c == "account"}, statement
+    # A title-case word whose capitalised run ends in a plural is a group.
+    assert not [v for c, v in _candidates(r"EXAMPLE\Backup Operators were changed", set()) if c == "account"]
+    # Ceiling: a title-case name before a capitalised word in s, a verb or a
+    # plural noun, reads as a group.
+    for statement in (r"EXAMPLE\Jdoe Connects to the share",
+                      r"EXAMPLE\Administrator Logon Events were cleared"):
+        assert not [v for c, v in _candidates(statement, set()) if c == "account"], statement
+
+
+def test_a_bare_tool_term_adds_no_row_beside_the_file_that_carries_it(tmp_path):
+    cands = _candidates("The intruder ran psexec, staged as PsExec64.exe in C:\\Temp.", {"psexec"})
+    assert [v.lower() for c, v in cands if c == "file"] == ["psexec64.exe"]
+    # Only between non-letters: a learned short term inside another word stays its own row.
+    cands = _candidates("The intruder used net to map shares, then magnet.exe ran.", {"net"})
+    assert {v.lower() for c, v in cands if c == "file"} == {"net", "magnet.exe"}
+    # A typed row carrying the term absorbs the bare word too.
+    atlas = tmp_path / ".atlas"
+    atlas.mkdir()
+    (atlas / "claim_graph.json").write_text(json.dumps({"nodes": {"C0001": {
+        "id": "C0001", "kind": "claim", "statement": "The intruder ran psexec against the server.",
+        "confidence": "LIKELY", "host": HOST, "input_call_ids": [1],
+        "indicators": [{"type": "file", "value": "PsExec64.exe", "side": "attacker"}]}}}))
+    files = [i["value"].lower() for i in _rows(build_catalog(tmp_path)) if i["category"] == "file"]
+    assert files == ["psexec64.exe"]
+
+
+def test_an_onion_service_url_in_prose_is_a_candidate():
+    """The vendored top-level list carries the onion suffix (RFC 7686) in
+    its reserved block: a full onion URL is a candidate."""
+    label = "a" * 52 + "abcd"                                  # a v3 onion label is 56 characters
+    url = f"http://{label}.onion/pay?id=7"
+    cands = _candidates(f"The note directs the victim to {url} to pay.", set())
+    assert ("domain", url) in cands
+
+
+def test_a_presence_refused_typed_value_is_not_re_typed_from_prose(tmp_path):
+    atlas = tmp_path / ".atlas"
+    atlas.mkdir()
+    (atlas / "claim_graph.json").write_text(json.dumps({"nodes": {"C0001": {
+        "id": "C0001", "kind": "claim", "confidence": "LIKELY", "host": HOST, "input_call_ids": [1],
+        "statement": "The intruder connected to 203.0.113.5 and exfiltrated the archive.",
+        "indicators_dropped": [{"type": "ip", "value": "203.0.113.5", "side": "victim",
+                                "reason": "no tool output shows it", "refusal": "presence"}]}}}))
+    assert "203.0.113.5" not in _values(build_catalog(tmp_path), "ip")
+
+
+# ── the neutral frame: the brief names no system owner ───────────────────────
+
+def _neutral(tmp_path, nodes):
+    (tmp_path / ".atlas").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "CASE.md").write_text("**Case ID:** CASE-N\n**Engagement:** examination\n", encoding="utf-8")
+    (tmp_path / ".atlas" / "claim_graph.json").write_text(json.dumps({"nodes": nodes}))
+    return tmp_path
+
+
+def test_a_prose_value_with_no_side_is_listed_for_review_and_a_case_file_is_not(tmp_path):
+    from core.indicators import frame_for
+    d = _neutral(tmp_path, {"C0001": {
+        "id": "C0001", "statement": f"The export holds report.pdf with sha256 {'5c' * 32}; the image disk02.dd "
+                                    "was read.", "confidence": "LIKELY", "host": HOST, "input_call_ids": [1]}})
+    assert frame_for(d) == "neutral"
+    cat = build_catalog(d)
+    review = {r["value"]: r for r in cat["review"]}
+    assert "5c" * 32 in review and review["5c" * 32]["side"] == "undetermined" and review["5c" * 32]["use"] == ["review"]
+    assert not any("disk02" in str(r["value"]) for r in cat["review"] + cat["iocs"])
+    assert cat["frame"] == "neutral"
+    assert "Frame: neutral" in render_markdown(cat, case_id="CASE-N")
+
+
+@pytest.mark.parametrize("confidence, attacker_from, kept", [
+    ("LIKELY", "", True), ("CONFIRMED", "", True), ("SUSPECTED", "", False),
+    ("SUSPECTED", "2031-03-04 10:16:00", True)])
+def test_a_typed_side_stands_only_on_its_findings_own_basis(tmp_path, confidence, attacker_from, kept):
+    """No owner named: a typed side keeps its uses when the row keeps the
+    moment the attacker acted (attacker_from) or the finding holds LIKELY
+    or above after its evaluation; else it takes no side."""
+    row = {"type": "ip", "value": "198.51.100.23", "side": "attacker"}
+    if attacker_from:
+        row["attacker_from"] = attacker_from
+    d = _neutral(tmp_path, {"C0001": {"id": "C0001", "kind": "claim", "status": "new",
+                                      "statement": "A session reached 198.51.100.23.", "confidence": confidence,
+                                      "host": HOST, "input_call_ids": [1], "indicators": [row]}})
+    rows = [r for r in build_catalog(d)["iocs"] if r["value"] == "198.51.100.23"]
+    assert rows
+    if kept:
+        assert rows[0]["side"] == "attacker" and "block" in rows[0]["use"]
+    else:
+        assert rows[0]["side"] == "undetermined" and rows[0]["use"] == ["review"]
+
+
+def test_a_side_one_findings_basis_states_holds_whichever_belief_came_first(tmp_path):
+    """Two findings type one address: the earlier (SUSPECTED) leaves it
+    undetermined in the neutral frame, the later (LIKELY) states its side;
+    the row takes the stated side."""
+    row = {"type": "ip", "value": "198.51.100.23", "side": "third_party"}
+    d = _neutral(tmp_path, {
+        "C0001": {"id": "C0001", "kind": "claim", "status": "new", "statement": "A session reached 198.51.100.23.",
+                  "confidence": "SUSPECTED", "host": HOST, "input_call_ids": [1], "indicators": [dict(row)]},
+        "C0002": {"id": "C0002", "kind": "claim", "status": "new", "statement": "198.51.100.23 answered.",
+                  "confidence": "LIKELY", "host": HOST, "input_call_ids": [2], "indicators": [dict(row)]}})
+    (r,) = [r for r in build_catalog(d)["iocs"] if r["value"] == "198.51.100.23"]
+    assert r["side"] == "third_party"
+
+
+
+def test_a_stated_side_replaces_an_undetermined_one_in_the_incident_frame_too(tmp_path):
+    """The merge is frame-blind: an analyst who typed one address as
+    undetermined in one finding and as the attacker's in another gets the
+    stated side in the incident frame as well."""
+    d = _case(tmp_path)
+    nodes = {
+        "C0001": {"id": "C0001", "kind": "claim", "status": "new", "statement": "A session reached 198.51.100.23.",
+                  "confidence": "LIKELY", "host": HOST, "input_call_ids": [1],
+                  "indicators": [{"type": "ip", "value": "198.51.100.23", "side": "undetermined"}]},
+        "C0002": {"id": "C0002", "kind": "claim", "status": "new", "statement": "198.51.100.23 sent the payload.",
+                  "confidence": "LIKELY", "host": HOST, "input_call_ids": [2],
+                  "indicators": [{"type": "ip", "value": "198.51.100.23", "side": "attacker"}]}}
+    (d / ".atlas" / "claim_graph.json").write_text(json.dumps({"nodes": nodes}))
+    cat = build_catalog(d)
+    assert cat["frame"] == "incident"
+    (r,) = [r for r in cat["iocs"] if r["value"] == "198.51.100.23"]
+    assert r["side"] == "attacker" and "block" in r["use"]

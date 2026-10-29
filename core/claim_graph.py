@@ -93,7 +93,7 @@ CONFIDENCE_TIERS = frozenset({
     "CONFIRMED", "LIKELY", "SUSPECTED", "UNCONFIRMED",
 })
 
-_LOCK = threading.RLock()
+from core.store_lock import STORE_LOCK as _LOCK  # one lock with the task store and the ledger
 _ID_PREFIX = {
     "evidence": "E",
     "observation": "O",
@@ -129,7 +129,7 @@ def empty_graph(case_id: str = "") -> dict[str, Any]:
 
 
 def normalize_status(status: str | None, *, kind: str = "") -> str:
-    """Map legacy/unknown statuses onto the Phase-6 vocabulary."""
+    """Map legacy/unknown statuses onto the current status vocabulary."""
     s = (status or "").strip().lower()
     if s in _STATUS_ALIASES:
         s = _STATUS_ALIASES[s]
@@ -153,7 +153,7 @@ def _quarantine_corrupt(path: Path) -> None:
 
 def _normalize_graph(graph: Any) -> dict[str, Any]:
     """Drop what cannot be a node. A graph file with a corrupted entry — a
-    null, a string, a dict with no id — used to raise deep inside the first
+    null, a string, a dict with no id — would raise deep inside the first
     reader that touched it and end the run there. The entries that are
     nodes are kept; the count of what was dropped is recorded on the graph."""
     if not isinstance(graph, dict):
@@ -179,6 +179,13 @@ def _normalize_graph(graph: Any) -> dict[str, Any]:
     graph["nodes"] = clean
     if dropped:
         graph.setdefault("meta", {})["dropped_malformed_nodes"] = dropped
+    # A conclusion is no stronger than its weakest basis (the conclusion
+    # door): bounded on every load and save, so every reader reads the bound.
+    try:
+        from core.conclusion_door import apply_bounds
+        apply_bounds(clean)
+    except Exception:  # noqa: BLE001 - a graph is read whatever the bound does
+        pass
     return graph
 
 
@@ -389,6 +396,7 @@ def _evidence_from_finding(
     supporting_evidence: str,
     linked_call_id: int,
     input_call_ids: list[int] | None,
+    located_call_ids: list[int] | None = None,
 ) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     cid0 = int(linked_call_id) if linked_call_id else None
@@ -408,7 +416,7 @@ def _evidence_from_finding(
             "call_id": cid0,
         })
 
-    # I5: persist resolvable case paths (split compounds; mine prose).
+    # Persist resolvable case paths (split compounds; mine prose).
     try:
         from core.evidence_resolver import (
             extract_case_paths_from_text,
@@ -455,6 +463,15 @@ def _evidence_from_finding(
                 "locator": f"call_id={c}",
                 "call_id": c,
             })
+    # The calls Atlas located beside the citation, labelled so the report's
+    # evidence block says which records were the analyst's.
+    for cid in located_call_ids or []:
+        try:
+            c = int(cid)
+        except (TypeError, ValueError):
+            continue
+        if c > 0 and not any(i.get("call_id") == c for i in items):
+            items.append({"artifact": "trace_call", "locator": f"call_id={c}", "call_id": c, "located": True})
     return items
 
 
@@ -585,6 +602,51 @@ def find_claim_by_anchors(
     return None
 
 
+def _twins_to_fold(graph: dict[str, Any], survivor: dict[str, Any],
+                   incoming: str) -> list[dict[str, Any]]:
+    """The other current claims a twin finding shows to be the survivor's
+    finding (ATLAS_TWIN_FOLD, default on). A finding that agrees on anchors
+    with several current claims of one host joins only the first; the
+    others are the same finding written twice, kept apart only because each
+    was recorded while the other's text still lacked a shared identifier.
+    A twin stronger than the survivor is never folded under it."""
+    from core.envfile import env_flag
+    if not env_flag("ATLAS_TWIN_FOLD", True):
+        return []
+    mine = statement_anchor_kinds(incoming) | statement_anchor_kinds(str(survivor.get("statement") or ""))
+    host_n = _norm_text(survivor.get("host", ""))
+    rank = _TIER_RANK.get(str(survivor.get("confidence") or ""), -1)
+    out = []
+    for n in graph.get("nodes", {}).values():
+        if not isinstance(n, dict) or n is survivor or n.get("id") == survivor.get("id") \
+                or n.get("kind") != "claim" or n.get("status") in ("superseded", "withdrawn"):
+            continue
+        if host_n and _norm_text(n.get("host", "")) not in ("", host_n):
+            continue
+        if n.get("refines") == survivor.get("id") or n.get("id") == survivor.get("refines"):
+            continue                # a refinement is kept apart by design
+        if _TIER_RANK.get(str(n.get("confidence") or ""), -1) > rank:
+            continue
+        if anchors_agree(mine, statement_anchor_kinds(str(n.get("statement") or ""))):
+            out.append(n)
+    return out
+
+
+def _carry_twin(survivor: dict[str, Any], twin: dict[str, Any]) -> None:
+    """The survivor takes a folded twin's citations as a merged twin's: its
+    evidence, its input calls and its finding calls."""
+    prior = [e for e in (survivor.get("evidence") or []) if isinstance(e, dict)]
+    survivor["evidence"] = prior + [e for e in (twin.get("evidence") or [])
+                                    if isinstance(e, dict) and e not in prior]
+    ids = list(survivor.get("input_call_ids") or [])
+    survivor["input_call_ids"] = ids + [c for c in (twin.get("input_call_ids") or []) if c and c not in ids]
+    twins = list(survivor.get("merged_finding_call_ids") or [])
+    for c in [twin.get("source_finding_call_id"), *(twin.get("merged_finding_call_ids") or [])]:
+        if c and c != survivor.get("source_finding_call_id") and c not in twins:
+            twins.append(int(c))
+    survivor["merged_finding_call_ids"] = twins
+
+
 def infer_host_from_text(case_dir: str | os.PathLike | None, text: str) -> tuple[str, list[str]]:
     """``(host, all_mentioned)`` for a statement, against the case's own hosts.
 
@@ -617,7 +679,11 @@ def merge_indicator_rows(node: dict[str, Any], rows: list[dict[str, Any]] | None
         key = (r["type"], str(r["value"]).lower())
         prev = by_key.get(key)
         new = dict(r)
-        if prev and prev.get("side") and new.get("side") and prev["side"] != new["side"] \
+        if prev and prev.get("side") == "undetermined" and new.get("side") and new["side"] != "undetermined":
+            # The one exception to "the first side stands": a stated side
+            # replaces undetermined.
+            new["note"] = "side stated later" + (f"; {prev['note']}" if prev.get("note") else "")
+        elif prev and prev.get("side") and new.get("side") and prev["side"] != new["side"] \
                 and not new.get("compromised"):
             # the first side stands; the disagreement is kept on the row
             new["side"] = prev["side"]
@@ -708,6 +774,9 @@ def upsert_claim_from_finding(
     fresh: bool = False,
     indicators: list[dict[str, Any]] | None = None,
     indicators_dropped: list[dict[str, Any]] | None = None,
+    located_call_ids: list[int] | None = None,
+    analyst_call_ids: list[int] | None = None,
+    citation_status: str = "",
 ) -> dict[str, Any]:
     """Create or update a ``claim`` node mirrored from a trace finding.
 
@@ -721,6 +790,7 @@ def upsert_claim_from_finding(
     tier = (confidence or "").upper()
     if tier not in CONFIDENCE_TIERS:
         tier = "UNCONFIRMED"
+    incoming_statement = statement
     scope_v = scope if scope in SCOPES else "host"
     if not host:
         inferred, mentioned = infer_host_from_text(case_dir, statement)
@@ -755,7 +825,7 @@ def upsert_claim_from_finding(
 
         now = _utcnow()
         evidence = _evidence_from_finding(
-            source, supporting_evidence, linked_call_id, input_call_ids
+            source, supporting_evidence, linked_call_id, input_call_ids, located_call_ids
         )
 
         if existing:
@@ -808,8 +878,15 @@ def upsert_claim_from_finding(
                 merge_indicator_rows(existing, indicators)
             if indicators_dropped:
                 merge_dropped_rows(existing, indicators_dropped)
+            _set_citation_fields(existing, located_call_ids, analyst_call_ids, citation_status)
             graph["nodes"][cid] = existing
+            folded = _twins_to_fold(graph, existing, incoming_statement) if merged_twin else []
+            for twin in folded:
+                _carry_twin(existing, twin)
             path = save_graph(case_dir, graph)
+            for twin in folded:
+                supersede(case_dir, str(twin["id"]), cid,
+                          reason=f"the same finding as {cid}: they share the identifiers of one event")
             finding_id = None
             try:
                 from core.finding_index import f_id_for, sync_after_graph_write
@@ -864,6 +941,7 @@ def upsert_claim_from_finding(
             merge_indicator_rows(node, indicators)
         if indicators_dropped:
             merge_dropped_rows(node, indicators_dropped)
+        _set_citation_fields(node, located_call_ids, analyst_call_ids, citation_status)
         if refines_id:
             node["refines"] = refines_id
             graph.setdefault("edges", []).append(
@@ -889,6 +967,39 @@ def upsert_claim_from_finding(
         return out
 
 
+def _set_citation_fields(node: dict[str, Any], located_call_ids, analyst_call_ids,
+                         citation_status: str) -> None:
+    """The lineage-by-wiring fields of a claim node: the calls Atlas located,
+    the calls the analyst cited, and the citation status (a status, never a
+    tier). Only what the caller knows is written."""
+    if located_call_ids is not None:
+        node["located_call_ids"] = [int(c) for c in located_call_ids if c]
+    if analyst_call_ids is not None:
+        node["analyst_call_ids"] = [int(c) for c in analyst_call_ids if c]
+    if citation_status:
+        node["citation_status"] = str(citation_status)
+
+
+def set_citation_status(case_dir: str | os.PathLike, node_id: str, status: str,
+                        located_call_ids: list[int] | None = None, *, detail: str = "") -> bool:
+    """Write a node's citation status, located ids and the status's detail
+    back (the pre-report check computes them over the whole trace); False
+    when the node is gone."""
+    with _LOCK:
+        graph = load_graph(case_dir)
+        node = get_node(graph, node_id)
+        if not node:
+            return False
+        _set_citation_fields(node, located_call_ids, None, status)
+        if detail:
+            node["citation_detail"] = str(detail)[:400]
+        else:
+            node.pop("citation_detail", None)
+        node["updated_at"] = _utcnow()
+        save_graph(case_dir, graph)
+    return True
+
+
 def mirror_finding_fail_open(
     *,
     statement: str,
@@ -904,6 +1015,9 @@ def mirror_finding_fail_open(
     fresh: bool = False,
     indicators: list[dict[str, Any]] | None = None,
     indicators_dropped: list[dict[str, Any]] | None = None,
+    located_call_ids: list[int] | None = None,
+    analyst_call_ids: list[int] | None = None,
+    citation_status: str = "",
 ) -> Optional[dict[str, Any]]:
     """Best-effort claim mirror. Never raises.
 
@@ -941,15 +1055,74 @@ def mirror_finding_fail_open(
             fresh=fresh,
             indicators=indicators,
             indicators_dropped=indicators_dropped,
+            located_call_ids=located_call_ids,
+            analyst_call_ids=analyst_call_ids,
+            citation_status=citation_status,
         )
     except Exception as e:
         return {"skipped": True, "reason": f"{type(e).__name__}: {e}"[:200]}
 
 
+# The marker a lowering of the old report gate left on a claim's evidence,
+# and the one the restore below leaves.
+LOWERING_MARKER = "report_gate_unsupported_citation"
+RESTORED_MARKER = "citation_lowering_restored"
+
+
+def _chain_tier(node: dict[str, Any], findings_by_cid: dict[int, dict]) -> str:
+    """The tier a claim's finding chain gives it under this module's own
+    merge rules, replayed in call order: an exact re-record replaces the
+    tier, a weaker twin keeps it, a stronger twin raises it. The result is
+    the latest exact record's tier raised only by twins merged after it,
+    never the strongest tier anywhere in the chain."""
+    ids = [node.get("source_finding_call_id")] + list(node.get("merged_finding_call_ids") or [])
+    chain = sorted({int(c) for c in ids if c and int(c) in findings_by_cid})
+    statement = _norm_text(node.get("statement") or "")
+    tier = ""
+    for cid in chain:
+        f = findings_by_cid[cid]
+        own = str(f.get("trace_confidence") or f.get("confidence") or "").upper()
+        if own not in CONFIDENCE_TIERS:
+            continue
+        if not tier or _norm_text(f.get("description") or "") == statement:
+            tier = own
+        elif _TIER_RANK.get(own, -1) > _TIER_RANK.get(tier, -1):
+            tier = own
+    return tier
+
+
+def restore_lowered_claims(case_dir: str | os.PathLike, finding_entries: list[dict]) -> list[str]:
+    """Restore the claims an earlier report gate lowered in place (the
+    marker item on their evidence, tier UNCONFIRMED) to the tier their
+    finding chain gives them, once: a restored node carries the restored
+    marker and is not touched again. Returns the ids restored."""
+    by_cid = {int(f.get("call_id") or 0): f for f in finding_entries if isinstance(f, dict) and f.get("call_id")}
+    restored: list[str] = []
+    with _LOCK:
+        graph = load_graph(case_dir)
+        for nid, node in (graph.get("nodes") or {}).items():
+            if not isinstance(node, dict) or node.get("kind") != "claim":
+                continue
+            items = [e for e in (node.get("evidence") or []) if isinstance(e, dict)]
+            arts = {str(e.get("artifact") or "") for e in items}
+            if LOWERING_MARKER not in arts or RESTORED_MARKER in arts:
+                continue
+            tier = _chain_tier(node, by_cid)
+            if tier and tier != node.get("confidence"):
+                node["confidence"] = tier
+            node["evidence"] = [e for e in items if str(e.get("artifact") or "") != LOWERING_MARKER]
+            node["evidence"].append({"artifact": RESTORED_MARKER, "locator": "", "call_id": None})
+            node["updated_at"] = _utcnow()
+            restored.append(str(nid))
+        if restored:
+            save_graph(case_dir, graph)
+    return restored
+
+
 def active_conclusions_and_conflicts(
     case_dir: str | os.PathLike,
 ) -> dict[str, list[dict[str, Any]]]:
-    """Snapshot helpers for later report grounding (Phase 3)."""
+    """Snapshot helpers for report grounding."""
     graph = load_graph(case_dir)
     return {
         "conclusions": [n for n in list_nodes(graph, kind="conclusion")
@@ -1018,8 +1191,8 @@ def lint_report_against_graph(
 ) -> list[str]:
     """Advisory grounding checks against Current Investigation State.
 
-    Empty list when no graph / no case_dir. Still advisory (Phase 7b/7c) —
-    one revision cycle via write_final_report; never a deadlock.
+    Empty list when no graph / no case_dir. Advisory — one revision cycle
+    via write_final_report; never a deadlock.
     """
     if not case_dir:
         return []
@@ -1040,7 +1213,7 @@ def lint_report_against_graph(
     report_scope = scope_info.get("scope") or "case"
     report_host = (scope_info.get("host") or "").strip().lower()
 
-    # Negative compromise wording (also Phase 5; cheap to enforce early)
+    # Negative compromise wording (cheap to enforce early)
     if _NEGATIVE_COMPROMISE_RE.search(text):
         warnings.append(
             "negative_compromise_wording: do not state the host 'was not "
@@ -1180,7 +1353,7 @@ def infer_report_scope(output_path: str,
     "final": the narrative narrows to one source, most findings drop out as
     out of scope and the answers cite a claim id instead of a finding.
     With a case directory known — it always is during a run — only a real host
-    name selects host scope; without one the filename is trusted as before.
+    name selects host scope; without one the filename is trusted.
     """
     base = os.path.basename(output_path or "")
     if base in ("estate_report.md", "estate_report.html") or base.endswith(
@@ -1766,6 +1939,64 @@ def add_recommendation(
         verb = fingerprint_action or action
         fingerprint = recommendation_fingerprint(phase, scope, verb)
         objects = sorted(set(str(i).strip() for i in (indicators or []) if str(i).strip()))
+        if source == "recorded" and phase in _BLOCKING_PHASES:
+            marked = _marked_values(action, objects)
+            # An external value no tool output of this case shows is
+            # context, not a step's object. One record of refused steps
+            # serves both checks: refused once naming every value, kept
+            # without them when the same step comes again.
+            unsighted = _unsighted_values(case_dir, action, objects, skip=set(marked))
+            offending = sorted(set(marked) | set(unsighted))
+            if offending:
+                meta = graph.setdefault("meta", {}).setdefault("refused_steps", {})
+                # Every value refused under this step so far: a step whose
+                # offending values were all refused before is kept without
+                # them, so alternating value sets end on the next call.
+                refused_before = set(meta.get(fingerprint) or [])
+                if not set(offending) <= refused_before:
+                    meta[fingerprint] = sorted(refused_before | set(offending))
+                    save_graph(case_dir, graph)
+                    parts = []
+                    if unsighted:
+                        parts.append(
+                            f"Recommendation refused: the action names {', '.join(sorted(unsighted))}, which no "
+                            "tool output of this case shows. A value from the brief or the threat context is "
+                            "context until a call shows it. Record the step without them, or record an "
+                            "investigate step to search for them. Sent again unchanged, the step is recorded "
+                            "without them.")
+                    if marked:
+                        mk = sorted(marked)
+                        parts.append(
+                            "This step names " + "; ".join(f"{v} ({marked[v]})" for v in mk)
+                            + ": shared infrastructure: hunt, never block. Record the step without "
+                            + ("it" if len(mk) == 1 else "them")
+                            + "; the indicator list keeps " + ("it" if len(mk) == 1 else "them")
+                            + " as a hunt item. Recorded again as it is, the step is kept with "
+                            + ("that value" if len(mk) == 1 else "those values") + " moved to a hunt note.")
+                    return {"success": False,
+                            "gate": "recommendation_value_unsighted" if unsighted else "shared_infrastructure_step",
+                            "error": " ".join(parts)}
+                # The same step again: kept without the values.
+                action = _without_values(action, offending)
+                objects = [o for o in objects if o not in offending]
+                if not objects and not action:
+                    return {"success": False,
+                            "gate": "recommendation_value_unsighted" if unsighted else "shared_infrastructure_step",
+                            "error": "with those values removed the step names nothing"}
+                notes = []
+                if marked:
+                    notes.append("Hunt, never block: " + "; ".join(f"{v} ({marked[v]})" for v in sorted(marked)) + ".")
+                if unsighted:
+                    notes.append(f"Named {len(unsighted)} value(s) no tool output shows; removed: "
+                                 f"{', '.join(sorted(unsighted))}.")
+                rationale = ((rationale + " ") if rationale else "") + " ".join(notes)
+                meta.pop(fingerprint, None)
+                save_graph(case_dir, graph)
+                removed_marked = offending
+            else:
+                removed_marked = []
+        else:
+            removed_marked = []
         for nid, n in nodes.items():
             if n.get("kind") != "recommendation" or n.get("status") in ("superseded", "withdrawn"):
                 continue
@@ -1833,7 +2064,7 @@ def add_recommendation(
         confidence = "SUSPECTED"
         host_set = set()
     host_list = sorted(set(str(h).strip() for h in (hosts or []) if str(h).strip()) | host_set)
-    return add_node(
+    result = add_node(
         case_dir,
         kind="recommendation",
         statement=action,
@@ -1862,6 +2093,123 @@ def add_recommendation(
         },
         case_id=case_id,
     )
+    if removed_marked and isinstance(result, dict):
+        result["removed_values"] = removed_marked
+    return result
+
+
+# Phases whose step acts on a value (block, isolate, clean, restore, harden):
+# a value on published shared infrastructure is hunted, never acted on.
+_BLOCKING_PHASES = frozenset({"contain", "eradicate", "recover", "harden"})
+
+
+def _marked_values(action: str, objects: list[str]) -> dict[str, str]:
+    """The network values a recorded step names whose catalogue mark is a
+    shared edge or a vendor service (ATLAS_REC_MARKED_VALUES), with the
+    mark's text."""
+    from core.envfile import env_flag
+    if not env_flag("ATLAS_REC_MARKED_VALUES"):
+        return {}
+    from core.entities import domains_in, extract
+    from core.indicators import shared_mark
+    from core.shared_infrastructure import mark_text
+    text = " ".join([action, *objects])
+    found: list[tuple[str, str]] = []
+    for ent in extract(text):
+        kind, _, value = ent.partition(":")
+        if kind in ("ip", "url", "email"):
+            found.append((kind, value))
+    found += [("domain", d) for d in domains_in(text)]
+    out: dict[str, str] = {}
+    for kind, value in found:
+        m = shared_mark(kind, value)
+        if m and m.get("mark") in ("shared_edge", "vendor_service"):
+            # The value as the step wrote it, so it can be removed from it.
+            written = next((o for o in objects if o.casefold() == value.casefold()), value)
+            out[written] = mark_text(m)
+    return out
+
+
+def _external_domain(name: str) -> bool:
+    """A name under a delegated top-level domain: an internal name under a
+    special-use suffix (.local, .internal, .arpa, ...) is not an external
+    value."""
+    try:
+        from core.ioc_catalog import _SPECIAL_USE_RE, _tlds
+    except Exception:  # noqa: BLE001
+        return True
+    low = name.lower().rstrip(".")
+    return _SPECIAL_USE_RE.search(low) is None and low.rsplit(".", 1)[-1] in _tlds()
+
+
+def _external_host(value: str, kind: str) -> bool:
+    """A URL's or a mail address's host is external unless it is a name
+    under a special-use suffix (an address host is judged as an address)."""
+    from urllib.parse import urlsplit
+    try:
+        host = (value.rsplit("@", 1)[-1] if kind == "email"
+                else (urlsplit(value if "://" in value else "http://" + value).hostname or ""))
+    except ValueError:
+        return True
+    if not host or re.fullmatch(r"[\d.]+|\[?[0-9a-f]*:[0-9a-f:]*\]?", host, re.I):
+        return True
+    return _external_domain(host)
+
+
+def _unsighted_values(case_dir, action: str, objects: list[str], skip: set[str] = frozenset()) -> list[str]:
+    """The external network values of a step (public addresses outside the
+    internal and never-block ranges, URLs, mail addresses, domains) that no
+    tool output of this case shows in a located sighting; the case's own
+    assets are not asked (ATLAS_REC_VALUE_SIGHTING)."""
+    from core.envfile import env_flag
+    if not env_flag("ATLAS_REC_VALUE_SIGHTING"):
+        return []
+    from core.entities import domains_in, extract
+    from core.indicators import _never_block, is_private_ip, sightings
+    text = " ".join([action, *objects])
+    found: list[tuple[str, str]] = []
+    for ent in extract(text):
+        kind, _, value = ent.partition(":")
+        if kind == "ip" and (is_private_ip(value) or _never_block(value)):
+            continue
+        if kind in ("url", "email") and not _external_host(value, kind):
+            continue                      # an internal name under a special-use suffix
+        if kind in ("ip", "url", "email"):
+            found.append((kind, value))
+    found += [("domain", d) for d in domains_in(text) if _external_domain(d)
+              and not any(k in ("url", "email") and d in v.lower() for k, v in found)]
+    try:
+        from core.own_assets import lookup, own_assets
+        assets = own_assets(case_dir)
+    except Exception:  # noqa: BLE001
+        assets, lookup = {}, None
+    out: list[str] = []
+    for kind, value in found:
+        written = next((o for o in objects if o.casefold() == value.casefold()), value)
+        if written in skip or written in out:
+            continue
+        if lookup is not None and assets and lookup(assets, value, kind):
+            continue
+        try:
+            seen = sightings(kind, value, [], case_dir=case_dir, limit=1)
+        except Exception:  # noqa: BLE001 - a sighting lookup that fails refuses nothing
+            continue
+        if not any(s.get("located") for s in seen):
+            out.append(written)
+    return out
+
+
+def _without_values(action: str, values: list[str]) -> str:
+    """The step with each value removed as a whole token: a value inside a
+    longer one (an address that is the prefix of another, a domain inside a
+    subdomain) is not cut out of it. A sentence's closing dot is no part of
+    a token."""
+    out = action
+    for v in sorted(values, key=len, reverse=True):
+        out = re.sub(r"(?<![\w.\-])" + re.escape(v) + r"(?![\w\-]|\.\w)", "", out, flags=re.IGNORECASE)
+    out = re.sub(r"\s+([,;.])", r"\1", out)
+    out = re.sub(r"(?:,\s*){2,}", ", ", out)
+    return " ".join(out.split()).strip(" ,;")
 
 
 # A mandatory escalation closed as done needs to say what was done: the
@@ -1916,6 +2264,19 @@ def set_recommendation_state(
 MIN_WITHDRAW_REASON = 20
 
 
+def mark_window_noted(case_dir: str | os.PathLike, claim_id: str, mark: int = 0) -> None:
+    """Mark a claim that drew a window note (core.incident_window), with the
+    trace position the note was raised at."""
+    with _LOCK:
+        graph = load_graph(case_dir)
+        node = get_node(graph, claim_id)
+        if node is None:
+            return
+        node["window_noted"] = True
+        node["window_noted_mark"] = int(mark or 0)
+        save_graph(case_dir, graph)
+
+
 def supersede(
     case_dir: str | os.PathLike,
     old_id: str,
@@ -1959,6 +2320,8 @@ def supersede(
             old["updated_at"] = now
             old["withdraw_reason"] = reason.strip()[:1000]
             graph["nodes"][old_id] = old
+            from core.conclusion_door import basis_changed
+            basis_changed(graph, old_id)
             path = save_graph(case_dir, graph)
             return {
                 "success": True,
@@ -2000,6 +2363,9 @@ def supersede(
         old["superseded_by"] = new_id
         old["supersede_reason"] = (reason or "")[:1000]
         graph["nodes"][old_id] = old
+        # A conclusion resting on the revised belief rests on its successor.
+        from core.conclusion_door import basis_changed
+        basis_changed(graph, old_id, new_id)
         graph["edges"].append({
             "from": new_id,
             "to": old_id,

@@ -31,6 +31,16 @@ def test_large_banner_has_avatar():
     assert "Atlas" in out
 
 
+def test_large_banner_renders_every_wordmark_letter(monkeypatch):
+    # a palette with fewer colours than the wordmark has letters repeats
+    # instead of cutting the word short
+    import agent.tui as tui
+    monkeypatch.setitem(tui.THEME, "wordmark", ("bold", "bold"))
+    out = _render(100)
+    for row in tui.WORDMARK:
+        assert " ".join(row) in out
+
+
 def test_small_banner_has_avatar():
     out = _render(66)
     assert "\u2295" in out
@@ -64,7 +74,7 @@ def test_status_banner_shows_avatar_and_live_stats():
     ui = UI(console=c)
     ui.set_run_state(command="train", turn=7, elapsed=125.0, tools=42,
                      errors=2, infos=3, findings=5, tokens=123456)
-    c.print(ui._status_banner("Sniffing packets"))
+    c.print(ui._status_banner("Dissecting packets"))
     out = c.export_text()
     assert "\u2295" in out
     assert "atlas train" in out
@@ -143,8 +153,8 @@ def test_dashboard_animation_advances_frames():
 
 
 def test_extra_refreshes_do_not_advance_animation():
-    # The original bug: prints scrolling above the live region trigger extra
-    # refreshes, which used to speed the animation up. With a frozen clock,
+    # Prints scrolling above the live region trigger extra refreshes, which
+    # must not speed the animation up. With a frozen clock,
     # any number of refreshes must render the identical frame.
     from agent.tui import _Dashboard
     ui, t, _ = _fake_clock_ui()
@@ -406,7 +416,7 @@ def test_matrix_skin_shows_rain_and_centred_hud():
     c = Console(record=True, width=100, force_terminal=True)
     ui = UI(console=c, skin="matrix")
     ui.set_run_state(command="run", turn=4, tools=9, findings=2,
-                     run_start=0.0, activity="Haunting the registry")
+                     run_start=0.0, activity="Parsing the registry")
     t = [100.0]
     ui._clock = lambda: t[0]
     c.print(ui._render_dashboard(frame=5))
@@ -430,7 +440,7 @@ def test_radar_skin_sweeps_and_shows_blips():
         ui = UI(console=c, skin="radar")
         ui.set_run_state(command="run", tools=5, findings=2, errors=1,
                          infos=3, turn=1, run_start=0.0,
-                         activity="Haunting the registry")
+                         activity="Parsing the registry")
         ui._clock = lambda: 90.0
         c.print(ui._render_dashboard(frame=i * 2))
         outs.append(c.export_text())
@@ -443,7 +453,7 @@ def test_radar_skin_sweeps_and_shows_blips():
     # rich Live clipped the plaque (errors/info/activity) off the bottom.
     assert "atlas run" in joined
     assert "err" in joined and "info" in joined
-    assert "Haunting the registry" in joined
+    assert "Parsing the registry" in joined
     # Fixed-height canvas (~matrix/aquarium): must fit a typical Live viewport.
     assert max(len(o.splitlines()) for o in outs) <= 18
     # Wide plaque under the dish.
@@ -471,7 +481,7 @@ def test_aquarium_skin_is_underwater_not_cyber():
     c = Console(record=True, width=100, force_terminal=True)
     ui = UI(console=c, skin="aquarium")
     ui.set_run_state(command="run", turn=2, tools=4, findings=1,
-                     run_start=0.0, activity="Fetching artifacts")
+                     run_start=0.0, activity="Collecting artifacts")
     ui._clock = lambda: 50.0
     frames = []
     for i in (0, 5, 12, 20):

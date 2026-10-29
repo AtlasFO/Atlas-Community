@@ -8,7 +8,7 @@ the least), recognises values of each kind in prose (``values``), and binds
 a value to a part by the clause that carries the part's own qualifying words
 (``bind``): "delivery IP is 203.0.113.10; C2 IP is 198.51.100.20" answers a
 delivery part and a C2 part each with its own address, and a comma-joined
-"IP address 192.168.1.111, NIC MAC 0010a4933e09" gives each part the value
+"IP address 203.0.113.30, NIC MAC 02005e000153" gives each part the value
 nearest its qualifier.
 
 ``core.entities.extract`` stays the citation extractor: it returns nothing
@@ -303,8 +303,8 @@ _NOT_A_PRINCIPAL = frozenset({
     "policy", "settings", "enumeration", "discovery", "logon", "login", "takeover", "abuse",
 })
 _HOSTLIKE_RE = re.compile(r"\b[A-Za-z][A-Za-z0-9]{1,15}-[A-Za-z0-9]{1,20}\d\b")
-# An upper-case hyphenated name with a digit somewhere (DESKTOP-SDN1RPT,
-# N-1A9ODN6ZXK4LQ, CITADEL-DC01), never a technique or vulnerability id.
+# An upper-case hyphenated name with a digit somewhere (DESKTOP-4K7QW2M,
+# N-7Q4XK2LM9PZ3, CORP-DC01), never a technique or vulnerability id.
 _UPPER_HYPHEN_HOST_RE = re.compile(r"\b(?!CVE-|MS\d\d-|T\d{4})[A-Z][A-Z0-9]{0,15}-[A-Z0-9]{2,20}\b")
 _UPPER_HOST_RE = re.compile(r"\b[A-Z][A-Z0-9]{1,14}\d\b")
 _FQDN_RE = re.compile(r"(?i)\b[a-z0-9-]{1,63}(?:\.[a-z0-9-]{1,63}){1,5}\.(?:" + _TLDS + r")\b")
@@ -342,8 +342,8 @@ _MONTHS = ("january|february|march|april|may|june|july|august|september|october|
 _WORD_DATE_RE = re.compile(
     r"(?i)\b(?:\d{1,2}\.?\s+(?:" + _MONTHS + r")\.?\s+\d{4}|(?:" + _MONTHS + r")\.?\s+\d{1,2},?\s+\d{4})\b")
 _HASH_RE = re.compile(r"\b(?:[0-9a-fA-F]{64}|[0-9a-fA-F]{40}|[0-9a-fA-F]{32})\b")
-# A Windows path whose segments may carry spaces ("C:\\FileShare\\Secret\\Szechuan
-# Sauce.txt"): the final segment ends at an extension; a directory path keeps
+# A Windows path whose segments may carry spaces ("C:\\Shares\\Finance Team\\Quarterly
+# Plan.txt"): the final segment ends at an extension; a directory path keeps
 # the no-space form.
 # A backtick is the code span around a path in prose, never part of it.
 _WIN_PATH_RE = re.compile(
@@ -768,7 +768,7 @@ def _nearness(clause: str, value_pos: int, qpos: list[int],
     stem = False
     for q in qpos:
         if value_len and value_pos <= q < value_pos + value_len:
-            # A multi-word value ("Secret Recipe.txt") starts before the
+            # A multi-word value ("Quarterly Plan.txt") starts before the
             # qualifier word it contains; read by its start alone it would
             # rank behind the next value in a list. Only a whole word is the
             # value's own: "RegisteredOwner" carries no word "registered".
@@ -801,7 +801,7 @@ def _rank(kind: str, clause: str, value: str, pos: int, qpos: list[int], qual: s
           others: list[tuple[int, int]] = ()) -> tuple:
     """The order among a clause's values of one kind: for a path part a
     shortcut behind every real file, then nearness to the qualifier, then
-    the fuller form ("C:\\Share\\Secret Recipe.txt" over "Secret Recipe.txt"
+    the fuller form ("C:\\Share\\Quarterly Plan.txt" over "Quarterly Plan.txt"
     when both carry the qualifier word). ``others`` are the spans of every
     value of the kind in the clause."""
     if kind == "path":
@@ -889,8 +889,11 @@ def bind(part_text: str, kind: str, statement: str, *, question: str = "",
     # A path part that names a file class ("an executable") takes no value
     # of another class, and its class word is checked on the value rather
     # than looked for in the clause. A value of no class (no extension, an
-    # unlisted one) stays a candidate. Only "executable", "binary" and
-    # "document" make a part a path part on their own (type_for); "script",
+    # unlisted one) stays a candidate: a staging name (update.tmp) or a
+    # masquerading one (holiday.jpg) is how an executable is often named. It
+    # yields only to a value of the class itself in the same text, so "pic1.jpg
+    # and tool.exe" answers "an executable" with tool.exe. Only "executable",
+    # "binary" and "document" make a part a path part on their own (type_for); "script",
     # "archive" and "log" name a class beside a path word ("the log file").
     from core.entities import FILE_CLASS_NOUNS, file_class_of
     cls = file_class_named(part_text) if kind == "path" else ""
@@ -902,8 +905,10 @@ def bind(part_text: str, kind: str, statement: str, *, question: str = "",
 
     def values(text, kind, **kw):   # noqa: F811 - the module's values, narrowed for the part
         hits = _values(text, kind, **kw)
-        return [h for h in hits if (not where or re.search(r"[\\/]", h[0]))
+        hits = [h for h in hits if (not where or re.search(r"[\\/]", h[0]))
                 and (not cls or file_class_of(h[0]) in ("", cls))]
+        own = [h for h in hits if cls and file_class_of(h[0]) == cls]
+        return own or hits
 
     if explicit:
         # The analyst named the belief for this part: a value of the kind
@@ -934,6 +939,14 @@ def bind(part_text: str, kind: str, statement: str, *, question: str = "",
             if kind == "path":
                 hits = sorted(hits, key=lambda h: (_shortcut(h[0]), h[1]))
             ordered += [(v, clause) for v, _p in sorted(hits, key=lambda h: untyped(h[0]))]
+        if cls:
+            # The class preference holds over the whole statement, not one
+            # clause at a time: "stored pic1.jpg ...; tool.exe was requested"
+            # answers "an executable" with tool.exe, whichever clause comes
+            # first. A no-class name stands only when no value of the class
+            # is stated anywhere.
+            own = [x for x in ordered if file_class_of(x[0]) == cls]
+            ordered = own or ordered
         if not ordered:
             return None, ""
         if not qual or kind not in STRONG_TYPES:

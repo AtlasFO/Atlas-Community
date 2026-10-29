@@ -81,14 +81,14 @@ def test_brief_tables_are_read_under_estate_sections_only(tmp_path):
         "## Target Systems (from the request)\n\n"
         "| | Type | OS | Identifier |\n|---|---|---|---|\n"
         "| **PC** | workstation | Windows 7 | IP `192.0.2.20` |\n"
-        "| **RM#1** | USB stick | exFAT | Serial `4C530012450531101593` |\n"
-        "| **RM#2** | USB stick | FAT32 | imaged with tool 3.3.0.5 |\n\n"
+        "| **USB#1** | USB stick | exFAT | Serial `7A210098760543212345` |\n"
+        "| **USB#2** | USB stick | FAT32 | imaged with tool 3.3.0.5 |\n\n"
         "## What you already know\n\n"
         "| Side | Address |\n|---|---|\n| other | IP 198.51.100.7 |\n"
     )
     a = oa.own_assets(_case(tmp_path, brief=brief))
     assert oa.lookup(a, "192.0.2.20")["host"] == "PC"
-    assert oa.lookup(a, "4c530012450531101593", "serial")["host"] == "RM#1"
+    assert oa.lookup(a, "7a210098760543212345", "serial")["host"] == "USB#1"
     assert oa.lookup(a, "3.3.0.5") is None
     assert oa.lookup(a, "198.51.100.7") is None
     assert "other" not in a["hosts"]
@@ -144,3 +144,32 @@ def test_a_baseline_profile_yields_its_registry_named_addresses(tmp_path):
     a = oa.own_assets(d)
     assert oa.lookup(a, "192.0.2.10", "ip")["host"] == "WS01"
     assert oa.lookup(a, "198.51.100.7", "ip") and not oa.lookup(a, "0.0.0.0", "ip")
+
+
+# ── a host written by the short name it calls itself ─────────────────────
+
+def test_a_short_name_with_a_digit_binds_for_its_label():
+    assert oa.bind_appositions("WS01 (203.0.113.5) logged the session.", ["CASE-WS01"]) == [
+        ("CASE-WS01", "203.0.113.5")]
+
+
+def test_a_bare_word_short_name_never_binds():
+    assert oa.bind_appositions("Mail went out via mail (203.0.113.9).", ["CORP-MAIL"]) == []
+    assert oa.bind_appositions("The relay gateway (198.51.100.7) answered.", ["CORP-GATEWAY"]) == []
+
+
+def test_a_short_name_inside_another_name_or_shared_by_two_labels_never_binds():
+    # The attacker's machine may end in the same short name.
+    assert oa.bind_appositions("EVIL-WS01 (203.0.113.9) connected.", ["CASE-WS01"]) == []
+    assert oa.bind_appositions("WS01 (203.0.113.5) logged it.", ["SITEA-WS01", "SITEB-WS01"]) == []
+
+
+def test_no_case_identifiers_are_baked_into_the_module():
+    import pathlib
+    import re
+    src = pathlib.Path("core/own_assets.py").read_text()
+    code = re.sub(r'"""(?:.|\n)*?"""', "", src)
+    code = "\n".join(line for line in code.splitlines() if not line.lstrip().startswith("#")).lower()
+    for token in ("case-ws01", "corp-mail", "ws01", "evil", "host-a", "jane.doe", "203.0.113", "198.51.100",
+                  "192.0.2"):
+        assert token not in code

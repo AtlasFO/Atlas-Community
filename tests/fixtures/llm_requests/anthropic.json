@@ -1,0 +1,481 @@
+{
+ "preset": "anthropic",
+ "records": [
+  {
+   "scenario": "oneshot",
+   "requests": [
+    {
+     "method": "POST",
+     "url": "https://api.anthropic.com/v1/messages",
+     "headers": {
+      "Content-Type": "application/json",
+      "x-api-key": "<key>",
+      "anthropic-version": "2023-06-01"
+     },
+     "body": "{\"model\": \"m-generic\", \"max_tokens\": 65536, \"system\": [{\"type\": \"text\", \"text\": \"You are a forensic analyst on case CASE-A.\", \"cache_control\": {\"type\": \"ephemeral\"}}], \"messages\": [{\"role\": \"user\", \"content\": [{\"type\": \"text\", \"text\": \"Summarize: logon of jane.doe on CORP-WS01 at 2031-03-01 10:00.\"}]}], \"stream\": true}"
+    }
+   ]
+  },
+  {
+   "scenario": "analyst_tools",
+   "requests": [
+    {
+     "method": "POST",
+     "url": "https://api.anthropic.com/v1/messages",
+     "headers": {
+      "Content-Type": "application/json",
+      "x-api-key": "<key>",
+      "anthropic-version": "2023-06-01"
+     },
+     "body": "{\"model\": \"m-generic\", \"max_tokens\": 65536, \"system\": [{\"type\": \"text\", \"text\": \"You are a forensic analyst on case CASE-A.\", \"cache_control\": {\"type\": \"ephemeral\"}}], \"messages\": [{\"role\": \"user\", \"content\": [{\"type\": \"text\", \"text\": \"Brief: host CORP-WS01, user jane.doe, window 2031-03-01 to 2031-03-02.\", \"cache_control\": {\"type\": \"ephemeral\"}}]}, {\"role\": \"assistant\", \"content\": [{\"type\": \"tool_use\", \"id\": \"call_1\", \"name\": \"list_processes\", \"input\": {\"image\": \"m.img\"}}, {\"type\": \"tool_use\", \"id\": \"call_2\", \"name\": \"read_table\", \"input\": {\"path\": \"exports/t.csv\"}}]}, {\"role\": \"user\", \"content\": [{\"type\": \"tool_result\", \"tool_use_id\": \"call_1\", \"content\": \"pid 4 System\"}, {\"type\": \"tool_result\", \"tool_use_id\": \"call_2\", \"content\": \"row 1: 10.0.0.5 to 203.0.113.7\", \"cache_control\": {\"type\": \"ephemeral\"}}, {\"type\": \"text\", \"text\": \"Record what bears on the case before the next reads.\"}]}], \"tools\": [{\"name\": \"list_processes\", \"description\": \"List the processes in a memory image.\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"image\": {\"type\": \"string\"}}, \"required\": [\"image\"]}}, {\"name\": \"read_table\", \"description\": \"Read rows of a table export.\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}}, \"required\": [\"path\"]}}], \"tool_choice\": {\"type\": \"auto\"}, \"stream\": true}"
+    }
+   ]
+  },
+  {
+   "scenario": "tool_choice_required",
+   "requests": [
+    {
+     "method": "POST",
+     "url": "https://api.anthropic.com/v1/messages",
+     "headers": {
+      "Content-Type": "application/json",
+      "x-api-key": "<key>",
+      "anthropic-version": "2023-06-01"
+     },
+     "body": "{\"model\": \"m-generic\", \"max_tokens\": 65536, \"system\": [{\"type\": \"text\", \"text\": \"You are a forensic analyst on case CASE-A.\", \"cache_control\": {\"type\": \"ephemeral\"}}], \"messages\": [{\"role\": \"user\", \"content\": [{\"type\": \"text\", \"text\": \"Brief: host CORP-WS01, user jane.doe, window 2031-03-01 to 2031-03-02.\", \"cache_control\": {\"type\": \"ephemeral\"}}]}, {\"role\": \"assistant\", \"content\": [{\"type\": \"tool_use\", \"id\": \"call_1\", \"name\": \"list_processes\", \"input\": {\"image\": \"m.img\"}}, {\"type\": \"tool_use\", \"id\": \"call_2\", \"name\": \"read_table\", \"input\": {\"path\": \"exports/t.csv\"}}]}, {\"role\": \"user\", \"content\": [{\"type\": \"tool_result\", \"tool_use_id\": \"call_1\", \"content\": \"pid 4 System\"}, {\"type\": \"tool_result\", \"tool_use_id\": \"call_2\", \"content\": \"row 1: 10.0.0.5 to 203.0.113.7\", \"cache_control\": {\"type\": \"ephemeral\"}}, {\"type\": \"text\", \"text\": \"Record what bears on the case before the next reads.\"}]}], \"tools\": [{\"name\": \"list_processes\", \"description\": \"List the processes in a memory image.\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"image\": {\"type\": \"string\"}}, \"required\": [\"image\"]}}, {\"name\": \"read_table\", \"description\": \"Read rows of a table export.\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}}, \"required\": [\"path\"]}}], \"tool_choice\": {\"type\": \"any\"}, \"stream\": true}"
+    }
+   ]
+  },
+  {
+   "scenario": "pin_low",
+   "requests": [
+    {
+     "method": "POST",
+     "url": "https://api.anthropic.com/v1/messages",
+     "headers": {
+      "Content-Type": "application/json",
+      "x-api-key": "<key>",
+      "anthropic-version": "2023-06-01"
+     },
+     "body": "{\"model\": \"m-generic\", \"max_tokens\": 65536, \"system\": [{\"type\": \"text\", \"text\": \"You are a forensic analyst on case CASE-A.\", \"cache_control\": {\"type\": \"ephemeral\"}}], \"messages\": [{\"role\": \"user\", \"content\": [{\"type\": \"text\", \"text\": \"Brief: host CORP-WS01, user jane.doe, window 2031-03-01 to 2031-03-02.\", \"cache_control\": {\"type\": \"ephemeral\"}}]}, {\"role\": \"assistant\", \"content\": [{\"type\": \"tool_use\", \"id\": \"call_1\", \"name\": \"list_processes\", \"input\": {\"image\": \"m.img\"}}, {\"type\": \"tool_use\", \"id\": \"call_2\", \"name\": \"read_table\", \"input\": {\"path\": \"exports/t.csv\"}}]}, {\"role\": \"user\", \"content\": [{\"type\": \"tool_result\", \"tool_use_id\": \"call_1\", \"content\": \"pid 4 System\"}, {\"type\": \"tool_result\", \"tool_use_id\": \"call_2\", \"content\": \"row 1: 10.0.0.5 to 203.0.113.7\", \"cache_control\": {\"type\": \"ephemeral\"}}, {\"type\": \"text\", \"text\": \"Record what bears on the case before the next reads.\"}]}], \"tools\": [{\"name\": \"list_processes\", \"description\": \"List the processes in a memory image.\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"image\": {\"type\": \"string\"}}, \"required\": [\"image\"]}}, {\"name\": \"read_table\", \"description\": \"Read rows of a table export.\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}}, \"required\": [\"path\"]}}], \"tool_choice\": {\"type\": \"auto\"}, \"output_config\": {\"effort\": \"low\"}, \"stream\": true}"
+    }
+   ]
+  },
+  {
+   "scenario": "effort_high",
+   "requests": [
+    {
+     "method": "POST",
+     "url": "https://api.anthropic.com/v1/messages",
+     "headers": {
+      "Content-Type": "application/json",
+      "x-api-key": "<key>",
+      "anthropic-version": "2023-06-01"
+     },
+     "body": "{\"model\": \"m-generic\", \"max_tokens\": 65536, \"system\": [{\"type\": \"text\", \"text\": \"You are a forensic analyst on case CASE-A.\", \"cache_control\": {\"type\": \"ephemeral\"}}], \"messages\": [{\"role\": \"user\", \"content\": [{\"type\": \"text\", \"text\": \"Brief: host CORP-WS01, user jane.doe, window 2031-03-01 to 2031-03-02.\", \"cache_control\": {\"type\": \"ephemeral\"}}]}, {\"role\": \"assistant\", \"content\": [{\"type\": \"tool_use\", \"id\": \"call_1\", \"name\": \"list_processes\", \"input\": {\"image\": \"m.img\"}}, {\"type\": \"tool_use\", \"id\": \"call_2\", \"name\": \"read_table\", \"input\": {\"path\": \"exports/t.csv\"}}]}, {\"role\": \"user\", \"content\": [{\"type\": \"tool_result\", \"tool_use_id\": \"call_1\", \"content\": \"pid 4 System\"}, {\"type\": \"tool_result\", \"tool_use_id\": \"call_2\", \"content\": \"row 1: 10.0.0.5 to 203.0.113.7\", \"cache_control\": {\"type\": \"ephemeral\"}}, {\"type\": \"text\", \"text\": \"Record what bears on the case before the next reads.\"}]}], \"tools\": [{\"name\": \"list_processes\", \"description\": \"List the processes in a memory image.\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"image\": {\"type\": \"string\"}}, \"required\": [\"image\"]}}, {\"name\": \"read_table\", \"description\": \"Read rows of a table export.\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}}, \"required\": [\"path\"]}}], \"tool_choice\": {\"type\": \"auto\"}, \"output_config\": {\"effort\": \"high\"}, \"stream\": true}"
+    }
+   ]
+  },
+  {
+   "scenario": "effort_minimal",
+   "requests": [
+    {
+     "method": "POST",
+     "url": "https://api.anthropic.com/v1/messages",
+     "headers": {
+      "Content-Type": "application/json",
+      "x-api-key": "<key>",
+      "anthropic-version": "2023-06-01"
+     },
+     "body": "{\"model\": \"m-generic\", \"max_tokens\": 65536, \"system\": [{\"type\": \"text\", \"text\": \"You are a forensic analyst on case CASE-A.\", \"cache_control\": {\"type\": \"ephemeral\"}}], \"messages\": [{\"role\": \"user\", \"content\": [{\"type\": \"text\", \"text\": \"Brief: host CORP-WS01, user jane.doe, window 2031-03-01 to 2031-03-02.\", \"cache_control\": {\"type\": \"ephemeral\"}}]}, {\"role\": \"assistant\", \"content\": [{\"type\": \"tool_use\", \"id\": \"call_1\", \"name\": \"list_processes\", \"input\": {\"image\": \"m.img\"}}, {\"type\": \"tool_use\", \"id\": \"call_2\", \"name\": \"read_table\", \"input\": {\"path\": \"exports/t.csv\"}}]}, {\"role\": \"user\", \"content\": [{\"type\": \"tool_result\", \"tool_use_id\": \"call_1\", \"content\": \"pid 4 System\"}, {\"type\": \"tool_result\", \"tool_use_id\": \"call_2\", \"content\": \"row 1: 10.0.0.5 to 203.0.113.7\", \"cache_control\": {\"type\": \"ephemeral\"}}, {\"type\": \"text\", \"text\": \"Record what bears on the case before the next reads.\"}]}], \"output_config\": {\"effort\": \"low\"}, \"stream\": true}"
+    }
+   ]
+  },
+  {
+   "scenario": "effort_none",
+   "requests": [
+    {
+     "method": "POST",
+     "url": "https://api.anthropic.com/v1/messages",
+     "headers": {
+      "Content-Type": "application/json",
+      "x-api-key": "<key>",
+      "anthropic-version": "2023-06-01"
+     },
+     "body": "{\"model\": \"m-generic\", \"max_tokens\": 65536, \"system\": [{\"type\": \"text\", \"text\": \"You are a forensic analyst on case CASE-A.\", \"cache_control\": {\"type\": \"ephemeral\"}}], \"messages\": [{\"role\": \"user\", \"content\": [{\"type\": \"text\", \"text\": \"Brief: host CORP-WS01, user jane.doe, window 2031-03-01 to 2031-03-02.\", \"cache_control\": {\"type\": \"ephemeral\"}}]}, {\"role\": \"assistant\", \"content\": [{\"type\": \"tool_use\", \"id\": \"call_1\", \"name\": \"list_processes\", \"input\": {\"image\": \"m.img\"}}, {\"type\": \"tool_use\", \"id\": \"call_2\", \"name\": \"read_table\", \"input\": {\"path\": \"exports/t.csv\"}}]}, {\"role\": \"user\", \"content\": [{\"type\": \"tool_result\", \"tool_use_id\": \"call_1\", \"content\": \"pid 4 System\"}, {\"type\": \"tool_result\", \"tool_use_id\": \"call_2\", \"content\": \"row 1: 10.0.0.5 to 203.0.113.7\", \"cache_control\": {\"type\": \"ephemeral\"}}, {\"type\": \"text\", \"text\": \"Record what bears on the case before the next reads.\"}]}], \"tools\": [{\"name\": \"list_processes\", \"description\": \"List the processes in a memory image.\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"image\": {\"type\": \"string\"}}, \"required\": [\"image\"]}}, {\"name\": \"read_table\", \"description\": \"Read rows of a table export.\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}}, \"required\": [\"path\"]}}], \"tool_choice\": {\"type\": \"auto\"}, \"output_config\": {\"effort\": \"low\"}, \"stream\": true}"
+    }
+   ]
+  },
+  {
+   "scenario": "cap_temp_json",
+   "requests": [
+    {
+     "method": "POST",
+     "url": "https://api.anthropic.com/v1/messages",
+     "headers": {
+      "Content-Type": "application/json",
+      "x-api-key": "<key>",
+      "anthropic-version": "2023-06-01"
+     },
+     "body": "{\"model\": \"m-generic\", \"max_tokens\": 512, \"system\": [{\"type\": \"text\", \"text\": \"You are a forensic analyst on case CASE-A.\", \"cache_control\": {\"type\": \"ephemeral\"}}], \"messages\": [{\"role\": \"user\", \"content\": [{\"type\": \"text\", \"text\": \"Summarize: logon of jane.doe on CORP-WS01 at 2031-03-01 10:00.\"}]}], \"stream\": true}"
+    }
+   ]
+  },
+  {
+   "scenario": "stream_off",
+   "requests": [
+    {
+     "method": "POST",
+     "url": "https://api.anthropic.com/v1/messages",
+     "headers": {
+      "Content-Type": "application/json",
+      "x-api-key": "<key>",
+      "anthropic-version": "2023-06-01"
+     },
+     "body": "{\"model\": \"m-generic\", \"max_tokens\": 65536, \"system\": [{\"type\": \"text\", \"text\": \"You are a forensic analyst on case CASE-A.\", \"cache_control\": {\"type\": \"ephemeral\"}}], \"messages\": [{\"role\": \"user\", \"content\": [{\"type\": \"text\", \"text\": \"Brief: host CORP-WS01, user jane.doe, window 2031-03-01 to 2031-03-02.\", \"cache_control\": {\"type\": \"ephemeral\"}}]}, {\"role\": \"assistant\", \"content\": [{\"type\": \"tool_use\", \"id\": \"call_1\", \"name\": \"list_processes\", \"input\": {\"image\": \"m.img\"}}, {\"type\": \"tool_use\", \"id\": \"call_2\", \"name\": \"read_table\", \"input\": {\"path\": \"exports/t.csv\"}}]}, {\"role\": \"user\", \"content\": [{\"type\": \"tool_result\", \"tool_use_id\": \"call_1\", \"content\": \"pid 4 System\"}, {\"type\": \"tool_result\", \"tool_use_id\": \"call_2\", \"content\": \"row 1: 10.0.0.5 to 203.0.113.7\", \"cache_control\": {\"type\": \"ephemeral\"}}, {\"type\": \"text\", \"text\": \"Record what bears on the case before the next reads.\"}]}], \"tools\": [{\"name\": \"list_processes\", \"description\": \"List the processes in a memory image.\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"image\": {\"type\": \"string\"}}, \"required\": [\"image\"]}}, {\"name\": \"read_table\", \"description\": \"Read rows of a table export.\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}}, \"required\": [\"path\"]}}], \"tool_choice\": {\"type\": \"auto\"}}"
+    }
+   ]
+  },
+  {
+   "scenario": "env_overrides",
+   "requests": [
+    {
+     "method": "POST",
+     "url": "https://api.anthropic.com/v1/messages",
+     "headers": {
+      "Content-Type": "application/json",
+      "x-api-key": "<key>",
+      "anthropic-version": "2023-06-01"
+     },
+     "body": "{\"model\": \"m-generic\", \"max_tokens\": 256, \"system\": [{\"type\": \"text\", \"text\": \"You are a forensic analyst on case CASE-A.\", \"cache_control\": {\"type\": \"ephemeral\"}}], \"messages\": [{\"role\": \"user\", \"content\": [{\"type\": \"text\", \"text\": \"Summarize: logon of jane.doe on CORP-WS01 at 2031-03-01 10:00.\"}]}], \"stream\": true}"
+    }
+   ]
+  },
+  {
+   "scenario": "model:glm-5.2",
+   "requests": [
+    {
+     "method": "POST",
+     "url": "https://api.anthropic.com/v1/messages",
+     "headers": {
+      "Content-Type": "application/json",
+      "x-api-key": "<key>",
+      "anthropic-version": "2023-06-01"
+     },
+     "body": "{\"model\": \"glm-5.2\", \"max_tokens\": 65536, \"system\": [{\"type\": \"text\", \"text\": \"You are a forensic analyst on case CASE-A.\", \"cache_control\": {\"type\": \"ephemeral\"}}], \"messages\": [{\"role\": \"user\", \"content\": [{\"type\": \"text\", \"text\": \"Brief: host CORP-WS01, user jane.doe, window 2031-03-01 to 2031-03-02.\", \"cache_control\": {\"type\": \"ephemeral\"}}]}, {\"role\": \"assistant\", \"content\": [{\"type\": \"tool_use\", \"id\": \"call_1\", \"name\": \"list_processes\", \"input\": {\"image\": \"m.img\"}}, {\"type\": \"tool_use\", \"id\": \"call_2\", \"name\": \"read_table\", \"input\": {\"path\": \"exports/t.csv\"}}]}, {\"role\": \"user\", \"content\": [{\"type\": \"tool_result\", \"tool_use_id\": \"call_1\", \"content\": \"pid 4 System\"}, {\"type\": \"tool_result\", \"tool_use_id\": \"call_2\", \"content\": \"row 1: 10.0.0.5 to 203.0.113.7\", \"cache_control\": {\"type\": \"ephemeral\"}}, {\"type\": \"text\", \"text\": \"Record what bears on the case before the next reads.\"}]}], \"tools\": [{\"name\": \"list_processes\", \"description\": \"List the processes in a memory image.\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"image\": {\"type\": \"string\"}}, \"required\": [\"image\"]}}, {\"name\": \"read_table\", \"description\": \"Read rows of a table export.\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}}, \"required\": [\"path\"]}}], \"tool_choice\": {\"type\": \"auto\"}, \"stream\": true}"
+    }
+   ]
+  },
+  {
+   "scenario": "model:gpt-5.2",
+   "requests": [
+    {
+     "method": "POST",
+     "url": "https://api.anthropic.com/v1/messages",
+     "headers": {
+      "Content-Type": "application/json",
+      "x-api-key": "<key>",
+      "anthropic-version": "2023-06-01"
+     },
+     "body": "{\"model\": \"gpt-5.2\", \"max_tokens\": 65536, \"system\": [{\"type\": \"text\", \"text\": \"You are a forensic analyst on case CASE-A.\", \"cache_control\": {\"type\": \"ephemeral\"}}], \"messages\": [{\"role\": \"user\", \"content\": [{\"type\": \"text\", \"text\": \"Brief: host CORP-WS01, user jane.doe, window 2031-03-01 to 2031-03-02.\", \"cache_control\": {\"type\": \"ephemeral\"}}]}, {\"role\": \"assistant\", \"content\": [{\"type\": \"tool_use\", \"id\": \"call_1\", \"name\": \"list_processes\", \"input\": {\"image\": \"m.img\"}}, {\"type\": \"tool_use\", \"id\": \"call_2\", \"name\": \"read_table\", \"input\": {\"path\": \"exports/t.csv\"}}]}, {\"role\": \"user\", \"content\": [{\"type\": \"tool_result\", \"tool_use_id\": \"call_1\", \"content\": \"pid 4 System\"}, {\"type\": \"tool_result\", \"tool_use_id\": \"call_2\", \"content\": \"row 1: 10.0.0.5 to 203.0.113.7\", \"cache_control\": {\"type\": \"ephemeral\"}}, {\"type\": \"text\", \"text\": \"Record what bears on the case before the next reads.\"}]}], \"tools\": [{\"name\": \"list_processes\", \"description\": \"List the processes in a memory image.\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"image\": {\"type\": \"string\"}}, \"required\": [\"image\"]}}, {\"name\": \"read_table\", \"description\": \"Read rows of a table export.\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}}, \"required\": [\"path\"]}}], \"tool_choice\": {\"type\": \"auto\"}, \"output_config\": {\"effort\": \"none\"}, \"stream\": true}"
+    }
+   ]
+  },
+  {
+   "scenario": "model:claude-x",
+   "requests": [
+    {
+     "method": "POST",
+     "url": "https://api.anthropic.com/v1/messages",
+     "headers": {
+      "Content-Type": "application/json",
+      "x-api-key": "<key>",
+      "anthropic-version": "2023-06-01"
+     },
+     "body": "{\"model\": \"claude-x\", \"max_tokens\": 65536, \"system\": [{\"type\": \"text\", \"text\": \"You are a forensic analyst on case CASE-A.\", \"cache_control\": {\"type\": \"ephemeral\"}}], \"messages\": [{\"role\": \"user\", \"content\": [{\"type\": \"text\", \"text\": \"Brief: host CORP-WS01, user jane.doe, window 2031-03-01 to 2031-03-02.\", \"cache_control\": {\"type\": \"ephemeral\"}}]}, {\"role\": \"assistant\", \"content\": [{\"type\": \"tool_use\", \"id\": \"call_1\", \"name\": \"list_processes\", \"input\": {\"image\": \"m.img\"}}, {\"type\": \"tool_use\", \"id\": \"call_2\", \"name\": \"read_table\", \"input\": {\"path\": \"exports/t.csv\"}}]}, {\"role\": \"user\", \"content\": [{\"type\": \"tool_result\", \"tool_use_id\": \"call_1\", \"content\": \"pid 4 System\"}, {\"type\": \"tool_result\", \"tool_use_id\": \"call_2\", \"content\": \"row 1: 10.0.0.5 to 203.0.113.7\", \"cache_control\": {\"type\": \"ephemeral\"}}, {\"type\": \"text\", \"text\": \"Record what bears on the case before the next reads.\"}]}], \"tools\": [{\"name\": \"list_processes\", \"description\": \"List the processes in a memory image.\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"image\": {\"type\": \"string\"}}, \"required\": [\"image\"]}}, {\"name\": \"read_table\", \"description\": \"Read rows of a table export.\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}}, \"required\": [\"path\"]}}], \"tool_choice\": {\"type\": \"auto\"}, \"stream\": true}"
+    }
+   ]
+  },
+  {
+   "scenario": "model:anthropic/claude-x",
+   "requests": [
+    {
+     "method": "POST",
+     "url": "https://api.anthropic.com/v1/messages",
+     "headers": {
+      "Content-Type": "application/json",
+      "x-api-key": "<key>",
+      "anthropic-version": "2023-06-01"
+     },
+     "body": "{\"model\": \"anthropic/claude-x\", \"max_tokens\": 65536, \"system\": [{\"type\": \"text\", \"text\": \"You are a forensic analyst on case CASE-A.\", \"cache_control\": {\"type\": \"ephemeral\"}}], \"messages\": [{\"role\": \"user\", \"content\": [{\"type\": \"text\", \"text\": \"Brief: host CORP-WS01, user jane.doe, window 2031-03-01 to 2031-03-02.\", \"cache_control\": {\"type\": \"ephemeral\"}}]}, {\"role\": \"assistant\", \"content\": [{\"type\": \"tool_use\", \"id\": \"call_1\", \"name\": \"list_processes\", \"input\": {\"image\": \"m.img\"}}, {\"type\": \"tool_use\", \"id\": \"call_2\", \"name\": \"read_table\", \"input\": {\"path\": \"exports/t.csv\"}}]}, {\"role\": \"user\", \"content\": [{\"type\": \"tool_result\", \"tool_use_id\": \"call_1\", \"content\": \"pid 4 System\"}, {\"type\": \"tool_result\", \"tool_use_id\": \"call_2\", \"content\": \"row 1: 10.0.0.5 to 203.0.113.7\", \"cache_control\": {\"type\": \"ephemeral\"}}, {\"type\": \"text\", \"text\": \"Record what bears on the case before the next reads.\"}]}], \"tools\": [{\"name\": \"list_processes\", \"description\": \"List the processes in a memory image.\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"image\": {\"type\": \"string\"}}, \"required\": [\"image\"]}}, {\"name\": \"read_table\", \"description\": \"Read rows of a table export.\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}}, \"required\": [\"path\"]}}], \"tool_choice\": {\"type\": \"auto\"}, \"stream\": true}"
+    }
+   ]
+  },
+  {
+   "scenario": "name_lower",
+   "requests": [
+    {
+     "method": "POST",
+     "url": "https://api.anthropic.com/v1/messages",
+     "headers": {
+      "Content-Type": "application/json",
+      "x-api-key": "<key>",
+      "anthropic-version": "2023-06-01"
+     },
+     "body": "{\"model\": \"m-generic\", \"max_tokens\": 65536, \"system\": [{\"type\": \"text\", \"text\": \"You are a forensic analyst on case CASE-A.\", \"cache_control\": {\"type\": \"ephemeral\"}}], \"messages\": [{\"role\": \"user\", \"content\": [{\"type\": \"text\", \"text\": \"Brief: host CORP-WS01, user jane.doe, window 2031-03-01 to 2031-03-02.\", \"cache_control\": {\"type\": \"ephemeral\"}}]}, {\"role\": \"assistant\", \"content\": [{\"type\": \"tool_use\", \"id\": \"call_1\", \"name\": \"list_processes\", \"input\": {\"image\": \"m.img\"}}, {\"type\": \"tool_use\", \"id\": \"call_2\", \"name\": \"read_table\", \"input\": {\"path\": \"exports/t.csv\"}}]}, {\"role\": \"user\", \"content\": [{\"type\": \"tool_result\", \"tool_use_id\": \"call_1\", \"content\": \"pid 4 System\"}, {\"type\": \"tool_result\", \"tool_use_id\": \"call_2\", \"content\": \"row 1: 10.0.0.5 to 203.0.113.7\", \"cache_control\": {\"type\": \"ephemeral\"}}, {\"type\": \"text\", \"text\": \"Record what bears on the case before the next reads.\"}]}], \"tools\": [{\"name\": \"list_processes\", \"description\": \"List the processes in a memory image.\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"image\": {\"type\": \"string\"}}, \"required\": [\"image\"]}}, {\"name\": \"read_table\", \"description\": \"Read rows of a table export.\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}}, \"required\": [\"path\"]}}], \"tool_choice\": {\"type\": \"auto\"}, \"stream\": true}"
+    }
+   ]
+  },
+  {
+   "scenario": "name_mixed",
+   "requests": [
+    {
+     "method": "POST",
+     "url": "https://api.anthropic.com/v1/messages",
+     "headers": {
+      "Content-Type": "application/json",
+      "x-api-key": "<key>",
+      "anthropic-version": "2023-06-01"
+     },
+     "body": "{\"model\": \"m-generic\", \"max_tokens\": 65536, \"system\": [{\"type\": \"text\", \"text\": \"You are a forensic analyst on case CASE-A.\", \"cache_control\": {\"type\": \"ephemeral\"}}], \"messages\": [{\"role\": \"user\", \"content\": [{\"type\": \"text\", \"text\": \"Brief: host CORP-WS01, user jane.doe, window 2031-03-01 to 2031-03-02.\", \"cache_control\": {\"type\": \"ephemeral\"}}]}, {\"role\": \"assistant\", \"content\": [{\"type\": \"tool_use\", \"id\": \"call_1\", \"name\": \"list_processes\", \"input\": {\"image\": \"m.img\"}}, {\"type\": \"tool_use\", \"id\": \"call_2\", \"name\": \"read_table\", \"input\": {\"path\": \"exports/t.csv\"}}]}, {\"role\": \"user\", \"content\": [{\"type\": \"tool_result\", \"tool_use_id\": \"call_1\", \"content\": \"pid 4 System\"}, {\"type\": \"tool_result\", \"tool_use_id\": \"call_2\", \"content\": \"row 1: 10.0.0.5 to 203.0.113.7\", \"cache_control\": {\"type\": \"ephemeral\"}}, {\"type\": \"text\", \"text\": \"Record what bears on the case before the next reads.\"}]}], \"tools\": [{\"name\": \"list_processes\", \"description\": \"List the processes in a memory image.\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"image\": {\"type\": \"string\"}}, \"required\": [\"image\"]}}, {\"name\": \"read_table\", \"description\": \"Read rows of a table export.\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}}, \"required\": [\"path\"]}}], \"tool_choice\": {\"type\": \"auto\"}, \"stream\": true}"
+    }
+   ]
+  },
+  {
+   "scenario": "name_mixed_effort",
+   "requests": [
+    {
+     "method": "POST",
+     "url": "https://api.anthropic.com/v1/messages",
+     "headers": {
+      "Content-Type": "application/json",
+      "x-api-key": "<key>",
+      "anthropic-version": "2023-06-01"
+     },
+     "body": "{\"model\": \"m-generic\", \"max_tokens\": 65536, \"system\": [{\"type\": \"text\", \"text\": \"You are a forensic analyst on case CASE-A.\", \"cache_control\": {\"type\": \"ephemeral\"}}], \"messages\": [{\"role\": \"user\", \"content\": [{\"type\": \"text\", \"text\": \"Brief: host CORP-WS01, user jane.doe, window 2031-03-01 to 2031-03-02.\", \"cache_control\": {\"type\": \"ephemeral\"}}]}, {\"role\": \"assistant\", \"content\": [{\"type\": \"tool_use\", \"id\": \"call_1\", \"name\": \"list_processes\", \"input\": {\"image\": \"m.img\"}}, {\"type\": \"tool_use\", \"id\": \"call_2\", \"name\": \"read_table\", \"input\": {\"path\": \"exports/t.csv\"}}]}, {\"role\": \"user\", \"content\": [{\"type\": \"tool_result\", \"tool_use_id\": \"call_1\", \"content\": \"pid 4 System\"}, {\"type\": \"tool_result\", \"tool_use_id\": \"call_2\", \"content\": \"row 1: 10.0.0.5 to 203.0.113.7\", \"cache_control\": {\"type\": \"ephemeral\"}}, {\"type\": \"text\", \"text\": \"Record what bears on the case before the next reads.\"}]}], \"tools\": [{\"name\": \"list_processes\", \"description\": \"List the processes in a memory image.\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"image\": {\"type\": \"string\"}}, \"required\": [\"image\"]}}, {\"name\": \"read_table\", \"description\": \"Read rows of a table export.\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}}, \"required\": [\"path\"]}}], \"tool_choice\": {\"type\": \"auto\"}, \"output_config\": {\"effort\": \"high\"}, \"stream\": true}"
+    }
+   ]
+  },
+  {
+   "scenario": "ladder_cut",
+   "requests": [
+    {
+     "method": "POST",
+     "url": "https://api.anthropic.com/v1/messages",
+     "headers": {
+      "Content-Type": "application/json",
+      "x-api-key": "<key>",
+      "anthropic-version": "2023-06-01"
+     },
+     "body": "{\"model\": \"m-generic\", \"max_tokens\": 65536, \"system\": [{\"type\": \"text\", \"text\": \"You are a forensic analyst on case CASE-A.\", \"cache_control\": {\"type\": \"ephemeral\"}}], \"messages\": [{\"role\": \"user\", \"content\": [{\"type\": \"text\", \"text\": \"Brief: host CORP-WS01, user jane.doe, window 2031-03-01 to 2031-03-02.\", \"cache_control\": {\"type\": \"ephemeral\"}}]}, {\"role\": \"assistant\", \"content\": [{\"type\": \"tool_use\", \"id\": \"call_1\", \"name\": \"list_processes\", \"input\": {\"image\": \"m.img\"}}, {\"type\": \"tool_use\", \"id\": \"call_2\", \"name\": \"read_table\", \"input\": {\"path\": \"exports/t.csv\"}}]}, {\"role\": \"user\", \"content\": [{\"type\": \"tool_result\", \"tool_use_id\": \"call_1\", \"content\": \"pid 4 System\"}, {\"type\": \"tool_result\", \"tool_use_id\": \"call_2\", \"content\": \"row 1: 10.0.0.5 to 203.0.113.7\", \"cache_control\": {\"type\": \"ephemeral\"}}, {\"type\": \"text\", \"text\": \"Record what bears on the case before the next reads.\"}]}], \"tools\": [{\"name\": \"list_processes\", \"description\": \"List the processes in a memory image.\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"image\": {\"type\": \"string\"}}, \"required\": [\"image\"]}}, {\"name\": \"read_table\", \"description\": \"Read rows of a table export.\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}}, \"required\": [\"path\"]}}], \"tool_choice\": {\"type\": \"auto\"}, \"stream\": true}"
+    },
+    {
+     "method": "POST",
+     "url": "https://api.anthropic.com/v1/messages",
+     "headers": {
+      "Content-Type": "application/json",
+      "x-api-key": "<key>",
+      "anthropic-version": "2023-06-01"
+     },
+     "body": "{\"model\": \"m-generic\", \"max_tokens\": 65536, \"system\": [{\"type\": \"text\", \"text\": \"You are a forensic analyst on case CASE-A.\", \"cache_control\": {\"type\": \"ephemeral\"}}], \"messages\": [{\"role\": \"user\", \"content\": [{\"type\": \"text\", \"text\": \"Brief: host CORP-WS01, user jane.doe, window 2031-03-01 to 2031-03-02.\", \"cache_control\": {\"type\": \"ephemeral\"}}]}, {\"role\": \"assistant\", \"content\": [{\"type\": \"tool_use\", \"id\": \"call_1\", \"name\": \"list_processes\", \"input\": {\"image\": \"m.img\"}}, {\"type\": \"tool_use\", \"id\": \"call_2\", \"name\": \"read_table\", \"input\": {\"path\": \"exports/t.csv\"}}]}, {\"role\": \"user\", \"content\": [{\"type\": \"tool_result\", \"tool_use_id\": \"call_1\", \"content\": \"pid 4 System\"}, {\"type\": \"tool_result\", \"tool_use_id\": \"call_2\", \"content\": \"row 1: 10.0.0.5 to 203.0.113.7\", \"cache_control\": {\"type\": \"ephemeral\"}}, {\"type\": \"text\", \"text\": \"Record what bears on the case before the next reads.\"}]}], \"tools\": [{\"name\": \"list_processes\", \"description\": \"List the processes in a memory image.\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"image\": {\"type\": \"string\"}}, \"required\": [\"image\"]}}, {\"name\": \"read_table\", \"description\": \"Read rows of a table export.\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}}, \"required\": [\"path\"]}}], \"tool_choice\": {\"type\": \"auto\"}, \"output_config\": {\"effort\": \"high\"}, \"stream\": true}"
+    }
+   ]
+  },
+  {
+   "scenario": "adapt_400",
+   "requests": [
+    {
+     "method": "POST",
+     "url": "https://api.anthropic.com/v1/messages",
+     "headers": {
+      "Content-Type": "application/json",
+      "x-api-key": "<key>",
+      "anthropic-version": "2023-06-01"
+     },
+     "body": "{\"model\": \"m-generic\", \"max_tokens\": 65536, \"system\": [{\"type\": \"text\", \"text\": \"You are a forensic analyst on case CASE-A.\", \"cache_control\": {\"type\": \"ephemeral\"}}], \"messages\": [{\"role\": \"user\", \"content\": [{\"type\": \"text\", \"text\": \"Summarize: logon of jane.doe on CORP-WS01 at 2031-03-01 10:00.\"}]}], \"stream\": true}"
+    }
+   ],
+   "error": "LLMStatusError"
+  },
+  {
+   "scenario": "adapt_400_level",
+   "requests": [
+    {
+     "method": "POST",
+     "url": "https://api.anthropic.com/v1/messages",
+     "headers": {
+      "Content-Type": "application/json",
+      "x-api-key": "<key>",
+      "anthropic-version": "2023-06-01"
+     },
+     "body": "{\"model\": \"m-generic\", \"max_tokens\": 65536, \"system\": [{\"type\": \"text\", \"text\": \"You are a forensic analyst on case CASE-A.\", \"cache_control\": {\"type\": \"ephemeral\"}}], \"messages\": [{\"role\": \"user\", \"content\": [{\"type\": \"text\", \"text\": \"Brief: host CORP-WS01, user jane.doe, window 2031-03-01 to 2031-03-02.\", \"cache_control\": {\"type\": \"ephemeral\"}}]}, {\"role\": \"assistant\", \"content\": [{\"type\": \"tool_use\", \"id\": \"call_1\", \"name\": \"list_processes\", \"input\": {\"image\": \"m.img\"}}, {\"type\": \"tool_use\", \"id\": \"call_2\", \"name\": \"read_table\", \"input\": {\"path\": \"exports/t.csv\"}}]}, {\"role\": \"user\", \"content\": [{\"type\": \"tool_result\", \"tool_use_id\": \"call_1\", \"content\": \"pid 4 System\"}, {\"type\": \"tool_result\", \"tool_use_id\": \"call_2\", \"content\": \"row 1: 10.0.0.5 to 203.0.113.7\", \"cache_control\": {\"type\": \"ephemeral\"}}, {\"type\": \"text\", \"text\": \"Record what bears on the case before the next reads.\"}]}], \"output_config\": {\"effort\": \"high\"}, \"stream\": true}"
+    },
+    {
+     "method": "POST",
+     "url": "https://api.anthropic.com/v1/messages",
+     "headers": {
+      "Content-Type": "application/json",
+      "x-api-key": "<key>",
+      "anthropic-version": "2023-06-01"
+     },
+     "body": "{\"model\": \"m-generic\", \"max_tokens\": 65536, \"system\": [{\"type\": \"text\", \"text\": \"You are a forensic analyst on case CASE-A.\", \"cache_control\": {\"type\": \"ephemeral\"}}], \"messages\": [{\"role\": \"user\", \"content\": [{\"type\": \"text\", \"text\": \"Brief: host CORP-WS01, user jane.doe, window 2031-03-01 to 2031-03-02.\", \"cache_control\": {\"type\": \"ephemeral\"}}]}, {\"role\": \"assistant\", \"content\": [{\"type\": \"tool_use\", \"id\": \"call_1\", \"name\": \"list_processes\", \"input\": {\"image\": \"m.img\"}}, {\"type\": \"tool_use\", \"id\": \"call_2\", \"name\": \"read_table\", \"input\": {\"path\": \"exports/t.csv\"}}]}, {\"role\": \"user\", \"content\": [{\"type\": \"tool_result\", \"tool_use_id\": \"call_1\", \"content\": \"pid 4 System\"}, {\"type\": \"tool_result\", \"tool_use_id\": \"call_2\", \"content\": \"row 1: 10.0.0.5 to 203.0.113.7\", \"cache_control\": {\"type\": \"ephemeral\"}}, {\"type\": \"text\", \"text\": \"Record what bears on the case before the next reads.\"}]}], \"output_config\": {\"effort\": \"low\"}, \"stream\": true}"
+    }
+   ]
+  },
+  {
+   "scenario": "adapt_400_thinking",
+   "requests": [
+    {
+     "method": "POST",
+     "url": "https://api.anthropic.com/v1/messages",
+     "headers": {
+      "Content-Type": "application/json",
+      "x-api-key": "<key>",
+      "anthropic-version": "2023-06-01"
+     },
+     "body": "{\"model\": \"m-generic\", \"max_tokens\": 65536, \"system\": [{\"type\": \"text\", \"text\": \"You are a forensic analyst on case CASE-A.\", \"cache_control\": {\"type\": \"ephemeral\"}}], \"messages\": [{\"role\": \"user\", \"content\": [{\"type\": \"text\", \"text\": \"Brief: host CORP-WS01, user jane.doe, window 2031-03-01 to 2031-03-02.\", \"cache_control\": {\"type\": \"ephemeral\"}}]}, {\"role\": \"assistant\", \"content\": [{\"type\": \"tool_use\", \"id\": \"call_1\", \"name\": \"list_processes\", \"input\": {\"image\": \"m.img\"}}, {\"type\": \"tool_use\", \"id\": \"call_2\", \"name\": \"read_table\", \"input\": {\"path\": \"exports/t.csv\"}}]}, {\"role\": \"user\", \"content\": [{\"type\": \"tool_result\", \"tool_use_id\": \"call_1\", \"content\": \"pid 4 System\"}, {\"type\": \"tool_result\", \"tool_use_id\": \"call_2\", \"content\": \"row 1: 10.0.0.5 to 203.0.113.7\", \"cache_control\": {\"type\": \"ephemeral\"}}, {\"type\": \"text\", \"text\": \"Record what bears on the case before the next reads.\"}]}], \"output_config\": {\"effort\": \"high\"}, \"stream\": true}"
+    }
+   ],
+   "error": "LLMStatusError"
+  },
+  {
+   "scenario": "test_connection",
+   "requests": [
+    {
+     "method": "GET",
+     "url": "https://api.anthropic.com/v1/models",
+     "headers": {
+      "Content-Type": "application/json",
+      "x-api-key": "<key>",
+      "anthropic-version": "2023-06-01"
+     },
+     "body": null
+    },
+    {
+     "method": "POST",
+     "url": "https://api.anthropic.com/v1/messages",
+     "headers": {
+      "Content-Type": "application/json",
+      "x-api-key": "<key>",
+      "anthropic-version": "2023-06-01"
+     },
+     "body": "{\"model\": \"m-generic\", \"max_tokens\": 65536, \"messages\": [{\"role\": \"user\", \"content\": [{\"type\": \"text\", \"text\": \"Reply with the single word: ok\"}]}], \"stream\": true}"
+    },
+    {
+     "method": "POST",
+     "url": "https://api.anthropic.com/v1/messages",
+     "headers": {
+      "Content-Type": "application/json",
+      "x-api-key": "<key>",
+      "anthropic-version": "2023-06-01"
+     },
+     "body": "{\"model\": \"m-generic\", \"max_tokens\": 65536, \"messages\": [{\"role\": \"user\", \"content\": [{\"type\": \"text\", \"text\": \"List the processes in m.img. Call the tool.\"}]}], \"tools\": [{\"name\": \"list_processes\", \"description\": \"List the processes recorded in a memory image.\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"image\": {\"type\": \"string\"}}, \"required\": [\"image\"]}}], \"tool_choice\": {\"type\": \"auto\"}, \"stream\": true}"
+    }
+   ]
+  },
+  {
+   "scenario": "context_probe",
+   "requests": [
+    {
+     "method": "GET",
+     "url": "https://api.anthropic.com/v1/models",
+     "headers": {
+      "Content-Type": "application/json",
+      "x-api-key": "<key>"
+     },
+     "body": null
+    }
+   ]
+  },
+  {
+   "scenario": "list_models",
+   "requests": [
+    {
+     "method": "GET",
+     "url": "https://api.anthropic.com/v1/models",
+     "headers": {
+      "Content-Type": "application/json",
+      "x-api-key": "<key>",
+      "anthropic-version": "2023-06-01"
+     },
+     "body": null
+    }
+   ]
+  },
+  {
+   "scenario": "doctor_probe",
+   "requests": [
+    {
+     "method": "GET",
+     "url": "https://api.anthropic.com/v1/models",
+     "headers": {
+      "Content-Type": "application/json",
+      "x-api-key": "<key>",
+      "anthropic-version": "2023-06-01"
+     },
+     "body": null
+    }
+   ]
+  },
+  {
+   "scenario": "provider_use",
+   "requests": [
+    {
+     "method": "GET",
+     "url": "https://api.anthropic.com/v1/models",
+     "headers": {
+      "Content-Type": "application/json",
+      "x-api-key": "<key>",
+      "anthropic-version": "2023-06-01"
+     },
+     "body": null
+    }
+   ]
+  },
+  {
+   "scenario": "dashboard_probe",
+   "requests": [
+    {
+     "method": "GET",
+     "url": "https://api.anthropic.com/v1/models",
+     "headers": {
+      "Content-Type": "application/json",
+      "x-api-key": "<key>",
+      "anthropic-version": "2023-06-01"
+     },
+     "body": null
+    }
+   ]
+  },
+  {
+   "scenario": "dashboard_probe_edit",
+   "requests": [
+    {
+     "method": "GET",
+     "url": "https://api.anthropic.com/v1/models",
+     "headers": {
+      "Content-Type": "application/json",
+      "x-api-key": "<key>",
+      "anthropic-version": "2023-06-01"
+     },
+     "body": null
+    }
+   ]
+  },
+  {
+   "scenario": "wizard_probe",
+   "requests": [
+    {
+     "method": "GET",
+     "url": "https://api.anthropic.com/v1/models",
+     "headers": {
+      "Content-Type": "application/json",
+      "x-api-key": "<key>",
+      "anthropic-version": "2023-06-01"
+     },
+     "body": null
+    }
+   ]
+  }
+ ]
+}

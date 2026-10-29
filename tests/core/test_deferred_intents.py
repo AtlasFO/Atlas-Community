@@ -167,6 +167,7 @@ class TestMiddlewareDeferredIntent:
                     save_session=False)
         return l
 
+    @pytest.mark.usefixtures("todays_dair")
     def test_block_records_deferred_intent(self, tmp_path):
         from core.middleware import NarrationMiddleware
         from core.deferred_intents import PROTOCOL_MARKER
@@ -186,6 +187,7 @@ class TestMiddlewareDeferredIntent:
         assert intents[0]["status"] == "open"
         assert intents[0]["tool"] == "vol_vol_psscan"
 
+    @pytest.mark.usefixtures("todays_dair")
     def test_latch_blocks_even_with_fresh_dair(self, tmp_path):
         from core.deferred_intents import DEFERRED_BACKLOG_CAP, PROTOCOL_MARKER
         from core.middleware import NarrationMiddleware

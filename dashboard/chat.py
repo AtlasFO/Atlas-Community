@@ -271,6 +271,14 @@ class ChatManager:
                 sess.last_active = time.time()
             return sess
 
+    def close_case(self, case_name: str) -> None:
+        """End the case's worker, if one runs: its working directory is the
+        case folder, which is about to move."""
+        with self._lock:
+            sess = self._sessions.pop(case_name, None)
+        if sess is not None:
+            sess.close()
+
     def close_all(self) -> None:
         self._stop.set()
         with self._lock:

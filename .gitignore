@@ -4,6 +4,8 @@
 # and the bare `.env` pattern does not match it.
 .env.*
 !.env.example
+# The operator's own provider profiles: configuration, like .env.
+provider_profiles.local/
 
 # python
 __pycache__/

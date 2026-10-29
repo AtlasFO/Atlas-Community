@@ -15,11 +15,14 @@ from __future__ import annotations
 import gzip
 import os
 import shutil
+import struct
 import tarfile
 import zipfile
 from typing import Optional
 
 from fastmcp import FastMCP
+
+from tools import media_types as MT
 
 from core import output_safe, run
 from core.candidates import candidates
@@ -50,7 +53,7 @@ _ARCHIVE_DIAGNOSES: tuple[tuple[str, tuple[str, ...], str], ...] = (
     ("misaligned_carve",
      ("headers error", "unconfirmed start of archive", "bad magic number",
       "can not open the file as archive", "is not a supported archive",
-      "not a zip file", "missing central directory"),
+      "not a zip file", "missing central directory", "invalid header"),
      "The archive's start or length is wrong, not the password: find the real "
      "archive header in the source (bin.binwalk_scan reports offsets) and carve "
      "again from that offset. Trying more passwords will not help."),
@@ -78,6 +81,9 @@ def diagnose_extraction(text: str) -> tuple[str, str]:
 
 
 def _with_diagnosis(result: dict, *texts: str) -> dict:
+    """Diagnosis from a program's own text (7z, unrar, tarfile's fixed
+    messages): never from a text that carries a member's name, which could
+    be written to read like a needle."""
     if result.get("success"):
         return result
     diagnosis, next_step = diagnose_extraction(" ".join(t for t in texts if t))
@@ -85,6 +91,105 @@ def _with_diagnosis(result: dict, *texts: str) -> dict:
         result["diagnosis"] = diagnosis
         result["next_step"] = next_step
     return result
+
+
+_NEXT_STEP = {diagnosis: step for diagnosis, _needles, step in _ARCHIVE_DIAGNOSES}
+
+
+def _diagnosed(result: dict, diagnosis: str) -> dict:
+    """The diagnosis the code established (a structure probe, an exception
+    type), with the table's next step; no scan of the message."""
+    result["diagnosis"] = diagnosis
+    result["next_step"] = _NEXT_STEP[diagnosis]
+    return result
+
+
+def _shown(name: str) -> str:
+    """A member name as the model-read message shows it: JSON-quoted and
+    escaped, so a name forges no line and no needle of the message."""
+    from core.coverage_ledger import shown_name  # loaded after the tool modules
+    return shown_name(name)
+
+
+_ZIP_LOCAL_HEADER = struct.Struct("<4sHHHHHIIIHH")
+
+# The heads of zipfile's own BadZipFile messages that name a structure
+# fault (a header or directory not where the directory says, a cut, a
+# corrupt record); "Bad CRC-32 for file ..." is not one of them.
+_ZIP_STRUCTURE_HEADS = ("Bad magic number", "Truncated", "Bad offset", "Corrupt",
+                        "File is not a zip file", "File name in directory",
+                        "Zip64 end of central directory")
+
+
+def _zip_structure(path: str) -> tuple[str, str]:
+    """``(diagnosis, fact)`` for a file the zip module refused, which means
+    it found no end-of-central-directory record. The fact is what a
+    bounded read of the head shows (30 bytes and the first member's name,
+    a 16-bit length) beside the file's size. ``truncated`` only when the
+    first member declares more bytes than the file holds; a declared size
+    that fits, or none declared (a data descriptor, zip64), stays
+    ``misaligned_carve`` with that said: the start or the length is wrong
+    and the bytes do not say which."""
+    size = os.path.getsize(path)
+    with open(path, "rb") as f:
+        head = f.read(_ZIP_LOCAL_HEADER.size)
+        if len(head) < _ZIP_LOCAL_HEADER.size or head[:4] != b"PK\x03\x04":
+            return "misaligned_carve", ("no zip local file header at offset 0 and no "
+                                        "end-of-central-directory record")
+        (_sig, _ver, flags, _method, _t, _d, _crc, csize, _usize,
+         nlen, xlen) = _ZIP_LOCAL_HEADER.unpack(head)
+        name = f.read(nlen).decode("utf-8", "replace")
+    fact = (f"a zip local file header at offset 0 (first member {_shown(name)}) but no "
+            "end-of-central-directory record")
+    if flags & 0x8 or csize == 0xFFFFFFFF:
+        return "misaligned_carve", fact + "; the member's size is not declared in its local header"
+    need = _ZIP_LOCAL_HEADER.size + nlen + xlen + csize
+    if need > size:
+        return "truncated", (fact + f"; the first member declares {need} bytes and the file "
+                             f"has {size}: cut short")
+    return "misaligned_carve", fact + f"; the first member's {need} bytes fit in the file's {size}"
+
+
+def _tar_structure(path: str) -> tuple[str, str]:
+    """``(diagnosis, fact)`` for a file the tar module refused, from a walk
+    of the 512-byte headers it holds: a ustar or GNU header carries "ustar"
+    at offset 257 and its entry's size in octal at 124, and an archive ends
+    with two zero blocks. ``truncated`` when an entry's data runs past the
+    file's end or the file ends where the next header should start; a pax
+    or long-name record (typeflag x, g, L, K) is an entry, not a member."""
+    size = os.path.getsize(path)
+    offset = 0
+    member = ""
+    with open(path, "rb") as f:
+        block = f.read(512)
+        if len(block) < 512 or block[257:262] != b"ustar":
+            return "misaligned_carve", ("no tar header at offset 0 (no ustar magic) and no compressed "
+                                        "stream the tar module could read a header from")
+        for _ in range(4096):  # bounded: one header per step, each read whole
+            if len(block) < 512:
+                return "truncated", (f"tar headers from offset 0 (first member {_shown(member)}); the "
+                                     f"next header should start at offset {offset} and the file has "
+                                     f"{size}, with no end-of-archive blocks: cut short")
+            if block[257:262] != b"ustar":
+                break
+            name = block[:100].split(b"\x00", 1)[0].decode("utf-8", "replace")
+            try:
+                declared = int(block[124:136].split(b"\x00", 1)[0].strip() or b"0", 8)
+            except ValueError:
+                return "misaligned_carve", (f"a tar header at offset {offset} (entry {_shown(name)}) "
+                                            "with an unreadable size field")
+            if not member and block[156:157] not in (b"x", b"g", b"L", b"K"):
+                member = name
+            if offset + 512 + declared > size:
+                return "truncated", (f"tar headers from offset 0; the entry {_shown(name)} declares "
+                                     f"{declared} bytes from offset {offset + 512} and the file has "
+                                     f"{size}: cut short")
+            offset += 512 + declared + (-declared % 512)
+            f.seek(offset)
+            block = f.read(512)
+    return "misaligned_carve", (f"tar headers from offset 0 (first member {_shown(member)}) the tar "
+                                f"module could not read; every entry's declared bytes fit in the "
+                                f"file's {size}")
 
 
 def _with_candidates(extract, password) -> dict:
@@ -107,18 +212,23 @@ def _with_candidates(extract, password) -> dict:
     return result
 
 
-@mcp.tool()
+@mcp.tool(meta={"reads": list(MT.ZIP)})
 @output_safe
 def zip_extract(archive_path: str, output_dir: str,
                 password: str | list[str] | None = None) -> dict:
     """
-    Extract a .zip archive (checked by file signature, not extension).
+    Extract a .zip archive (judged by its structure, not its name).
     password: for AES/ZipCrypto-protected zips; one password, or a list of
     candidates tried in turn (the one that opened the archive is reported).
     """
     if not zipfile.is_zipfile(archive_path):
-        return {"success": False,
-                "error": f"{archive_path} is not a zip file (checked by signature, not extension)"}
+        try:
+            diagnosis, fact = _zip_structure(archive_path)
+        except OSError as e:
+            return {"success": False, "error": f"{archive_path}: {e}"}
+        return _diagnosed({"success": False,
+                           "error": f"{archive_path} is not a zip the archive module can open: {fact}"},
+                          diagnosis)
     os.makedirs(output_dir, exist_ok=True)
     return _with_candidates(lambda pw: _zip_extract_with(archive_path, output_dir, pw),
                             password)
@@ -143,31 +253,52 @@ def _zip_extract_with(archive_path: str, output_dir: str, password: Optional[str
             zf.extractall(output_dir)
             names = zf.namelist()
     except RuntimeError as e:
-        # zipfile raises a bare RuntimeError for "Bad password" / password required.
-        return _with_diagnosis(
+        # zipfile's RuntimeError is its password complaint ("Bad password",
+        # "password required"): the diagnosis follows the type, not the
+        # text, which carries the member's name.
+        return _diagnosed(
             {"success": False, "error": f"extraction failed (wrong/missing password?): {e}"},
-            str(e))
+            "wrong_password")
     except zipfile.BadZipFile as e:
-        # A carved or truncated archive: the central directory parsed but a
-        # member header is not where it should be.
-        return _with_diagnosis({"success": False, "error": f"extraction failed: {e}"},
-                               str(e))
+        # The central directory parsed and a member did not: zipfile's own
+        # message head says which kind (the member's name, when it follows
+        # the head, is not looked at). A structural head is a carve that
+        # joined the wrong pieces or starts off; a checksum mismatch is
+        # corrupt data or, on a ZipCrypto member, a wrong candidate the
+        # one-byte check let through, so it says that and advises nothing
+        # on passwords.
+        text = str(e)
+        if text.startswith(_ZIP_STRUCTURE_HEADS):
+            return _diagnosed({"success": False, "error": f"extraction failed: {text}"},
+                              "misaligned_carve")
+        if text.startswith("Bad CRC-32"):
+            return {"success": False,
+                    "error": (f"extraction failed: {text}: the member's data does not match "
+                              "its checksum (corrupt data, or on a ZipCrypto member a wrong "
+                              "candidate the check byte let through)")}
+        return {"success": False, "error": f"extraction failed: {text}"}
     except Exception as e:
         return {"success": False, "error": str(e)}
     return {"success": True, "output_dir": output_dir, "member_count": len(names),
             "uncompressed_bytes": total}
 
 
-@mcp.tool()
+@mcp.tool(meta={"reads": [*MT.TAR, *MT.GZIP, *MT.BZIP2, *MT.XZ]})
 @output_safe
 def tar_extract(archive_path: str, output_dir: str) -> dict:
     """
     Extract a .tar, .tar.gz/.tgz, .tar.bz2/.tbz2, or .tar.xz archive
-    (compression auto-detected by tarfile, not inferred from the filename).
+    (compression judged by the tar module from the bytes, not the name).
     """
     if not tarfile.is_tarfile(archive_path):
-        return {"success": False,
-                "error": f"{archive_path} is not a tar-family archive (checked by signature, not extension)"}
+        try:
+            diagnosis, fact = _tar_structure(archive_path)
+        except OSError as e:
+            return {"success": False, "error": f"{archive_path}: {e}"}
+        return _diagnosed({"success": False,
+                           "error": f"{archive_path} is not a tar-family archive the tar module "
+                                    f"can open: {fact}"},
+                          diagnosis)
     os.makedirs(output_dir, exist_ok=True)
     try:
         with tarfile.open(archive_path) as tf:
@@ -195,13 +326,21 @@ def tar_extract(archive_path: str, output_dir: str) -> dict:
             # the 3.11.4 backport (PEP 706) lack it, hence the guard.
             extract_kwargs = {"filter": "data"} if hasattr(tarfile, "data_filter") else {}
             tf.extractall(output_dir, **extract_kwargs)
+    except tarfile.ReadError as e:
+        # The first header read, a later one did not. tarfile's fixed texts
+        # ("unexpected end of data", "invalid header") carry no member name.
+        return _with_diagnosis({"success": False, "error": str(e)}, str(e))
+    except EOFError as e:
+        # The compressed stream ended before its end marker: cut short.
+        return _diagnosed({"success": False, "error": f"the compressed stream ended early: {e}"},
+                          "truncated")
     except Exception as e:
         return {"success": False, "error": str(e)}
     return {"success": True, "output_dir": output_dir, "member_count": len(members),
             "uncompressed_bytes": total}
 
 
-@mcp.tool()
+@mcp.tool(meta={"reads": list(MT.GZIP)})
 @output_safe
 def gzip_extract(archive_path: str, output_path: str) -> dict:
     """
@@ -212,7 +351,9 @@ def gzip_extract(archive_path: str, output_path: str) -> dict:
     with open(archive_path, "rb") as f:
         magic = f.read(2)
     if magic != b"\x1f\x8b":
-        return {"success": False, "error": f"{archive_path} is not gzip-compressed (bad magic bytes)"}
+        return _diagnosed({"success": False,
+                           "error": f"{archive_path} is not gzip-compressed (no gzip magic at offset 0)"},
+                          "misaligned_carve")
     parent = os.path.dirname(output_path)
     if parent:
         os.makedirs(parent, exist_ok=True)
@@ -231,12 +372,19 @@ def gzip_extract(archive_path: str, output_path: str) -> dict:
                             "error": f"refusing to continue — exceeded the "
                                      f"{MAX_UNCOMPRESSED_BYTES}-byte cap (possible gzip bomb)"}
                 dst.write(chunk)
+    except EOFError as e:
+        # The stream ended before its end marker: cut short.
+        return _diagnosed({"success": False, "error": f"the compressed stream ended early: {e}"},
+                          "truncated")
+    except gzip.BadGzipFile as e:
+        # The magic was there; the header behind it is not gzip's.
+        return _diagnosed({"success": False, "error": str(e)}, "misaligned_carve")
     except Exception as e:
         return {"success": False, "error": str(e)}
     return {"success": True, "output_path": output_path, "uncompressed_bytes": written}
 
 
-@mcp.tool()
+@mcp.tool(meta={"reads": list(MT.SEVEN_ZIP)})
 @output_safe
 def archive_extract_7z(archive_path: str, output_dir: str,
                        password: str | list[str] | None = None) -> dict:
@@ -262,7 +410,7 @@ def archive_extract_7z(archive_path: str, output_dir: str,
     return _with_candidates(_extract, password)
 
 
-@mcp.tool()
+@mcp.tool(meta={"reads": list(MT.RAR)})
 @output_safe
 def archive_extract_rar(archive_path: str, output_dir: str,
                         password: str | list[str] | None = None) -> dict:

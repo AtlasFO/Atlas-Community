@@ -283,21 +283,34 @@ def _referenced_paths(cmd: list[str]) -> list[str]:
     return out
 
 
+def _add_stat(snap: dict[str, tuple | None], path: str) -> None:
+    """The path's stat, or for a live read-only raw view of a disk container
+    (core.raw_views) the stats of the files its daemon reads: the view's own
+    stat carries the daemon's clock, its sources are the evidence."""
+    try:
+        from core.raw_views import view_sources
+        sources = view_sources(path)
+    except Exception:  # noqa: BLE001 - when in doubt the path is compared
+        sources = None
+    for p in [path] if sources is None else sources:
+        snap[p] = _stat_key(p)
+
+
 def snapshot_evidence_refs(cmd: list[str]) -> dict[str, tuple | None]:
     """``{path: stat-or-None}`` for every evidence path the command names
-    and the immediate children of every evidence directory it touches."""
+    and the immediate children of every evidence directory it touches, a
+    raw view's sources in the view's place."""
     snap: dict[str, tuple | None] = {}
     if _exposes_only(list(cmd)):
         return snap  # the mount point changes by design; the evidence cannot
     for p in _referenced_paths(list(cmd)):
-        snap[p] = _stat_key(p)
+        _add_stat(snap, p)
         if os.path.isdir(p):
             try:
                 for i, name in enumerate(os.listdir(p)):
                     if i >= _MAX_SNAPSHOT_CHILDREN:
                         break
-                    child = os.path.join(p, name)
-                    snap[child] = _stat_key(child)
+                    _add_stat(snap, os.path.join(p, name))
             except OSError:
                 pass
     return snap
@@ -309,7 +322,9 @@ def evidence_changes(before: dict[str, tuple | None],
     after = snapshot_evidence_refs(cmd)
     changes: list[dict[str, str]] = []
     for path in sorted(set(before) | set(after)):
-        b, a = before.get(path), after.get(path)
+        # A path the second snapshot did not reach (a view that stopped
+        # mid-command, a directory listed in another order) is read again.
+        b, a = before.get(path), after[path] if path in after else _stat_key(path)
         if b == a:
             continue
         change = ("created" if b is None else

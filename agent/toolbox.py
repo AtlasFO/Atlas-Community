@@ -3,7 +3,7 @@
 Connects to the FastMCP server **in-process** (no subprocess, no stdio) and
 exposes its tools as OpenAI function-calling schemas.
 
-The server mounts ~250 tools; shipping every schema to the model each turn
+The server mounts about 390 tools; shipping every schema to the model each turn
 would swamp most LLM Hub models' context windows. Tools are therefore grouped
 by namespace and lazy-loaded: a core set is exposed up front, meta-tools let
 the model pull in more, and calling a not-yet-loaded tool auto-loads its
@@ -14,8 +14,11 @@ from __future__ import annotations
 import ast
 import asyncio
 import json
+import os
 import re
+import threading
 from dataclasses import dataclass
+from pathlib import Path
 
 from core.envfile import env_int
 
@@ -73,18 +76,68 @@ def set_learned_tool_ceiling(count: int | None) -> None:
     _LEARNED_CEILING = int(count) if count and int(count) > 0 else None
 
 
-def hard_tool_cap() -> int:
-    """The schema count no list may exceed: the configured maximum, bounded
-    by the provider window measured for this session."""
-    cap = int(MAX_OPENAI_TOOLS)
+# How many tool schemas the provider declares one request may carry (its
+# profile's [request] max_tools), for this session's model; None when it
+# declares nothing. The CLI sets it for an analysis run only: a chat keeps
+# the common cap and its switching list.
+_DECLARED_CAP: int | None = None
+
+# Above the common cap, one schema per this many tokens of window: a schema
+# runs about 250 tokens, so the list stays within an eighth of the window.
+WINDOW_TOKENS_PER_SCHEMA = 2000
+
+
+def set_declared_tool_cap(count: int | None) -> None:
+    global _DECLARED_CAP
+    _DECLARED_CAP = int(count) if count and int(count) > 0 else None
+
+
+def _session_limits():
     try:
         from core.llm_check import session_limits
-        lim = session_limits()
-        if lim is not None:
-            cap = max(8, min(cap, int(lim.max_openai_tools)))
-    except Exception:
-        pass
-    return cap
+        return session_limits()
+    except Exception:  # noqa: BLE001 - no limits module, no window
+        return None
+
+
+def _env_cap_set() -> bool:
+    """Whether the operator set the maximum, by the rule limits_for_window
+    reads it with (digits only)."""
+    return (os.environ.get("ATLAS_AGENT_MAX_OPENAI_TOOLS") or "").strip().isdigit()
+
+
+def hard_tool_cap() -> int:
+    """The schema count no list may exceed: the configured maximum, bounded
+    by the provider window measured for this session.
+
+    A provider that declares how many schemas a request may carry gets that
+    many in place of the common maximum, bounded by the window: one schema
+    per WINDOW_TOKENS_PER_SCHEMA tokens, never under the window's own tier.
+    The declaration needs a measured window; without one, or with
+    ATLAS_AGENT_MAX_OPENAI_TOOLS set, the cap is the common one."""
+    cap = int(MAX_OPENAI_TOOLS)
+    lim = _session_limits()
+    if lim is None:
+        return cap
+    tier = int(lim.max_openai_tools)
+    if _DECLARED_CAP and not _env_cap_set():
+        share = int(lim.window_tokens) // WINDOW_TOKENS_PER_SCHEMA
+        return max(8, min(_DECLARED_CAP, max(tier, share)))
+    return max(8, min(cap, tier))
+
+
+from core.tool_text import DESCRIPTION_CHARS, model_description  # noqa: E402,F401
+
+
+# Namespaces the analyst's toolbox never offers (ATLAS_HIDE_GRADER).
+_GRADER_NAMESPACES = frozenset({"accuracy"})
+
+# Tools no session of this toolbox offers, whatever its command. Clearing the
+# case removes the run's own outputs and trace: that belongs to a run's start
+# (agent/cli.py, which the dashboard's fresh start goes through) and to an
+# operator, never to a session inside the case it would clear. The MCP server
+# still serves it to an operator's own client.
+_SESSION_HIDDEN_TOOLS = frozenset({"misc_clear_case_run"})
 
 
 def max_openai_tools() -> int:
@@ -209,6 +262,24 @@ META_TOOLS = [
 ]
 
 
+# Sessions that may list every tool from the start: the analysis runs. A
+# chat, and any command not named here, keeps the switching list.
+STABLE_COMMANDS = frozenset({"run", "train", "rerun"})
+
+# The load tool as a stable list shows it: its schema unchanged, its text
+# true for a list that already holds every namespace.
+_STABLE_LOAD_TOOL = {
+    "type": "function",
+    "function": {
+        **next(m["function"] for m in META_TOOLS
+               if m["function"]["name"] == "atlas_load_namespaces"),
+        "description": ("Every tool namespace is already loaded for this model "
+                        "and the list stays the same for the whole run: this "
+                        "call loads and unloads nothing."),
+    },
+}
+
+
 @dataclass
 class ToolInfo:
     name: str            # MCP tool name, e.g. "vol_vol_pslist"
@@ -229,18 +300,26 @@ class ToolInfo:
 _CALL_ID_RE = re.compile(r'"_atlas_call_id":\s*(\d+)')
 
 
-def _with_adjustment_notes(rendered: str, notes: list[str]) -> str:
-    """Attach argument-adjustment notes to a tool result without breaking a
-    JSON result for the readers that parse it."""
+def _with_adjustment_notes(rendered: str, notes: list[str], read_from: list[dict] | None = None) -> str:
+    """Attach argument-adjustment notes, and where an image handle was read
+    from (``read_from``), to a tool result without breaking a JSON result
+    for the readers that parse it: one note block for both."""
     text = rendered or ""
     try:
         data = json.loads(text)
     except (ValueError, TypeError):
         data = None
     if isinstance(data, dict):
-        data["_arguments_adjusted"] = list(notes)
+        if notes:
+            data["_arguments_adjusted"] = list(notes)
+        if read_from:
+            data["read_from"] = read_from[0] if len(read_from) == 1 else list(read_from)
         return json.dumps(data, indent=2, ensure_ascii=False)
-    return text + "\n[arguments adjusted: " + "; ".join(notes) + "]"
+    if notes:
+        text += "\n[arguments adjusted: " + "; ".join(notes) + "]"
+    for r in read_from or ():
+        text += "\n[read_from: " + json.dumps(r, ensure_ascii=False) + "]"
+    return text
 
 
 _INSTRUCTION_TEXT_NOTE = (
@@ -289,6 +368,159 @@ def _trace_calls_since(seq: int) -> list[int]:
                 if e.get("type") == "tool_call" and int(e.get("call_id") or 0) > seq]
     except Exception:  # noqa: BLE001
         return []
+
+
+# The lexical shape of a file parameter (universal naming, not tool
+# knowledge): the input-path names the middleware checks, and any name that
+# ends like one. Only these carry an image handle to resolve; a handle in a
+# search pattern is left as written.
+def _path_param(name: str) -> bool:
+    from core.paths import is_path_param
+    return is_path_param(name)
+
+
+def _handles_in(arguments: dict) -> tuple[list[tuple[str, int | None, str]], list[str]]:
+    """(param, list index or None, handle) for every handle in a path
+    parameter, and the names of other parameters that hold a value whose
+    image part names an image of the case (free text with "::" in a pattern
+    is no handle)."""
+    from core.contents_index import looks_like_handle, names_case_image
+    from core.paths import active_case_dir
+    found: list[tuple[str, int | None, str]] = []
+    elsewhere: list[str] = []
+    for k, v in (arguments or {}).items():
+        values = list(enumerate(v)) if isinstance(v, list) else [(None, v)]
+        hits = [(i, x.strip()) for i, x in values if looks_like_handle(x)]
+        if not hits:
+            continue
+        if _path_param(k):
+            found += [(k, i, h) for i, h in hits]
+        elif any(names_case_image(active_case_dir(), h) for _i, h in hits):
+            elsewhere.append(k)
+    return found, elsewhere
+
+
+def _flag(name: str) -> bool:
+    from core.envfile import env_flag
+    return env_flag(name)
+
+
+def _annotate_view(cid: int | None, call_ids: list[int] | None, note: dict) -> None:
+    """Write what the view showed onto the result's own entry and every
+    entry the call wrote (a strings_grep's executor entries, which a finding
+    can cite through the result's inputs), so the gate knows the analyst
+    saw a selection whichever of them is cited. Never raises."""
+    for annotated in dict.fromkeys([cid, *(call_ids or [])]):
+        if annotated is None:
+            continue
+        try:
+            from core.execution_log import log
+            log.annotate_tool_call(int(annotated), **note)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+# The identities of the rows the last call on this thread showed the model
+# (core.shown_rows), taken by the per-call path (Agent._call_once) for the
+# item's progress. Per thread: the beside threads call tools too.
+_SHOWN = threading.local()
+
+
+def take_shown_rows() -> list[str] | None:
+    """The row identities the last call on this thread showed, once."""
+    keys = getattr(_SHOWN, "keys", None)
+    _SHOWN.keys = None
+    return keys
+
+
+def take_shown_source() -> str:
+    """The file those rows come from (core.shown_rows.source_of), once."""
+    src = getattr(_SHOWN, "source", "") or ""
+    _SHOWN.source = ""
+    return src
+
+
+def _note_shown(tool: str, arguments: dict, data, shown_row_ids=None, text: str | None = None) -> None:
+    try:
+        from core import shown_rows as S
+        if text is not None:
+            try:
+                data = json.loads(str(text).strip()) if str(text).strip().startswith("{") else None
+            except ValueError:
+                data = None
+        _SHOWN.keys = (S.row_keys(tool, arguments, data, shown_row_ids) if text is None
+                       else S.from_text(tool, arguments, text))
+        _SHOWN.source = S.source_of(arguments, data) if _SHOWN.keys else ""
+    except Exception:  # noqa: BLE001 - progress accounting never costs the result
+        _SHOWN.keys, _SHOWN.source = None, ""
+
+
+def _observe_rows(tool: str, arguments: dict, data, shown_row_ids, call_id) -> None:
+    """The contents index marks the sources whose timeline rows a table
+    result showed as partially seen (core.contents_index.observe_result)."""
+    try:
+        from core.contents_index import index_on, observe_result
+        from core.paths import active_case_dir
+        case = active_case_dir()
+        if case and index_on():
+            observe_result(case, tool, data, shown_row_ids, call_id,
+                           export=str((arguments or {}).get("path") or ""))
+    except Exception:  # noqa: BLE001 - a ledger must never cost the result
+        pass
+
+
+def _record_view(data, rendered: str, notes: list[str]) -> tuple[str, dict, int, list] | None:
+    """The row view of a result whose call saved a JSON array of records (a
+    plugin's JSON rendering), read from what the trace saved so its "#n"
+    names a saved row (core.tool_result_view.render_record_view): (text,
+    trace annotation, the call id, the records it showed), None for any
+    other result. The shown records go to progress (shown_rows) by their
+    content, without "_row" and "_depth": those are places within this one
+    call, and the progress key reads a "_row" as a row of the call's source,
+    which every plugin run on one image shares. A record read again (the
+    same process in a second list) is then no new progress, and another
+    plugin's records are. Never raises: the view must never cost the
+    result."""
+    if not isinstance(data, dict) or not data.get("_atlas_call_id"):
+        return None
+    try:
+        from core.execution_log import log
+        from core.indicators import flat_rows_of
+        from core.instruction_text import find_instruction_like
+        from core.tool_result_view import render_record_view
+        cid = int(data["_atlas_call_id"])
+        entry = (log.index().by_call_id or {}).get(cid)
+        view = render_record_view(data, entry, tool_output_limit(), cid, notes,
+                                  instruction_hits=find_instruction_like(rendered)) if entry else None
+        if not view:
+            return None
+        ids = set(view[1].get("view_row_ids") or [])
+        shown = [{k: v for k, v in r.items() if k not in ("_row", "_depth")}
+                 for r in flat_rows_of(entry) or [] if r.get("_row") in ids]
+        return (*view, cid, shown)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _primary_call_id(call_ids: list[int], data) -> int | None:
+    """The trace entry an allow-listed result carries: of the entries this
+    call wrote, the last whose command is a Python tool (a baseline entry
+    holding the result dict), never a raw executor entry; else the dict's
+    own _atlas_call_id (an executor tool stamps it itself)."""
+    try:
+        from core.execution_log import log
+        by = log.index().by_call_id or {}
+    except Exception:  # noqa: BLE001
+        by = {}
+    for cid in reversed(list(call_ids or [])):
+        entry = by.get(int(cid))
+        if isinstance(entry, dict) and str(entry.get("cmd") or "").startswith("<py>:"):
+            return int(cid)
+    own = (data or {}).get("_atlas_call_id") if isinstance(data, dict) else None
+    try:
+        return int(own) if own else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _truncate(text: str, limit: int | None = None,
@@ -392,6 +624,9 @@ class Toolbox:
         # share it: a bare name resolves only when it names one tool.
         self._short_to_name: dict[str, str | None] = {}
         self.loaded: set[str] = set()
+        # The order namespaces arrived in: the schema array lists them so,
+        # so a namespace loaded later is appended after the ones before it.
+        self._load_order: list[str] = []
         self._schema_overflow_warning: str | None = None
         # Per-namespace recency, so a full schema budget makes room for the
         # namespace the model needs now by dropping one it stopped using.
@@ -407,6 +642,9 @@ class Toolbox:
         # Names this toolbox refuses outright (CHAT_VIEWER_DENY_RE for a
         # viewer's chat turn); None refuses nothing.
         self.deny: re.Pattern[str] | None = None
+        # The command whose session may list every tool (allow_stable);
+        # "" for a toolbox that never does.
+        self.stable_command = ""
         self._discover()
         # Discovered control tools, in a stable order, listed on every turn.
         self._control: list[ToolInfo] = sorted(
@@ -435,8 +673,17 @@ class Toolbox:
             async with self._client_factory() as client:
                 return await client.list_tools()
 
+        from core.envfile import env_flag
+        hide = _GRADER_NAMESPACES if env_flag("ATLAS_HIDE_GRADER", True) else frozenset()
         for tool in self._run(_list()):
             namespace = tool.name.split("_", 1)[0]
+            if namespace in hide:
+                # The grader compares a run with a ground truth: the analyst
+                # never lists, loads or calls it (the reviewer reads the
+                # module directly, outside the run).
+                continue
+            if tool.name in _SESSION_HIDDEN_TOOLS:
+                continue
             fn = tool.name[len(namespace) + 1:]
             short = fn[len(namespace) + 1:] if fn.startswith(namespace + "_") else fn
             alias = f"{namespace}.{short}"
@@ -479,7 +726,7 @@ class Toolbox:
             if t.namespace in ns and t.listed not in control
         )
 
-    def load_with_budget(self, namespaces, *, keep=()) -> dict:
+    def load_with_budget(self, namespaces, *, keep=(), evict: bool = True) -> dict:
         """Load namespaces that fit under ``MAX_OPENAI_TOOLS``.
 
         Already-loaded namespaces are no-ops. Unknown names are reported.
@@ -490,7 +737,10 @@ class Toolbox:
         ``keep`` names namespaces that must stay whatever happens, such as
         every namespace a work order refers to, loaded or not. A request
         that evicted the namespace its own work order also named made the
-        next call a dropped one.
+        next call a dropped one. With ``evict`` False a load that does not
+        fit is refused instead of making room (a preload that is not a
+        request of the model must not change the schema array it already
+        has), and never takes the learned-ceiling probe either.
         """
         known = set(self.namespaces)
         wanted = [ns for ns in (namespaces or []) if isinstance(ns, str)]
@@ -517,7 +767,7 @@ class Toolbox:
             trial = set(pending)
             trial.add(ns)
             count = self.schema_count(trial)
-            if count > max_openai_tools():
+            if count > max_openai_tools() and evict:
                 # Make room: drop loaded namespaces the model has not
                 # touched recently, least recently used first. The control
                 # plane and anything requested in this call stay. Without
@@ -535,7 +785,7 @@ class Toolbox:
                     evicted.append(victim)
                     count = after
             if count > max_openai_tools():
-                if (self.tool_probe_limit and probed is None
+                if (evict and self.tool_probe_limit and probed is None
                         and self._last_probe is None
                         and count <= min(self.tool_probe_limit, hard_tool_cap())):
                     # Past a learned ceiling, not the configured one, and
@@ -564,6 +814,7 @@ class Toolbox:
         for victim in evicted:
             self.loaded.discard(victim)
         self.loaded.update(newly)
+        self._note_load_order()
         return {
             "evicted": evicted,
             "loaded": loaded,
@@ -574,6 +825,72 @@ class Toolbox:
             "schema_count": self.schema_count(),
             "max": max_openai_tools(),
         }
+
+    # ── the stable list ──────────────────────────────────────────────────
+    #
+    # A provider renders the tool schemas ahead of the system prompt and the
+    # conversation, so any change to the list re-sends the whole cached
+    # prompt. When the budget holds every namespace, an analysis run lists
+    # them all from the start and the list never changes: loads find their
+    # namespaces loaded, and an unload is refused.
+
+    def fits_all(self) -> bool:
+        """Whether the session's budget holds every namespace at once."""
+        return self.schema_count(set(self.namespaces)) <= max_openai_tools()
+
+    def stable(self) -> bool:
+        """Whether this toolbox lists every tool for the rest of the run:
+        an analysis run, a budget that holds them all, all of them loaded."""
+        return (bool(getattr(self, "stable_command", ""))
+                and self.fits_all() and self.loaded >= set(self.namespaces))
+
+    def allow_stable(self, command: str) -> list[str]:
+        """Let a session of ``command`` list every tool when its budget
+        holds them (STABLE_COMMANDS only); returns what that loaded."""
+        self.session_command = command
+        self.stable_command = command if command in STABLE_COMMANDS else ""
+        return self.settle()
+
+    def settle(self) -> list[str]:
+        """Load, in one step, every namespace not yet loaded once the budget
+        holds them all: a list that becomes stable mid-run (a raised
+        ceiling) is completed with one change, not one load at a time."""
+        if not getattr(self, "stable_command", "") or not self.fits_all():
+            return []
+        missing = [ns for ns in self.namespaces if ns not in self.loaded]
+        if missing:
+            self.load_with_budget(missing, evict=False)
+        return missing
+
+    def list_mode(self) -> str:
+        """The tool-list mode and why, for the run's stderr line and its
+        run_start record."""
+        total = self.schema_count(set(self.namespaces))
+        if self.stable():
+            return f"stable, {total} schemas (cap {max_openai_tools()})"
+        command = getattr(self, "stable_command", "")
+        cap, hard = max_openai_tools(), hard_tool_cap()
+        if not command:
+            reason = f"not an analysis run ({getattr(self, 'session_command', '') or 'none'})"
+        elif cap < hard:
+            reason = f"learned ceiling {cap}"
+        elif _env_cap_set():
+            reason = f"env override {hard}"
+        elif _DECLARED_CAP is None:
+            reason = f"no declared tool budget, cap {hard}"
+        elif _session_limits() is None:
+            reason = f"no window, cap {hard}"
+        elif _DECLARED_CAP <= hard:
+            reason = f"declared budget {_DECLARED_CAP} < {total} schemas"
+        else:
+            reason = (f"window share, cap {hard} for "
+                      f"{_session_limits().window_tokens} tokens < {total} schemas")
+        return f"namespace mode: {reason}"
+
+    def _note_load_order(self) -> None:
+        """Keep ``_load_order`` the loaded namespaces in arrival order."""
+        self._load_order = [ns for ns in self._load_order if ns in self.loaded]
+        self._load_order += sorted(ns for ns in self.loaded if ns not in self._load_order)
 
     def pop_last_probe(self) -> dict | None:
         """The probe the last loads made, once; None when none was made."""
@@ -641,9 +958,13 @@ class Toolbox:
         """Drop namespaces from the loaded set; returns those actually unloaded.
 
         Core control-plane namespaces (misc/reason/dair/…) may be unloaded —
-        the operator/agent is responsible for not stranding the run. Used to
-        free schema budget so access-stage tools (tsk) can load after export.
+        the operator/agent is responsible for not stranding the run. Frees
+        schema budget so access-stage tools (tsk) can load after export.
         """
+        if self.stable():
+            # A stable list stays as it is: an unload frees nothing the
+            # budget needs and would re-send the whole cached prompt.
+            return []
         removed: list[str] = []
         for ns in namespaces or []:
             if not isinstance(ns, str):
@@ -692,19 +1013,33 @@ class Toolbox:
     def openai_tools(self) -> list[dict]:
         """Schemas for the meta tools, the control plane, and the currently
         loaded namespaces, in that order."""
-        out = list(META_TOOLS)
+        self.settle()
+        stable = self.stable()
+        out = [_STABLE_LOAD_TOOL if stable and m["function"]["name"] == "atlas_load_namespaces"
+               else m for m in META_TOOLS]
         control = self.control_names
         infos = list(self._control) + [
             i for i in self.tools.values()
             if i.namespace in self.loaded and i.listed not in control]
+        from core.envfile import env_flag
+        if env_flag("ATLAS_TOOL_ARRAY_STABLE", True):
+            # The array's order follows the loads: a provider renders the
+            # tools before the conversation, so a namespace placed in the
+            # middle would change every schema after it; appended, the ones
+            # before it stay the cached prefix.
+            self._note_load_order()
+            rank = {ns: i for i, ns in enumerate(self._load_order)}
+            head = list(self._control)
+            rest = [i for i in infos[len(head):]]
+            rest.sort(key=lambda i: rank.get(i.namespace, len(rank)))
+            infos = head + rest
         for info in infos:
-            schema = dict(info.schema)
-            schema.setdefault("type", "object")
+            description, schema = model_description(info.description, info.schema)
             out.append({
                 "type": "function",
                 "function": {
                     "name": info.listed or info.name,
-                    "description": info.description[:1024],
+                    "description": description,
                     "parameters": schema,
                 },
             })
@@ -731,6 +1066,21 @@ class Toolbox:
             out = kept
         return out
 
+    def schemas_for(self, names: list[str]) -> list[dict]:
+        """Exactly the named tools' schemas, in the given order (a frontier
+        item's own list: a constant core first, its picked readers after);
+        an unknown name is skipped. Loads nothing."""
+        out = []
+        for name in names:
+            resolved = self.resolve(name)
+            if resolved is None:
+                continue
+            info = self.tools[resolved]
+            description, schema = model_description(info.description, info.schema)
+            out.append({"type": "function", "function": {"name": info.listed or info.name,
+                                                         "description": description, "parameters": schema}})
+        return out
+
     def pop_schema_overflow_warning(self) -> str | None:
         """Consume (clear-on-read) the last openai_tools() schema-budget
         overflow warning, if any — see the comment in openai_tools()."""
@@ -739,10 +1089,14 @@ class Toolbox:
         return warning
 
     def namespace_summary(self) -> str:
+        head = (f"All {self.schema_count()} tool schemas are in your tool list for "
+                f"the whole run (tool budget {max_openai_tools()}); "
+                f"atlas_load_namespaces is not needed." if self.stable() else
+                f"Tool-schema budget: {self.schema_count()}/{max_openai_tools()} "
+                f"(meta-tools + control tools + loaded namespaces). "
+                f"atlas_load_namespaces refuses loads that would exceed this.")
         lines = [
-            f"Tool-schema budget: {self.schema_count()}/{max_openai_tools()} "
-            f"(meta-tools + control tools + loaded namespaces). "
-            f"atlas_load_namespaces refuses loads that would exceed this.",
+            head,
             "Always callable, whatever is loaded: "
             + ", ".join(sorted(self.control_names)),
             "Every other tool is called as <namespace>_<name>, exactly as "
@@ -789,8 +1143,11 @@ class Toolbox:
         info = self.tools[resolved]
         return info.listed or info.name
 
-    def call(self, name: str, arguments: dict) -> tuple[str, bool]:
-        """Execute a tool; returns (result_text, auto_loaded_namespace)."""
+    def call(self, name: str, arguments: dict, budget_free: bool = False) -> tuple[str, bool]:
+        """Execute a tool; returns (result_text, auto_loaded_namespace).
+        ``budget_free``: the caller lists its own tools (a frontier item), so
+        the call loads no namespace into the conversation's budget."""
+        _SHOWN.keys, _SHOWN.source = None, ""
         if self.deny is not None and self.deny.search(name or ""):
             return (f"ERROR: '{name}' changes case state and is not available "
                     f"in this chat session (read-only role). Answer from what "
@@ -808,7 +1165,7 @@ class Toolbox:
         self._last_used[info.namespace] = self._use_clock
         # A control tool is listed on its own; calling it does not pull its
         # whole namespace into the budget.
-        if info.namespace not in self.loaded and info.listed not in self.control_names:
+        if info.namespace not in self.loaded and info.listed not in self.control_names and not budget_free:
             budget = self.load_with_budget([info.namespace])
             if info.namespace not in self.loaded:
                 refused = budget.get("refused") or []
@@ -832,6 +1189,9 @@ class Toolbox:
             auto_loaded = info.namespace in (budget.get("newly_loaded") or [])
         if "_malformed_arguments" in arguments:
             longest = arguments.get("_longest_argument")
+            if arguments.get("_not_object"):
+                return (f"ERROR: arguments for '{name}' must be a JSON object; got {arguments['_not_object']}: "
+                        f"{arguments['_malformed_arguments'][:500]}", auto_loaded)
             return (f"ERROR: arguments for '{name}' were not valid JSON: "
                     f"{arguments['_malformed_arguments'][:500]}"
                     + (f" Longest parameter: {longest}." if longest else ""),
@@ -841,7 +1201,7 @@ class Toolbox:
         # without listing allowed parameters the agent retries sibling-tool
         # APIs (RegRipper with RECmd's output_dir/batch_file) blindly.
         schema = info.schema if isinstance(info.schema, dict) else {}
-        # Coerce common LLM type mismatches (list↔JSON-string, etc.) using
+        # Coerce common LLM type mismatches (list<->JSON-string, etc.) using
         # the tool schema — prevents dair_assess phase_stack / columns /
         # input_call_ids validation deadlocks without a model catalogue.
         try:
@@ -892,22 +1252,96 @@ class Toolbox:
                     auto_loaded,
                 )
 
+        # Image handles (<image>::<path>) in path parameters: the Toolbox
+        # extracts the file through a traced call of its own and the tool
+        # reads the copy (core.contents_index, ATLAS_IMAGE_HANDLES).
+        seq_before = _trace_seq()
+        read_from: list[dict] = []
+        lineage: tuple[int, ...] = ()
+        handle_names: list[str] = []
+        found, elsewhere = _handles_in(arguments)
+        if found:
+            out = self._read_handles(resolved, arguments, found)
+            if isinstance(out, str):
+                return out, auto_loaded
+            arguments, read_from, lineage = out
+            handle_names = [h for _k, _i, h in found]
+        if elsewhere:
+            _coerce_notes = list(_coerce_notes or []) + [
+                f"an image handle in {', '.join(elsewhere)} was not resolved: only file parameters take one"]
+
         async def _call():
             async with self._client_factory() as client:
                 return await client.call_tool(resolved, arguments,
                                               raise_on_error=False)
 
-        seq_before = _trace_seq()
+        from core.execution_log import derived_from_call_ids
+        token = derived_from_call_ids.set(lineage) if lineage else None
         try:
             result = self._run(_call())
         except Exception as e:
             return f"ERROR: tool '{resolved}' raised: {e}", auto_loaded
-        rendered = self._render(result)
-        if _coerce_notes:
+        finally:
+            if token is not None:
+                derived_from_call_ids.reset(token)
+        # An allow-listed row result carries the id of the trace entry this
+        # call wrote as its first key (ATLAS_RESULT_CALL_ID), and is shown
+        # as the compact row view that fits the limit by construction
+        # (ATLAS_RESULT_VIEW, core.tool_result_view.render_rows_view). The
+        # trace keeps the tool's full dict; the view is what the model reads.
+        data = getattr(result, "data", None)
+        call_ids = _trace_calls_since(seq_before)
+        from core.tool_result_view import ROW_VIEW_TOOLS, render_rows_view
+        view_tool = resolved in ROW_VIEW_TOOLS and isinstance(data, dict)
+        # Every dict result carries the id of the trace entry it stands for
+        # as its first key: the item registers the call by it, the model
+        # cites it, and no call_id of the result's own content (a referenced
+        # call) can be read as the result's (core.call_memo.trace_call_id_of).
+        cid = _primary_call_id(call_ids, data) if isinstance(data, dict) else None
+        if cid is not None and _flag("ATLAS_RESULT_CALL_ID"):
+            data = {"_atlas_call_id": cid, **{k: v for k, v in data.items() if k != "_atlas_call_id"}}
+            rendered = self._render(result, data_override=data)
+        else:
+            rendered = self._render(result)
+        if handle_names and (getattr(result, "is_error", False)
+                             or (isinstance(data, dict) and data.get("success") is False)):
+            # A refusal of the substituted copy (wrong input kind, a repeat)
+            # names the copy; the model reads it in its own terms.
+            rendered = f"[{', '.join(handle_names)} was read from its copy] " + rendered
+        if view_tool:
+            try:
+                from core.instruction_text import find_instruction_like
+                view = render_rows_view(data, tool_output_limit(), cid, list(_coerce_notes or [])
+                                        + [f"read_from: {json.dumps(r, ensure_ascii=False)}" for r in read_from],
+                                        instruction_hits=find_instruction_like(rendered), tool=resolved)
+            except Exception:  # noqa: BLE001 - the view must never cost the result
+                view = None
+            if view:
+                text, note = view
+                _annotate_view(cid, call_ids, note)
+                _observe_rows(resolved, arguments, data, note.get("view_row_ids"), cid)
+                _note_shown(resolved, arguments, data, note.get("view_row_ids"))
+                try:
+                    self._remember_scale_success(resolved, arguments, text)
+                except Exception:
+                    pass
+                return text, auto_loaded
+        if not view_tool:
+            view = _record_view(data, rendered, list(_coerce_notes or []))
+            if view:
+                text, note, rcid, rows = view
+                _annotate_view(rcid, call_ids, note)
+                _note_shown(resolved, arguments, {"rows": rows})
+                return text, auto_loaded
+        if isinstance(data, dict) and resolved in ROW_VIEW_TOOLS:
+            # No compact view: every returned row counts as shown (an upper
+            # bound of what the cut text showed).
+            _observe_rows(resolved, arguments, data, None, _primary_call_id(call_ids, data))
+        if _coerce_notes or read_from:
             # What was adjusted goes into the result the model reads, inside
             # the JSON when the result is JSON so nothing that parses it is
             # disturbed, as a trailing line otherwise.
-            rendered = _with_adjustment_notes(rendered, _coerce_notes)
+            rendered = _with_adjustment_notes(rendered, list(_coerce_notes or []), read_from)
         try:
             from core.tool_result_view import maybe_compact_rendered
             rendered = maybe_compact_rendered(rendered)
@@ -920,12 +1354,117 @@ class Toolbox:
         except Exception:
             pass
         text = _truncate(rendered, call_ids=_trace_calls_since(seq_before))
+        _note_shown(resolved, arguments, None, text=text)
         return _with_instruction_text_note(text), auto_loaded
+
+    def _tool_call(self, name: str, args: dict):
+        """One call through the same client and middleware as the model's."""
+        async def _go():
+            async with self._client_factory() as client:
+                return await client.call_tool(name, args, raise_on_error=False)
+        return self._run(_go())
+
+    def _read_handles(self, tool: str, arguments: dict, found: list):
+        """Resolve each handle of a call: a mounted volume's file in place,
+        else a copy extracted by tsk.icat (tsk.recover for a folder) under
+        the extraction root, reused while it exists with its size. Returns
+        (arguments with the copies, read_from notes, the extraction call
+        ids) or the refusal text. Every refusal is recorded in the trace."""
+        from core import contents_index as ci
+        from core.paths import active_case_dir
+        case = active_case_dir()
+
+        def _refuse(text: str) -> str:
+            try:
+                from core.execution_log import log
+                log.record_call_abandoned(tool, text[:300], args=arguments)
+            except Exception:  # noqa: BLE001
+                pass
+            return "ERROR: " + text
+        if not ci.image_handles_on():
+            return _refuse(ci.HANDLES_OFF_REFUSAL)
+        if not case:
+            return _refuse("an image handle needs an active case; none is configured")
+        args = {k: (list(v) if isinstance(v, list) else v) for k, v in arguments.items()}
+        notes: list[dict] = []
+        lineage: list[int] = []
+        icat = self._alias_to_name.get("tsk.icat")
+        recover = self._alias_to_name.get("tsk.recover")
+        walk = self._alias_to_name.get("tsk.resolve_path")
+        for key, idx, handle in found:
+            r = ci.resolve(case, handle)
+            if r.get("error"):
+                return _refuse(r["error"])
+            if r.get("walk"):
+                res = getattr(self._tool_call(walk, {"image": r["abs"], "fs_path": r["path"],
+                                                     **({"offset_sectors": r["offset"]} if r.get("offset") else {})}),
+                              "data", None)
+                if not isinstance(res, dict) or not res.get("success"):
+                    err = (res or {}).get("error") if isinstance(res, dict) else ""
+                    return _refuse(f"'{r['path']}' was not found in {r['image']}: {err or 'the walk failed'}")
+                r.update(inode=str(res.get("inode") or res.get("meta_addr")), path=str(res.get("path") or r["path"]),
+                         is_dir=str(res.get("type") or "").startswith("d"), size=None, entry_id=None,
+                         offset=res.get("offset_sectors_used") or r.get("offset") or 0, mounted_path="")
+            note: dict = {"handle": handle}
+            if r.get("mounted_path"):
+                target = r["mounted_path"]
+                note["mounted"] = target
+            else:
+                reuse = ci.reusable_copy(case, r["entry_id"], r.get("size")) if r.get("entry_id") else None
+                if reuse:
+                    target = str(Path(case) / reuse["copy_path"])
+                    note.update(extracted_by_call=reuse["call_id"], copy=reuse["copy_path"], reused=True)
+                    if reuse["call_id"]:
+                        lineage.append(int(reuse["call_id"]))
+                else:
+                    target = ci.copy_target(case, r)
+                    seq = _trace_seq()
+                    offset = {"offset_sectors": int(r["offset"])} if r.get("offset") else {}
+                    if r.get("is_dir"):
+                        res = self._tool_call(recover, {"image": r["abs"], "output_dir": target,
+                                                        "dir_inode": int(str(r["inode"]).split("-")[0]), **offset})
+                    else:
+                        Path(target).parent.mkdir(parents=True, exist_ok=True)
+                        res = self._tool_call(icat, {"image": r["abs"], "inode": str(r["inode"]),
+                                                     "output_path": target, **offset})
+                    data = getattr(res, "data", None)
+                    ids = _trace_calls_since(seq)
+                    if getattr(res, "is_error", False) or not isinstance(data, dict) or not data.get("success"):
+                        err = (data or {}).get("error") if isinstance(data, dict) else self._render(res)
+                        return _refuse("extracting " + handle + " failed"
+                                       + (f" (call {ids[-1]})" if ids else "") + f": {str(err or '')[:300]}")
+                    cid = ids[-1] if ids else None
+                    if cid:
+                        lineage.append(int(cid))
+                    if r.get("entry_id") and ci.copy_provenance_on():
+                        if r.get("is_dir"):
+                            ci.record_folder_copy(case, target, int(r["entry_id"]), cid)
+                        else:
+                            try:
+                                size = os.path.getsize(target) if os.path.isfile(target) else None
+                            except OSError:
+                                size = None
+                            ci.record_copy(case, target, int(r["entry_id"]), cid, size)
+                    note.update(extracted_by_call=cid, copy=ci._rel(Path(case), target), reused=False)
+                    if ci.extract_job_on():
+                        from core.input_scale import MAX_FILE_BYTES
+                        try:
+                            large = os.path.isfile(target) and os.path.getsize(target) > MAX_FILE_BYTES
+                        except OSError:
+                            large = False
+                        if large:
+                            note["large_file"] = ("for several hosts use "
+                                                  "job.job_start_image_extract(images, paths)")
+            if idx is None:
+                args[key] = target
+            else:
+                args[key][idx] = target
+            notes.append(note)
+        return args, notes, tuple(dict.fromkeys(lineage))
 
     def _remember_scale_success(
             self, tool_name: str, arguments: dict | None, rendered: str) -> None:
-        from core.deferred_intents import args_fingerprint
-        from core.input_scale import is_bulk_parse_tool
+        from core.input_scale import is_bulk_parse_tool, repeat_fingerprint
         if not is_bulk_parse_tool(tool_name):
             return
         text = rendered or ""
@@ -958,7 +1497,7 @@ class Toolbox:
             if not isinstance(fps, dict):
                 fps = {}
                 log._scale_success_fps = fps
-            fps[args_fingerprint(tool_name, arguments or {})] = {
+            fps[repeat_fingerprint(tool_name, arguments or {})] = {
                 "call_id": getattr(log, "_last_call_id", None),
                 "artifact_paths": arts[:8],
                 "gate": gate or "bulk_success",
@@ -967,8 +1506,8 @@ class Toolbox:
             pass
 
     @staticmethod
-    def _render(result) -> str:
-        data = getattr(result, "data", None)
+    def _render(result, data_override=None) -> str:
+        data = data_override if data_override is not None else getattr(result, "data", None)
         if data is not None:
             try:
                 from core.tool_result_view import compact_if_artifact_ready
@@ -982,7 +1521,9 @@ class Toolbox:
                 if isinstance(data, dict):
                     compact = compact_if_artifact_ready(data, force=force)
                     if compact is not None:
-                        data = compact
+                        # the compact form stands for the same call
+                        stamp = data.get("_atlas_call_id")
+                        data = {"_atlas_call_id": stamp, **compact} if stamp is not None else compact
                 return json.dumps(data, indent=2, default=str, ensure_ascii=False)
             except (TypeError, ValueError):
                 return str(data)

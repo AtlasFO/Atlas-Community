@@ -141,6 +141,7 @@ def plane_a_scan(
     withdraw_context_id: str | None = None,
     correct_context_id: str | None = None,
     progress: Any = None,
+    stage: Any = None,
 ) -> dict[str, Any]:
     """
     Plane A (6a–6d): bootstrap + fingerprint + diff + invalidate + brief + journal.
@@ -149,14 +150,38 @@ def plane_a_scan(
     Optional analyst_feedback / withdraw / correct mutate investigation_memory
     (not evidence) and mark matching claims needs_review. ``progress`` hears
     the fingerprinting's progress (core.evidence_catalog.scan_evidence).
+    ``stage(text)`` hears each later step that can take minutes (the mount
+    plan, every volume the contents index lists, the export join, the system
+    baseline) as a short line: each long step named here replaces the
+    previous line in the run's status. A listener that fails never stops
+    Plane A.
     """
     started_at = _utcnow()
     root = Path(case_dir).resolve()
     if not root.is_dir():
         return {"success": False, "error": f"case directory not found: {root}"}
 
+    # Context ids are checked before the evidence is fingerprinted (hours on
+    # a large case) and before anything is written.
+    if withdraw_context_id or correct_context_id:
+        from core.analyst_context import check_feedback_args
+        try:
+            check_feedback_args(root, withdraw_id=withdraw_context_id,
+                                correct_id=correct_context_id, text=analyst_feedback)
+        except (ValueError, KeyError) as e:
+            return {"success": False, "error": e.args[0] if e.args else str(e)}
+
+    def _say(text: str) -> None:
+        if stage is not None:
+            try:
+                stage(text)
+            except Exception:  # noqa: BLE001 - a status line never stops Plane A
+                pass
+
     case_id = resolve_case_id(root)
-    bootstrap = ensure_atlas_scaffold(root, case_id=case_id)
+    # A dry pass writes nothing: a case without .atlas/ reads as an empty one.
+    bootstrap = (ensure_atlas_scaffold(root, case_id=case_id) if persist else
+                 {"atlas_dir": str(atlas_dir(root)), "created": [], "bootstrapped": False})
     previous = load_catalog(root)
     first_scan = not (previous.get("units"))
 
@@ -274,6 +299,10 @@ def plane_a_scan(
                 context_ids.append(nid)
     active_context = list_context(root, active_only=True)
 
+    # What the recount moved, and the beliefs it put under review (persist only).
+    rederived: dict[str, Any] = {}
+    coverage_marked: list[str] = []
+    coverage_error = ""
     if persist:
         update_catalog_from_scan(
             root, current_units,
@@ -394,6 +423,7 @@ def plane_a_scan(
             task_reconcile["evidence_links_error"] = str(e)[:200]
 
         # Mount plan (safe E01 auto-mount); skip auto-mount in dry contexts
+        _say("planning how to open the disk images")
         try:
             from core.mount_plan import build_mount_plan
             # Auto-mount only when evidence tree changed or first scan —
@@ -412,10 +442,39 @@ def plane_a_scan(
         except Exception as e:
             task_reconcile["mount_plan_error"] = str(e)[:200]
 
+        # Raw views of the disk containers start here, outside any tool
+        # call, on every pass (cheap, no root): the listing below and the
+        # first reads find them up, a run-end teardown or a reboot left
+        # none (core.raw_views).
+        try:
+            from core.mount_plan import ensure_raw_views
+            views = ensure_raw_views(root)
+            if views:
+                task_reconcile["raw_views"] = views
+        except Exception as e:  # noqa: BLE001 - a view must not stop Plane A
+            task_reconcile["raw_views_error"] = str(e)[:200]
+
+        # The contents index: every disk image of the plan listed once, the
+        # exports' parsed sources joined to the files they came from
+        # (core.contents_index). An unchanged image whose listing the trace
+        # holds is not listed again.
+        try:
+            from core.contents_index import build as _build_index, index_on
+            if persist and index_on():
+                built = _build_index(root, progress=stage)
+                if built.get("listed") or built.get("failed") or built.get("exports"):
+                    task_reconcile["contents_index"] = {
+                        "listed": built["listed"], "kept": len(built["kept"]),
+                        "failed": [f"{img}: {why}" for img, why in built["failed"]],
+                        "exports": len(built["exports"])}
+        except Exception as e:  # noqa: BLE001 - the index must not stop Plane A
+            task_reconcile["contents_index_error"] = str(e)[:200]
+
         # The system baseline: every Windows installation under a live
         # mount or a collected tree states its own facts once, as
         # observations, before the analyst's first turn. Installations
         # already profiled are skipped, so this costs nothing on a re-scan.
+        _say("recording the system baseline")
         try:
             from core.baseline import run_baseline
             baseline = run_baseline(root)
@@ -452,6 +511,43 @@ def plane_a_scan(
         except Exception as e:
             task_reconcile["derived_revisit_error"] = str(e)[:200]
 
+        # Disk and memory images are counted by the calls that read them, as
+        # the live run counts each call; ledger statuses that disagree with
+        # the trace are recounted from it (after the baseline, whose reads
+        # are trace calls). A belief that states the coverage a recount
+        # corrected goes under review like one whose evidence changed, after
+        # the derived follow-ups: a coverage statement raises no cross-host
+        # re-check.
+        try:
+            from core.coverage_ledger import rederive_container_coverage
+            rederived = rederive_container_coverage(root)
+        except Exception as e:  # noqa: BLE001 - the work list stands without it
+            coverage_error = str(e)[:200]
+        if rederived:
+            try:
+                from core.coverage_ledger import coverage_review_hits, recount_review_reason
+                cov_hits = coverage_review_hits(root, rederived)
+                if cov_hits:
+                    cov_mark = mark_needs_review(
+                        root, list(cov_hits),
+                        reason="coverage corrected by the recount from the trace",
+                        hits=cov_hits,
+                        reasons={nid: recount_review_reason(h["recounted"], rederived, nid)
+                                 for nid, h in cov_hits.items()},
+                    )
+                    coverage_marked = list(cov_hits)
+                    again = reopen_tasks_for_claims(root, cov_mark.get("marked") or [])
+                    task_reconcile["reopened_via_claims"] = list(dict.fromkeys(
+                        list(task_reconcile.get("reopened_via_claims") or [])
+                        + list(again.get("reopened") or [])))
+                    mark_result = {**mark_result,
+                                   "marked": list(dict.fromkeys(
+                                       (mark_result.get("marked") or [])
+                                       + (cov_mark.get("marked") or []))),
+                                   "coverage_marked": coverage_marked}
+            except Exception as e:  # noqa: BLE001 - the recount stands without the review
+                coverage_error = str(e)[:200]
+
         qpath = atlas_dir(root) / "invalidation_queue.json"
         qpath.write_text(json.dumps({
             "schema_version": "1.0",
@@ -460,6 +556,7 @@ def plane_a_scan(
             "dirty_paths": dirty_paths,
             "stale_nodes": mark_result.get("marked") or stale,
             "context_matched_nodes": ctx_ids,
+            "coverage_marked_nodes": coverage_marked,
             "affected_report_sections": [],  # filled in 6e
             "note": (
                 "Dirty set is the starting point of investigation, "
@@ -528,7 +625,8 @@ def plane_a_scan(
         "affected_claims": [
             {"id": n.get("id"), "status": n.get("status"),
              "statement": (n.get("statement") or "")[:160],
-             "reason": n.get("invalidation_reason", "")}
+             "reason": n.get("invalidation_reason", ""),
+             "recounted": bool((n.get("invalidated_by") or {}).get("recounted"))}
             for n in needs_review
         ],
         "invalidation": mark_result if persist else {"marked": [], "skipped": []},
@@ -560,26 +658,20 @@ def plane_a_scan(
             ".atlas/report_projection/."
         ),
     }
-    # Disk and memory images are counted by the calls that read them, as the
-    # live run counts each call; ledger statuses that disagree with the
-    # trace are recounted from it before the work list reads them.
-    if persist:
-        try:
-            from core.coverage_ledger import rederive_container_coverage
-            rederived = rederive_container_coverage(root)
-        except Exception as e:  # noqa: BLE001 - the work list stands without it
-            rederived = {}
-            result["coverage_rederive_error"] = str(e)[:200]
-        if rederived:
-            result["coverage_rederived"] = rederived
-            recounted = sorted({p for v in rederived.values() for p in v})
-            journal_hints.append({
-                "reason": "coverage_rederived",
-                "summary": (f"Coverage recounted from the trace: "
-                            f"{_count(len(recounted), 'image')} moved"),
-                "related_ids": [],
-                "details": rederived,
-            })
+    if coverage_error:
+        result["coverage_rederive_error"] = coverage_error
+    if rederived:
+        result["coverage_rederived"] = rederived
+        recounted = sorted({p for v in rederived.values() for p in v})
+        journal_hints.append({
+            "reason": "coverage_rederived",
+            "summary": (f"Coverage recounted from the trace: "
+                        f"{_count(len(recounted), 'image')} moved"
+                        + (f", {_count(len(coverage_marked), 'finding')} put under review"
+                           if coverage_marked else "")),
+            "related_ids": list(coverage_marked),
+            "details": rederived,
+        })
     # The task store as it stands after the reconcile, the reopens and the
     # derived follow-ups above; a dry run only has the reconcile's own list.
     if persist:
@@ -697,6 +789,8 @@ def summarize_work(result: dict[str, Any], *, open_tasks: list[dict[str, Any]]) 
     counts = (result.get("evidence_diff") or {}).get("counts") or {}
     evidence = {k: int(counts.get(k) or 0) for k in ("added", "changed", "removed")}
     review = [c.get("id") for c in (result.get("affected_claims") or []) if c.get("id")]
+    recounted_review = [c.get("id") for c in (result.get("affected_claims") or [])
+                        if c.get("id") and c.get("recounted")]
     conflicts = [c.get("id") for c in (result.get("open_conflicts") or []) if c.get("id")]
     reconcile = result.get("task_reconcile") or {}
     new_questions = [str(t) for t in (reconcile.get("added") or [])]
@@ -725,7 +819,9 @@ def summarize_work(result: dict[str, Any], *, open_tasks: list[dict[str, Any]]) 
             if evidence[key]:
                 reasons.append(f"{_count(evidence[key], 'evidence file')} {key}")
     if review:
-        reasons.append(f"{_count(len(review), 'finding')} to re-validate")
+        reasons.append(f"{_count(len(review), 'finding')} to re-validate"
+                       + (f" ({len(recounted_review)} after the coverage recount)"
+                          if recounted_review else ""))
     if conflicts:
         reasons.append(_count(len(conflicts), "open conflict"))
     if open_questions:
@@ -760,6 +856,7 @@ def summarize_work(result: dict[str, Any], *, open_tasks: list[dict[str, Any]]) 
         "first_scan": first,
         "evidence": evidence,
         "claims_to_review": review,
+        "claims_recounted": recounted_review,
         "open_conflicts": conflicts,
         "questions": {"open": open_questions, "new": new_questions,
                       "reopened": reopened, "followups": followups},

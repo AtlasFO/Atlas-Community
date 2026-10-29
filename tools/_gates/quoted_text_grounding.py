@@ -42,8 +42,22 @@ def _forensic_text(ctx, *, include_files: bool) -> str:
         wanted.add(int(ctx.linked_call_id))
     blobs: list[str] = []
     entries = list(getattr(ctx.log, "_entries", []) or [])
+    from core.envfile import env_flag
+    by_id = (getattr(getattr(ctx, "idx", None), "by_call_id", None) or {}
+             if env_flag("ATLAS_QUOTE_GATE_CITED_BY_ID") else {})
+    read: set[int] = set()
+    if by_id:
+        # The cited calls are read by id over the whole trace: a quotation
+        # of a call the finding cites is not refused because the call is
+        # older than the window below.
+        for cid in sorted(wanted):
+            e = by_id.get(cid)
+            if not isinstance(e, dict) or e.get("type") != "tool_call" or own_words_entry(e):
+                continue
+            read.add(cid)
+            blobs.extend(_tool_entry_text_blobs(e, include_files=include_files))
     for e in reversed(entries[-400:]):
-        if e.get("type") != "tool_call" or own_words_entry(e):
+        if e.get("type") != "tool_call" or own_words_entry(e) or e.get("call_id") in read:
             continue
         cited = e.get("call_id") in wanted
         blobs.extend(_tool_entry_text_blobs(e, include_files=include_files and cited))

@@ -1,0 +1,333 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Atlas · Coverage</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<link rel="stylesheet" href="assets/atlas.css" />
+<script src="assets/i18n.js"></script>
+<style>
+  /* View-specific layout only — tokens, the lanes, the minibar and the
+     legend come from atlas.css. */
+  .hero { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; margin-bottom: 6px; }
+  .hero .page-title { margin: 0; }
+  .hero .meta { color: var(--fg-2); font-size: var(--fs-label); }
+
+  /* The four states, one colour each. Open is the accent, the colour of
+     work to do, never the alarm colours: this is a to-do list. */
+  .seg-read { background: var(--ok); }
+  .seg-partial { background: var(--partial); }
+  .seg-left { background: var(--neutral); }
+  .seg-open { background: var(--accent); }
+  .seg-parsed { background: var(--warn); }
+
+  .head {
+    margin: 14px 0 18px; padding: 14px 18px; background: var(--bg-2);
+    border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow-sm);
+  }
+  .head .line { font-size: var(--fs-body); color: var(--fg-0); overflow-wrap: anywhere; }
+  .head .line b { font-weight: 650; }
+  .head .minibar { height: 10px; margin-top: 10px; }
+  .note { color: var(--fg-1); font-size: var(--fs-small); margin: 0 0 12px; }
+
+  /* The host's headline under its name: wraps on a phone, the undecided
+     count first and in the accent colour when it is not zero. */
+  .lhead { font-size: var(--fs-small); color: var(--fg-1); margin: 2px 0 8px; overflow-wrap: anywhere; line-height: 1.5; }
+  .lhead b { font-weight: 650; color: var(--fg-0); }
+  .lhead b.hl-open { color: var(--accent); }
+  .lhead.ldepth { margin-top: -4px; color: var(--fg-2); }
+  .sec-h { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin: 18px 0 8px; }
+  .sec-h h2 { font-size: var(--fs-body); font-weight: 650; margin: 0; }
+  .sec-h .meta { color: var(--fg-2); font-size: var(--fs-label); }
+
+  /* One card per evidence item: its name, the bar, then the classes still
+     open and those left, each with its next step or its reason; the read
+     ones fold away. */
+  .item {
+    background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 10px 12px; margin-bottom: 8px; box-shadow: var(--shadow-sm);
+  }
+  .item-h { display: flex; gap: 4px 10px; flex-wrap: wrap; align-items: baseline; min-width: 0; }
+  .item-h .ipath { font-family: var(--mono); font-size: var(--fs-small); color: var(--fg-0); overflow-wrap: anywhere; min-width: 0; }
+  .item-h .imade { font-size: var(--fs-label); color: var(--fg-2); overflow-wrap: anywhere; }
+  .item-h .in { margin-left: auto; font-size: var(--fs-label); color: var(--fg-2); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .item .minibar { height: 8px; margin-top: 8px; }
+  .cls { margin-top: 6px; }
+  .cl {
+    display: flex; gap: 2px 10px; flex-wrap: wrap; align-items: baseline;
+    padding: 6px 0; border-top: 1px solid var(--border); font-size: var(--fs-small); line-height: 1.45;
+  }
+  .cl .cdot { width: 7px; height: 7px; border-radius: 50%; flex: none; display: inline-block; position: relative; top: -1px; }
+  .cl .cl-l { color: var(--fg-0); min-width: 0; overflow-wrap: anywhere; }
+  .cl .cl-n { color: var(--fg-2); font-size: var(--fs-label); font-variant-numeric: tabular-nums; }
+  .cl .cl-w { flex: 1 1 240px; min-width: 0; color: var(--fg-1); overflow-wrap: anywhere; }
+  .cl .cid { font-family: var(--mono); font-size: var(--fs-label); color: var(--accent); margin-left: 6px; text-decoration: none; }
+  .cl a.cid:hover { text-decoration: underline; }
+  details.fold { margin-top: 2px; }
+  details.fold summary {
+    cursor: pointer; user-select: none; list-style: none; display: flex; align-items: center; gap: 6px;
+    font-size: var(--fs-label); color: var(--fg-2); padding: 6px 0 2px;
+  }
+  details.fold summary::-webkit-details-marker { display: none; }
+  details.fold summary .chev { display: inline-flex; transition: transform .15s var(--ease); }
+  details.fold summary .chev svg { display: block; }
+  details.fold[open] summary .chev { transform: rotate(90deg); }
+  details.fold summary:hover { color: var(--fg-1); }
+</style>
+</head>
+<body>
+<div class="page" id="app">
+  <div class="state-loading">Loading</div>
+</div>
+
+<script src="assets/shell.js"></script>
+<script>
+'use strict';
+const $app = () => document.getElementById('app');
+const esc = AtlasShell.esc;
+const t = AtlasShell.t;
+
+const STATES = ['read', 'partial', 'parsed', 'left', 'open'];
+const STATE_KEY = { read: 'cov.state.read', partial: 'cov.state.partial', parsed: 'cov.state.parsed', left: 'cov.state.left', open: 'cov.state.open' };
+// The closed leave kinds (core.evidence_leave.KINDS), a recorded block and
+// a code check, in the page's words.
+const KIND_KEY = {
+  unlikely_to_help: 'cov.kind.unlikely_to_help', empty: 'cov.kind.empty', no_reader: 'cov.kind.no_reader',
+  outside_window: 'cov.kind.outside_window', other_scope: 'cov.kind.other_scope',
+  duplicate_of: 'cov.kind.duplicate_of', unreadable: 'cov.kind.unreadable',
+  unrelated_content: 'cov.kind.unrelated_content', blocked: 'cov.kind.blocked',
+};
+// The container kinds of an evidence item (core.evidence_items).
+const ITEM_KEY = {
+  image: 'cov.item.image', memory: 'cov.item.memory', tree: 'cov.item.tree',
+  file: 'cov.item.file', archive: 'cov.item.archive', capture: 'cov.item.capture',
+};
+const ORDER = { open: 0, parsed: 1, left: 2, partial: 3, read: 4 };
+const CHEVRON = '<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 5l7 7-7 7"/></svg>';
+
+const State = { data: null, payload: '', stopPoll: null, lastHtml: null, animTimer: null, folds: new Set() };
+
+function processHref(callId) {
+  const info = AtlasShell.caseInfo();
+  const trace = info && info.traces && info.traces.length ? info.traces[0].path : null;
+  if (!trace) return null;
+  return `dashboard.html?case=${encodeURIComponent(AtlasShell.activeCase())}`
+    + `&trace=${encodeURIComponent(trace)}&call=${encodeURIComponent(callId)}`;
+}
+const kindText = (k) => t(KIND_KEY[k] || 'cov.kind.code');
+const itemKind = (k) => (ITEM_KEY[k] ? t(ITEM_KEY[k]) : k);
+const totalOf = (counts) => STATES.reduce((s, k) => s + (counts[k] || 0), 0);
+
+function barHtml(counts) {
+  const total = totalOf(counts);
+  if (!total) return '';
+  return `<div class="minibar" aria-hidden="true">${STATES.filter(k => counts[k]).map(k =>
+    `<span class="seg-${k}" style="width:${(100 * counts[k] / total).toFixed(1)}%" title="${counts[k]} ${esc(t(STATE_KEY[k]))}"></span>`).join('')}</div>`;
+}
+function legendHtml(counts) {
+  return `<div class="conf-legend">${STATES.filter(k => counts[k]).map(k =>
+    `<span><span class="cdot seg-${k}"></span>${counts[k]} ${esc(t(STATE_KEY[k]))}</span>`).join('')}</div>`;
+}
+function proofHtml(ids) {
+  if (!ids || !ids.length) return '';
+  return ids.map(id => {
+    const href = processHref(id);
+    return href ? `<a class="cid" href="${href}" title="${esc(t('cov.openProcess'))}">#${esc(id)}</a>` : `<span class="cid">#${esc(id)}</span>`;
+  }).join('');
+}
+
+// What a class line says after its name, in the page's own words: the next
+// step of an open one, the kind and reason of a left one, how a partly read
+// one was read. The ledger's prose never reaches the page; a left unit's
+// reason is the stated reason the report prints too.
+function whatOf(c) {
+  if (c.state === 'open') {
+    if (c.note === 'refused') return t('cov.open.refused');
+    if (c.note === 'file') return t('cov.open.readFile', { file: c.detail });
+    if (c.note === 'failed') return t('cov.open.failed');
+    if (c.note === 'read' || c.note === 'undecided') return t('cov.open.undecided');
+    if (c.note === 'triage') return t('cov.open.triage');
+    return t('cov.state.open');
+  }
+  if (c.state === 'parsed') return c.note ? t('cov.parsed.query', { output: c.note }) : t('cov.state.parsed');
+  // A code fact's kind says it all; its stored reason repeats the kind.
+  if (c.state === 'left') return kindText(c.reason_kind) + (c.reason && !c.reason.startsWith('by code:') ? `: ${c.reason}` : '');
+  if (c.state === 'partial') return c.note === 'walked' ? t('cov.note.walked') : c.note === 'swept' ? t('cov.note.swept') : t('cov.state.partial');
+  return t('cov.state.read');
+}
+function classLine(c) {
+  // A class with no file count (a memory structure) shows none.
+  const count = c.total != null ? t('cov.ofTotal', { done: c.read, total: c.total })
+    : c.files ? t('cov.files', { n: c.files }) : '';
+  return `<div class="cl"><span class="cdot seg-${esc(c.state)}"></span>
+    <span class="cl-l">${esc(c.label)}${count ? ` <span class="cl-n">${esc(count)}</span>` : ''}</span>
+    <span class="cl-w">${esc(whatOf(c))}${proofHtml(c.proof)}</span></div>`;
+}
+
+function itemHtml(it, key) {
+  const counts = it.counts || {};
+  const total = totalOf(counts);
+  const done = total - (counts.open || 0) - (counts.parsed || 0);
+  const classes = (it.classes || []).slice()
+    .sort((a, b) => (ORDER[a.state] - ORDER[b.state]) || a.label.localeCompare(b.label));
+  const shown = classes.filter(c => c.state !== 'read');
+  const read = classes.filter(c => c.state === 'read');
+  const lines = classes.length
+    ? shown.map(classLine).join('')
+    : classLine({ ...it, label: t('cov.noClasses') });   // no class level: the item is its own line
+  const fold = read.length ? `
+    <details class="fold" data-fold="${esc(key)}"${State.folds.has(key) ? ' open' : ''}>
+      <summary><span class="chev">${CHEVRON}</span>${read.length} ${esc(t('cov.state.read'))}</summary>
+      <div class="cls">${read.map(classLine).join('')}</div>
+    </details>` : '';
+  return `
+    <article class="item">
+      <div class="item-h">
+        <span class="ipath">${esc(it.path)}</span>
+        ${it.kind ? `<span class="pill neutral">${esc(itemKind(it.kind))}</span>` : ''}
+        ${it.made ? `<span class="imade">${esc(t('cov.made', { tool: it.made }))}</span>` : ''}
+        <span class="in">${esc(t('cov.ofTotal', { done, total }))}</span>
+      </div>
+      ${barHtml(counts)}
+      ${lines ? `<div class="cls">${lines}</div>` : ''}
+      ${fold}
+    </article>`;
+}
+
+// The host's headline: the undecided classes first (no read, no reason:
+// the number a person must act on), then read, partly read, left with a
+// reason. Summed over the host's items' class counts.
+function hostLine(items) {
+  const sum = { open: 0, read: 0, partial: 0, left: 0, parsed: 0 };
+  for (const it of items) for (const k of Object.keys(sum)) sum[k] += (it.counts || {})[k] || 0;
+  const bits = [
+    `<b class="${sum.open ? 'hl-open' : ''}">${esc(t('cov.host.undecided', { n: sum.open }))}</b>`,
+    esc(t('cov.host.read', { n: sum.read })),
+    esc(t('cov.host.partial', { n: sum.partial })),
+    esc(t('cov.host.left', { n: sum.left })),
+  ];
+  if (sum.parsed) bits.push(esc(t('cov.host.parsed', { n: sum.parsed })));
+  // Depth per host: the classes of each cost tier decided out of those held.
+  // An item with no class of its own stands as one cheap class (its tier).
+  const tiers = { cheap: [0, 0], medium: [0, 0], hard: [0, 0] };
+  for (const it of items) for (const c of (it.classes || []).length ? it.classes : [it]) {
+    if (!tiers[c.tier]) continue;
+    tiers[c.tier][1] += 1;
+    if (c.state !== 'open' && c.state !== 'parsed') tiers[c.tier][0] += 1;
+  }
+  const TIER_KEY = { cheap: 'cov.tier.cheap', medium: 'cov.tier.medium', hard: 'cov.tier.hard' };
+  const depth = Object.keys(tiers).filter(k => tiers[k][1])
+    .map(k => esc(t(TIER_KEY[k], { done: tiers[k][0], total: tiers[k][1] }))).join(' · ');
+  return `<div class="lhead">${bits.join(' · ')}</div>` + (depth ? `<div class="lhead ldepth">${esc(t('cov.depth'))}: ${depth}</div>` : '');
+}
+
+function laneHtml(host, items, i) {
+  return `
+    <section class="lane" style="--d:${(i * 0.05).toFixed(2)}s">
+      <div class="lane-h">
+        <div class="lname">${esc(host || t('cov.noHost'))}</div>
+        <div class="lsub">${items.length} ${esc(t(items.length === 1 ? 'cov.itemOne' : 'cov.itemMany'))}</div>
+      </div>
+      ${hostLine(items)}
+      <div>${items.map(it => itemHtml(it, `i:${it.id}`)).join('')}</div>
+    </section>`;
+}
+
+function render() {
+  const d = State.data;
+  const cd = AtlasShell.activeCase();
+  let body;
+  if (!d.ledger) {
+    body = `<div class="state-empty">${esc(t('cov.noLedger'))}
+      <div class="hint">${esc(t('cov.noLedgerHint'))} <code>atlas run</code></div></div>`;
+  } else {
+    const s = d.summary || {};
+    const total = s.total || 0;
+    const open = (s.open || 0) + (s.parsed || 0);
+    // A lane per host; an item no host is known for is its own lane, named
+    // by its file (the read model's lane), never "no host".
+    const byHost = new Map();
+    const named = new Set();
+    for (const it of d.items || []) {
+      const lane = it.lane || it.host || '';
+      if (!byHost.has(lane)) byHost.set(lane, []);
+      byHost.get(lane).push(it);
+      if (it.host) named.add(lane);
+    }
+    // Named hosts first, then the items no host is known for.
+    const hosts = [...byHost.keys()].sort((a, b) => (!named.has(a)) - (!named.has(b)) || a.localeCompare(b));
+    const extracted = d.extracted || [];
+    body = `
+      ${total ? `<div class="head">
+        <div class="line"><b>${esc(t('cov.head', { done: total - open, total }))}</b> · ${esc(t('cov.headOpen', { n: open }))}</div>
+        ${barHtml(s)}${legendHtml(s)}
+      </div>` : `<div class="state-empty">${esc(t('cov.noItems'))}</div>`}
+      ${d.disposition ? '' : `<div class="note">${esc(t('cov.noDisposition'))}</div>`}
+      ${total && !open ? `<div class="note">${esc(t('cov.nothingOpen'))}</div>` : ''}
+      ${hosts.length ? `<div class="sec-h"><h2>${esc(t('cov.items'))}</h2></div>` + hosts.map((h, i) => laneHtml(h, byHost.get(h), i)).join('') : ''}
+      ${extracted.length ? `<div class="sec-h"><h2>${esc(t('cov.extracted'))}</h2><span class="meta">${esc(t('cov.extractedMeta'))}</span></div>`
+        + extracted.map(o => itemHtml(o, `x:${o.path}`)).join('') : ''}`;
+  }
+  const html = `
+    <div class="hero">
+      <h1 class="page-title">${esc(t('cov.title'))}</h1>
+      <span class="meta">${esc(cd)} · ${esc(t('cov.meta'))}</span>
+    </div>
+    ${body}`;
+  if (html === State.lastHtml) return;
+  const first = State.lastHtml === null;
+  $app().innerHTML = html;
+  State.lastHtml = html;
+  if (first) {
+    $app().classList.add('anim-in');
+    clearTimeout(State.animTimer);
+    State.animTimer = setTimeout(() => $app().classList.remove('anim-in'), 1400);
+  }
+  $app().querySelectorAll('details.fold').forEach(el => el.addEventListener('toggle', () => {
+    if (el.open) State.folds.add(el.dataset.fold); else State.folds.delete(el.dataset.fold);
+  }));
+}
+
+/* ── loading ───────────────────────────────────────────────────────────── */
+async function load() {
+  const cd = AtlasShell.activeCase();
+  if (!cd) return;
+  let data;
+  try {
+    data = await AtlasShell.api('case/coverage', { case: cd });
+    if (data.error) throw new Error(data.error);
+  } catch (e) {
+    if (AtlasShell.activeCase() !== cd) return;
+    if (AtlasShell.isTransient(e)) return;   // keep the page; the next poll retries
+    State.lastHtml = null; State.payload = '';
+    $app().innerHTML = `<div class="hero"><h1 class="page-title">${esc(t('cov.title'))}</h1></div>
+      <div class="state-error">${esc(t('cov.loadError'))}\n${esc(e.message)}</div>`;
+    return;
+  }
+  if (AtlasShell.activeCase() !== cd) return;   // case switched mid-flight
+  const payload = JSON.stringify(data);
+  if (State.data && payload === State.payload) return;
+  State.payload = payload;
+  State.data = data;
+  render();
+}
+
+AtlasShell.init({
+  page: 'coverage',
+  onCase: (cd) => {
+    if (State.stopPoll) State.stopPoll();
+    State.data = null; State.payload = ''; State.lastHtml = null; State.folds.clear();
+    if (!cd) {
+      $app().innerHTML = `<h1 class="page-title">${esc(t('cov.title'))}</h1>
+        <div class="state-empty">${esc(t('cov.selectCase'))}</div>`;
+      return;
+    }
+    $app().innerHTML = '<div class="state-loading">Loading</div>';
+    // The ledger moves when the run reads or leaves something; the extracted
+    // outputs are recomputed from the trace, so poll at the IoCs page's rate.
+    State.stopPoll = AtlasShell.poll(load, 10000);
+  },
+});
+</script>
+</body>
+</html>

@@ -162,7 +162,10 @@ class TestSystemOwner:
         assert "owner's duties remain" in note and "assume" not in note
         (case / "CASE.md").write_text("**Case ID:** CASE\n**Engagement:** examination\n",
                                       encoding="utf-8")
-        assert "assume the owner is the victim" in engagement_prompt_note(case)
+        # No owner named: the neutral frame's note, whatever the engagement.
+        note = engagement_prompt_note(case)
+        assert "SYSTEM OWNER: NOT NAMED" in note and "Assume no side" in note
+        assert "assume the owner is the victim" not in note
         (case / "CASE.md").write_text(
             "**Case ID:** CASE\n**Engagement:** examination\n**System owner:** suspect\n",
             encoding="utf-8")
@@ -171,6 +174,31 @@ class TestSystemOwner:
         (case / "CASE.md").write_text("**Case ID:** CASE\n**System owner:** suspect\n",
                                       encoding="utf-8")
         assert "seized running" in engagement_prompt_note(case)
+
+    def test_the_examination_note_keeps_what_is_still_to_be_recovered_and_defers_to_a_third_partys_operator(self, tmp_path):
+        """An examination's remediation template reaches the owner's own
+        estate only: what a finding still has to recover from a system is
+        kept until secured, and a system the brief does not place with the
+        owner is altered only by a request to its operator, after the
+        preservation steps. A stated victim owner gets the first rule and
+        not the third-party one; a bare brief gets no note at all."""
+        from core.case_config import engagement_prompt_note
+        case = tmp_path / "CASE"
+        case.mkdir()
+        (case / "CASE.md").write_text("**Case ID:** CASE\n**Engagement:** examination\n"
+                                      "**Subject:** \"Jane Roe\" — an insider\n", encoding="utf-8")
+        note = engagement_prompt_note(case)
+        assert "kept until that is done" in note and "owner's own live estate" in note
+        assert "request to that system's operator" in note and "after the preservation" in note
+        (case / "CASE.md").write_text(
+            "**Case ID:** CASE\n**Engagement:** examination\n**System owner:** victim\n", encoding="utf-8")
+        note = engagement_prompt_note(case)
+        assert "kept until that is done" in note and "system's operator" not in note
+        (case / "CASE.md").write_text("**Case ID:** CASE\n**System owner:** victim\n", encoding="utf-8")
+        assert engagement_prompt_note(case) == ""
+        # A brief naming no owner and no subject is the neutral frame's.
+        (case / "CASE.md").write_text("**Case ID:** CASE\n", encoding="utf-8")
+        assert engagement_prompt_note(case).startswith("# SYSTEM OWNER: NOT NAMED")
 
 
 class TestSubjectField:
@@ -215,3 +243,48 @@ class TestSubjectField:
         from core.case_config import subject_field
         assert subject_field("## Metadaten\n\n| Feld | Wert |\n|---|---|\n| Tatverdächtiger | J. Doe |\n") == (True, "J. Doe")
         assert subject_field("## Metadaten\n\n| Feld | Wert |\n|---|---|\n| Betroffene Person | J. Doe |\n")[0] is False
+
+
+# -- the consent switch "Vision descriptions" (tools.images) --
+
+@pytest.mark.parametrize("text, present, on", [
+    ("| **Vision descriptions** | on |", True, True),
+    ("**Vision descriptions:** yes", True, True),
+    ("Vision descriptions: TRUE", True, True),
+    ("Vision: enabled", True, True),
+    ("Bildbeschreibungen: ja", True, True),
+    ("Modell-Bildbeschreibungen: ein", True, True),
+    ("Vision descriptions: off", True, False),
+    ("Vision descriptions: no", True, False),
+    ("Vision descriptions: on.", True, True),
+    ("**Vision descriptions:** *yes*", True, True),
+    ("Vision descriptions: on, after legal review", True, False),
+    ("Vision descriptions: on hold until the client agrees", True, False),
+    ("Vision descriptions: an open question", True, False),
+    ("Vision descriptions: enable only after legal review", True, False),
+    ("Vision descriptions: allowed? ask the client", True, False),
+    ("Vision descriptions: an", True, False),
+    ("Vision descriptions: maybe", True, False),
+    ("Vision descriptions:", True, False),
+    ("Vision descriptions: on\n\nVision descriptions: off", True, False),
+    ("Vision descriptions: off\n\nVision descriptions: on", True, False),
+    ("<!-- Vision descriptions: on -->", False, False),
+    ("The vision descriptions the model gave were unclear.", False, False),
+    ("", False, False),
+])
+def test_the_vision_switch_is_on_only_for_an_explicit_agreeing_row(text, present, on):
+    from core.case_config import vision_field
+    got = vision_field("# Case\n\n" + text + "\n\n## Investigation Requests\n")
+    assert (got[0], got[2]) == (present, on)
+
+
+def test_the_switch_is_read_from_the_brief_at_call_time_and_by_its_name(tmp_path):
+    from core.case_config import case_switch, model_vision
+    case = tmp_path / "CASE-A"
+    case.mkdir()
+    assert model_vision(case) is False and model_vision(None) is False
+    (case / "CASE.md").write_text("# Case\n\n| Vision descriptions | on |\n", encoding="utf-8")
+    assert model_vision(case) is True and case_switch(case, "model_vision") is True
+    (case / "CASE.md").write_text("# Case\n\n| Vision descriptions | off |\n", encoding="utf-8")
+    assert model_vision(case) is False and case_switch(case, "model_vision") is False
+    assert case_switch(case, "no_such_switch") is False

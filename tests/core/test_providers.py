@@ -31,14 +31,21 @@ class TestDefaultUnchanged:
         assert providers.names() == ["llmhub"]
         assert providers.declared() == []
 
-    def test_default_mirrors_llmhub_module(self, monkeypatch):
+    def test_the_hub_is_its_profile_and_its_variables(self, monkeypatch):
+        """The implicit hub: its own variables, else its profile's defaults."""
+        from core import provider_profiles
         monkeypatch.delenv("ATLAS_PROVIDERS", raising=False)
+        for var in ("LLMHUB_BASE_URL", "LLMHUB_MODEL", "LLMHUB_API", "TSYSTEMS_API_KEY"):
+            monkeypatch.delenv(var, raising=False)
         monkeypatch.setenv("LLMHUB_API_KEY", "hub-key")
+        profile = provider_profiles.get("llmhub")
         provider = providers.resolve("llmhub")
-        assert provider.name == "llmhub"
-        assert provider.base_url == llmhub.base_url()
-        assert provider.api_key == llmhub.api_key()
-        assert provider.model == llmhub.model()
+        assert (provider.name, provider.base_url, provider.api_key, provider.model) == \
+            ("llmhub", profile.base_url, "hub-key", profile.default_model)
+        monkeypatch.setenv("LLMHUB_BASE_URL", "https://hub.example.com/v2/")
+        monkeypatch.setenv("LLMHUB_MODEL", "model-b")
+        provider = providers.resolve("llmhub")
+        assert (provider.base_url, provider.model) == ("https://hub.example.com/v2", "model-b")
 
     def test_empty_name_is_not_configured(self, monkeypatch):
         monkeypatch.delenv("ATLAS_PROVIDERS", raising=False)
@@ -46,8 +53,10 @@ class TestDefaultUnchanged:
             providers.resolve("")
 
     def test_llmhub_resolves_even_when_undeclared(self, monkeypatch):
+        from core import provider_profiles
         monkeypatch.delenv("ATLAS_PROVIDERS", raising=False)
-        assert providers.resolve("llmhub").base_url == llmhub.base_url()
+        monkeypatch.delenv("LLMHUB_BASE_URL", raising=False)
+        assert providers.resolve("llmhub").base_url == provider_profiles.get("llmhub").base_url
 
     def test_default_client_headers_are_unchanged_bearer(self, monkeypatch):
         monkeypatch.delenv("ATLAS_PROVIDERS", raising=False)
@@ -173,8 +182,8 @@ class TestHeaders:
     def test_blank_authorization_prefix_is_bearer(self, monkeypatch):
         """Unset and blank AUTH_PREFIX on Authorization both mean Bearer.
 
-        An empty assignment in .env used to strip 'Bearer ' and OpenRouter
-        answered 401 Missing Authentication header.
+        An empty assignment in .env strips 'Bearer ' and OpenRouter
+        answers 401 Missing Authentication header.
         """
         monkeypatch.setenv("ATLAS_PROVIDERS", "gw")
         monkeypatch.setenv("ATLAS_PROVIDER_GW_BASE_URL", GATEWAY)
@@ -247,7 +256,7 @@ class TestClientProviderSelection:
 
 
 class TestBackendPositiveList:
-    """An unrecognised REASON_BACKEND/DAIR_BACKEND used to fall through to
+    """An unrecognised REASON_BACKEND/DAIR_BACKEND must not fall through to
     openai-compat silently. With a second endpoint registered that would run
     the reviewer against the wrong model and label it correctly."""
 
@@ -312,6 +321,9 @@ class TestProviderCli:
             # rather than introducing a second way to say the same thing.
             "reason": "REASON_BACKEND",
             "dair": "DAIR_BACKEND",
+            # the vision role (tools.images): chosen on purpose, never by
+            # `provider use --role all`, since its model must take images.
+            "vision": "VISION_BACKEND",
         }
 
     def test_role_vars_are_the_ones_the_resolver_reads(self, two_providers,

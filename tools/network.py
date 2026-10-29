@@ -1,7 +1,10 @@
 """Network analysis tools — tcpdump, ngrep, pcap inspection."""
+import functools
 import hashlib
 import os
+import re
 import shutil
+import subprocess
 from pathlib import Path
 from typing import Optional
 from fastmcp import FastMCP
@@ -27,7 +30,7 @@ def _capture_for_tcpdump(pcap_file: str) -> str:
     Staging is by name only — the bytes are the evidence file's own, and a
     hard link neither duplicates nor alters them. When no case directory is
     known or the link cannot be made, the original path is returned and
-    tcpdump reports the denial as before.
+    tcpdump reports the denial.
 
     The link lives in a directory named after the evidence file, so the
     recorded command still names the file the analyst asked for: lineage is
@@ -115,7 +118,7 @@ def _record_structured_marker(tool_name: str, raw: dict, summary: dict | None = 
         return None
 
 
-@mcp.tool()
+@mcp.tool(meta={"input_names": ["*.pcap", "*.pcapng", "*.cap"]})
 @output_safe
 def tcpdump_read(
     pcap_file: str,
@@ -136,7 +139,7 @@ def tcpdump_read(
     return run(cmd, needs_sudo=True, timeout=120)
 
 
-@mcp.tool()
+@mcp.tool(meta={"input_names": ["*.pcap", "*.pcapng", "*.cap"]})
 @output_safe
 def tcpdump_extract_http(pcap_file: str, output_path: Optional[str] = None) -> dict:
     """Extract HTTP traffic (ports 80, 8080, 8000, 8443) from a PCAP file."""
@@ -145,7 +148,7 @@ def tcpdump_extract_http(pcap_file: str, output_path: Optional[str] = None) -> d
     return run(cmd, needs_sudo=True, timeout=120)
 
 
-@mcp.tool()
+@mcp.tool(meta={"input_names": ["*.pcap", "*.pcapng", "*.cap"]})
 @output_safe
 def tcpdump_extract_dns(pcap_file: str) -> dict:
     """Extract DNS queries and responses from a PCAP file."""
@@ -153,7 +156,7 @@ def tcpdump_extract_dns(pcap_file: str) -> dict:
     return run(cmd, needs_sudo=True, timeout=60)
 
 
-@mcp.tool()
+@mcp.tool(meta={"input_names": ["*.pcap", "*.pcapng", "*.cap"]})
 @output_safe
 def tcpdump_list_connections(pcap_file: str) -> dict:
     """Extract unique source/destination IP pairs and ports from a PCAP."""
@@ -161,7 +164,7 @@ def tcpdump_list_connections(pcap_file: str) -> dict:
     return run(cmd, needs_sudo=True, timeout=120)
 
 
-@mcp.tool()
+@mcp.tool(meta={"input_names": ["*.pcap", "*.pcapng", "*.cap"]})
 @output_safe
 def ngrep_search(
     pcap_file: str,
@@ -188,7 +191,7 @@ def ngrep_search(
     return run(cmd, needs_sudo=True, timeout=120)
 
 
-@mcp.tool()
+@mcp.tool(meta={"input_names": ["*.pcap", "*.pcapng", "*.cap"]})
 @output_safe
 def tcpdump_extract_ips(pcap_file: str) -> dict:
     """
@@ -239,7 +242,7 @@ def tcpdump_extract_ips(pcap_file: str) -> dict:
     return out
 
 
-@mcp.tool()
+@mcp.tool(meta={"input_names": ["*.pcap", "*.pcapng", "*.cap"]})
 @output_safe
 def tcpdump_write_filtered(
     pcap_file: str,
@@ -263,7 +266,7 @@ def tcpdump_write_filtered(
                output_dir=os.path.dirname(os.path.abspath(output_pcap)))
 
 
-@mcp.tool()
+@mcp.tool(meta={"input_names": ["*.pcap", "*.pcapng", "*.cap"]})
 @output_safe
 def http_session_inventory(
     pcap_file: str,
@@ -506,7 +509,7 @@ def _match_roster(value: str, roster: dict[str, list[str]]) -> list[str]:
     return sorted(matches)
 
 
-@mcp.tool()
+@mcp.tool(meta={"input_names": ["*.pcap", "*.pcapng", "*.cap"]})
 @output_safe
 def pcap_identity_timeline(
     pcap_file: str,
@@ -524,7 +527,7 @@ def pcap_identity_timeline(
     traffic, especially when multiple accounts appear on the same source host.
 
     source_ip: optional source IP to focus on after extraction.
-    roster_names: optional list such as ["Amy Smith", "Johnny Coach"].
+    roster_names: optional list such as ["Jane Doe", "John Roe"].
     output_path: optional JSON path under analysis/ or exports/.
     """
     import json
@@ -698,7 +701,7 @@ def pcap_identity_timeline(
     return result
 
 
-@mcp.tool()
+@mcp.tool(meta={"input_names": ["*.pcap", "*.pcapng", "*.cap"]})
 @output_safe
 def zeek_analyze(pcap_file: str, output_dir: str) -> dict:
     """
@@ -726,7 +729,7 @@ def zeek_analyze(pcap_file: str, output_dir: str) -> dict:
     return result
 
 
-@mcp.tool()
+@mcp.tool(meta={"input_names": ["*.pcap", "*.pcapng", "*.cap"]})
 @output_safe
 def suricata_analyze(
     pcap_file: str,
@@ -781,14 +784,14 @@ def _tshark(args: list[str], timeout: int = 180) -> dict:
     return run(["tshark"] + args, needs_sudo=True, timeout=timeout)
 
 
-@mcp.tool()
+@mcp.tool(meta={"input_names": ["*.pcap", "*.pcapng", "*.cap"]})
 @output_safe
 def tshark_protocol_hierarchy(pcap_file: str) -> dict:
     """Protocol hierarchy statistics (io,phs) for a PCAP, via tshark."""
     return _tshark(["-r", pcap_file, "-q", "-z", "io,phs"])
 
 
-@mcp.tool()
+@mcp.tool(meta={"input_names": ["*.pcap", "*.pcapng", "*.cap"]})
 @output_safe
 def tshark_conversations(pcap_file: str, proto: str = "tcp") -> dict:
     """
@@ -801,7 +804,7 @@ def tshark_conversations(pcap_file: str, proto: str = "tcp") -> dict:
     return _tshark(["-r", pcap_file, "-q", "-z", f"conv,{proto}"])
 
 
-@mcp.tool()
+@mcp.tool(meta={"input_names": ["*.pcap", "*.pcapng", "*.cap"]})
 @output_safe
 def tshark_ja3(pcap_file: str) -> dict:
     """
@@ -817,19 +820,131 @@ def tshark_ja3(pcap_file: str) -> dict:
     ])
 
 
-@mcp.tool()
+@mcp.tool(meta={"input_names": ["*.pcap", "*.pcapng", "*.cap"]})
 @output_safe
 def tcpxtract_streams(
     pcap_file: str,
     output_dir: str,
 ) -> dict:
     """
-    Extract TCP streams from a PCAP file using tcpxtract.
-    Reconstructs full TCP sessions as individual files — useful for recovering
-    transferred documents, executables, or web content from captured traffic.
-    output_dir: destination for extracted stream files.
+    Carve files out of the packet payloads of a PCAP by content signature
+    (tcpxtract). Each hit is written from its header to the footer or the
+    size cap its type has in tcpxtract.conf, not to the end of the transfer:
+    a large object, or one whose footer the configuration does not know,
+    comes out cut short or not at all. net.tshark_export_objects writes the
+    objects a protocol carried, whole and under their own names.
+    output_dir: destination for the carved files.
     """
     import os
     os.makedirs(output_dir, exist_ok=True)
     cmd = ["tcpxtract", "-f", pcap_file, "-o", output_dir]
     return run(cmd, needs_sudo=True, timeout=300, output_dir=output_dir)
+
+
+# tshark's own vocabulary for --export-objects: the dissectors that hand a
+# complete object to its export tap. The installed build is asked once per
+# process (``tshark --export-objects help``); this is the set of the builds
+# known when the tool was written, used when the build cannot be asked. A
+# fact of the program, not a rule of what to look for.
+_EXPORT_OBJECT_PROTOCOLS = ("http", "ftp-data", "smb", "tftp", "imf", "dicom")
+_PROTOCOL_TOKEN = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+
+
+@functools.lru_cache(maxsize=1)
+def _export_protocols() -> tuple[str, ...]:
+    """The export object types the installed tshark lists, in its order; the
+    written set when it cannot be asked (no tshark, a build without the
+    help form, a timeout). A capability query, not a tool call: nothing of
+    the case is read, so it is not a traced command."""
+    try:
+        proc = subprocess.run(["tshark", "--export-objects", "help"], capture_output=True,
+                              text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return _EXPORT_OBJECT_PROTOCOLS
+    lines = (proc.stderr + "\n" + proc.stdout).splitlines()
+    listed = []
+    seen_head = False
+    for line in lines:
+        if "export object types" in line.lower():
+            seen_head = True
+            continue
+        token = line.strip()
+        if seen_head and _PROTOCOL_TOKEN.match(token):
+            listed.append(token)
+    return tuple(listed) or _EXPORT_OBJECT_PROTOCOLS
+
+
+@mcp.tool(meta={"input_names": ["*.pcap", "*.pcapng", "*.cap"]})
+@output_safe
+def tshark_export_objects(
+    pcap_file: str,
+    output_dir: str,
+    protocol: str = "http",
+) -> dict:
+    """
+    Write the objects a protocol carried in a PCAP as whole files,
+    reassembled from the TCP stream by tshark's dissectors, each under the
+    name the protocol gave it (an HTTP object: its URL path, with / and ?
+    encoded). protocol: http, ftp-data, smb, tftp, imf or dicom (the
+    installed tshark's own list; a name it does not list is refused with
+    the list). Nothing is carved by signature; an object the dissector did
+    not see complete (a transfer the capture cut) may not be written, so no
+    object means no complete object of that protocol, not an empty capture.
+    The result counts every object and lists up to 200, largest first; a
+    name over 200 characters is shortened in the list, the directory holds
+    the full name. output_dir: where the objects go.
+    """
+    import shutil as _sh
+    protocols = _export_protocols()
+    if protocol not in protocols:
+        return {"success": False,
+                "error": f"protocol must be one of: {', '.join(protocols)}"}
+    if not _sh.which("tshark"):
+        return {"success": False, "error": "'tshark' not found on PATH"}
+    # No sudo: the Atlas user reads evidence already (the Python readers do),
+    # and a dissector over an attacker-supplied capture runs unprivileged.
+    # run() checks and creates output_dir itself.
+    result = run(["tshark", "-r", pcap_file, "-q", "--export-objects", f"{protocol},{output_dir}"],
+                 timeout=600, output_dir=output_dir)
+    if result.get("success"):
+        total, listed, shortened = _exported_objects(output_dir)
+        result["output_dir"] = output_dir
+        result["object_count"] = total
+        result["objects"] = listed
+        notes = []
+        if total > len(listed):
+            notes.append(f"{len(listed)} of {total} objects listed, largest first; the directory "
+                         "holds them all")
+        if shortened:
+            notes.append("names over 200 characters are shortened in this list; the directory "
+                         "holds the full names")
+        if notes:
+            result["note"] = "; ".join(notes)
+    return result
+
+
+def _exported_objects(output_dir: str, limit: int = 200) -> tuple[int, list[dict], bool]:
+    """``(count, listed, shortened)``: how many regular files lie directly
+    under output_dir, the largest ``limit`` of them as ``{"name",
+    "size_bytes"}``, and whether a listed name was cut. The names are what
+    the protocol carried, chosen by whoever sent the object: each is shown
+    JSON-quoted and escaped, nothing under a subdirectory or behind a link
+    is listed, and a file is listed only when it resolves under the
+    directory."""
+    from core.coverage_ledger import shown_name  # loaded after the tool modules
+    root = os.path.realpath(output_dir)
+    found: list[tuple[int, str]] = []
+    try:
+        with os.scandir(root) as it:
+            for entry in it:
+                if not entry.is_file(follow_symlinks=False):
+                    continue
+                if os.path.dirname(os.path.realpath(entry.path)) != root:
+                    continue
+                found.append((entry.stat(follow_symlinks=False).st_size, entry.name))
+    except OSError:
+        return 0, [], False
+    found.sort(key=lambda t: (-t[0], t[1]))
+    top = found[:limit]
+    listed = [{"name": shown_name(name), "size_bytes": size} for size, name in top]
+    return len(found), listed, any(len(name) > 200 for _size, name in top)

@@ -235,7 +235,7 @@ class TestHttp:
         (tmp_path / "cases" / "CASE-A").mkdir(parents=True)
         cookie = auth.create_session(adm.id)
         status, payload, _ = _req(server, "POST", "case/run/start",
-                                  {"case": "CASE-A", "mode": "run",
+                                  {"case": "CASE-A", "mode": "run", "confirm_case": "CASE-A",
                                    "options": {"start_mode": "fresh", "all_tools": True,
                                                "question": "who is the named person"}},
                                   cookie=cookie)

@@ -580,6 +580,7 @@ class TestTokenExtraction:
 
 
 
+@pytest.mark.usefixtures("todays_report_check")
 class TestReasonPreReportCheck:
     """Tests for reason_pre_report_check."""
 
@@ -669,9 +670,9 @@ class TestReasonPreReportCheck:
 
     def _record_two_cited_likely(self, configured_log):
         c1 = configured_log.record_tool_call("net.ngrep_search", True, False, 0, 0)
-        configured_log.record_finding("Harassing POST from 192.168.15.4", "LIKELY",
+        configured_log.record_finding("Harassing POST from 10.0.0.15", "LIKELY",
                                       "net.ngrep_search", linked_call_id=c1)
-        configured_log.record_finding("Gmail session jcoachj via cookies", "LIKELY",
+        configured_log.record_finding("Web-mail session jroej via cookies", "LIKELY",
                                       "net.ngrep_search", linked_call_id=c1)
 
     def test_under_tiering_unevaluated_is_blocking(self, configured_log):
@@ -794,25 +795,25 @@ class TestReasonPreReportCheck:
         from tools.reasoning import reason_pre_report_check
         self._record_happy_path_calls(configured_log)
         configured_log.record_finding(
-            "Harassing emails sent from the suspect's Gmail account",
+            "Harassing emails sent from the suspect's web-mail account",
             "CONFIRMED", "net.ngrep_search")
         with patch("core.execution_log.log", configured_log):
             r = reason_pre_report_check()
         assert not any("mitre_map" in i for i in r["blocking_issues"])
         assert r["ready_to_report"] is True
 
-    def _record_schardt_shaped_findings(self, configured_log, techniques=None):
-        # Hacking-tool / sniffing / cracking findings (shaped after the public
-        # Hacking Case) with zero malware/CVE vocabulary. A malware-only
+    def _record_hacking_tool_findings(self, configured_log, techniques=None):
+        # Hacking-tool / sniffing / cracking findings with zero malware/CVE
+        # vocabulary. A malware-only
         # vocabulary misses all of them and the report goes out with no
         # mapped TTPs.
         gm = {"validated_techniques": techniques} if techniques else None
         configured_log.record_finding(
-            "Hacking tools Cain, 123WASP and Look@LAN installed under "
-            "Program Files by user Mr. Evil",
+            "Hacking tools PassCrack, NetScan and SniffKit installed under "
+            "Program Files by user jroe",
             "CONFIRMED", "ez.recmd_hive", gate_metadata=gm)
         configured_log.record_finding(
-            "Ethereal interception file recovered — network packet sniffing "
+            "Sniffer interception file recovered — network packet sniffing "
             "of the corporate WLAN",
             "CONFIRMED", "tsk.icat", gate_metadata=gm)
         configured_log.record_finding(
@@ -820,28 +821,28 @@ class TestReasonPreReportCheck:
             "brute-force",
             "CONFIRMED", "strings.strings_grep", gate_metadata=gm)
 
-    def test_schardt_hacking_tool_findings_trigger_attack_warning(self, configured_log):
+    def test_hacking_tool_findings_trigger_attack_warning(self, configured_log):
         # Hacking-tool vocabulary must still surface unmapped attack findings,
         # but as warnings — never block Report for missing T-IDs.
         from tools.reasoning import reason_pre_report_check
         self._record_happy_path_calls(configured_log)
         configured_log.record_tool_call("<py>:correlate_correlate_mitre_map",
                                         True, False, 0, 0)
-        self._record_schardt_shaped_findings(configured_log)
+        self._record_hacking_tool_findings(configured_log)
         with patch("core.execution_log.log", configured_log):
             r = reason_pre_report_check()
         assert r["ready_to_report"] is True
         assert any("MITRE technique" in w for w in r["warnings"])
         assert not any("MITRE technique" in i for i in r["blocking_issues"])
 
-    def test_schardt_findings_with_structured_techniques_pass(self, configured_log):
+    def test_hacking_tool_findings_with_structured_techniques_pass(self, configured_log):
         # The structured mitre_techniques= channel (validated_techniques on
         # the entry) clears both the attack gate and the backstop.
         from tools.reasoning import reason_pre_report_check
         self._record_happy_path_calls(configured_log)
         configured_log.record_tool_call("<py>:correlate_correlate_mitre_map",
                                         True, False, 0, 0)
-        self._record_schardt_shaped_findings(configured_log,
+        self._record_hacking_tool_findings(configured_log,
                                              techniques=["T1040", "T1588.002"])
         with patch("core.execution_log.log", configured_log):
             r = reason_pre_report_check()
@@ -852,7 +853,7 @@ class TestReasonPreReportCheck:
         # Deliberately no attack-shaped vocabulary — exercises the structural
         # backstop, not the attack-vocabulary gate.
         configured_log.record_finding(
-            "Harassing email sent from the suspect's Gmail account",
+            "Harassing email sent from the suspect's web-mail account",
             "CONFIRMED", "net.ngrep_search")
         configured_log.record_finding(
             "Suspect's laptop was connected to the office network at 14:02",
@@ -919,7 +920,7 @@ class TestReasonPreReportCheck:
         from tools.reasoning import reason_pre_report_check
         self._record_happy_path_calls(configured_log)
         configured_log.record_finding(
-            "Harassing email sent from the suspect's Gmail account",
+            "Harassing email sent from the suspect's web-mail account",
             "CONFIRMED", "net.ngrep_search")
         configured_log.record_finding(
             "Suspect's laptop was connected to the office network at 14:02",
@@ -1100,6 +1101,22 @@ class TestReasonPreReportCheck:
             r = reason_pre_report_check()
         assert r["ready_to_report"] is False
         assert any("BLOCKER" in i for i in r["blocking_issues"])
+
+    def test_a_negated_or_empty_acknowledgement_still_blocks(self, configured_log):
+        # "not unresolvable" and "UNRESOLVABLE: none - ..." say the blockers
+        # are actionable: neither acknowledges a dead-end.
+        from tools.reasoning import reason_pre_report_check
+        for text in (
+                "BLOCKERS: the registry hives are not parsed yet; this is not "
+                "unresolvable, a second export with the hive parser should work",
+                "BLOCKERS: the registry hives are not parsed yet\n"
+                "UNRESOLVABLE: none - every blocker above is actionable with the "
+                "tools at hand"):
+            self._full_passing_trace(configured_log, text)
+            with patch("core.execution_log.log", configured_log):
+                r = reason_pre_report_check()
+            assert r["ready_to_report"] is False, text
+            assert any("BLOCKER" in i for i in r["blocking_issues"]), text
 
     def test_blocker_hint_names_the_escape_hatch(self, configured_log):
         # The refusal must teach the agent the legitimate escape; with no
@@ -1287,16 +1304,16 @@ class TestReasonPreReportCheck:
     # ── Case-question gate (extraction + bounded threshold) ────────────────────
 
     _POLLUTED_CQ = (
-        "CASE_QUESTION: What hacking tools did Greg Schardt install and use? "
+        "CASE_QUESTION: What hacking tools did John Roe install and use? "
         "Plan: verify evidence hash, mount the E01 image, parse SAM SOFTWARE "
         "SYSTEM registry hives via RECmd, enumerate UserAssist Prefetch "
         "AppCompatCache execution artifacts, run DAIR triage collect analyze "
-        "scan report phases against all 31 NIST questions"
+        "scan report phases against all 30 case questions"
     )
 
     def test_polluted_case_question_satisfied_by_finding(self, configured_log):
-        # CASE_QUESTION jammed onto one line with plan text used to inflate the
-        # token threshold so no finding could satisfy it. Now extraction stops
+        # CASE_QUESTION jammed onto one line with plan text must not inflate the
+        # token threshold so that no finding can satisfy it: extraction stops
         # at '?' and the threshold is capped.
         from tools.reasoning import reason_pre_report_check
         configured_log.record_tool_call("vol.psscan", True, False, 0, 0)
@@ -1310,8 +1327,8 @@ class TestReasonPreReportCheck:
         # MITRE gate, and this test targets the case-question gate, not the
         # MITRE one.
         configured_log.record_finding(
-            "Greg Schardt installed and used hacking tools (Cain & Abel, Ethereal, "
-            "Network Stumbler) under the Mr. Evil account (T1588.002)",
+            "John Roe installed and used hacking tools (PassCrack, SniffKit, "
+            "NetScan) under the jroe account (T1588.002)",
             "CONFIRMED", "ez.pecmd")
         with patch("core.execution_log.log", configured_log):
             r = reason_pre_report_check()
@@ -1539,7 +1556,7 @@ class TestReasonPreReportCheck:
     def test_case_question_ignores_background_after_evidence_marker(self, configured_log):
         from tools.reasoning import reason_pre_report_check
         configured_log.record_agent_message(
-            "CASE_QUESTION: Did Daniel Roe copy classified ExampleCorp data and what was done with it? "
+            "CASE_QUESTION: Did John Roe move the payroll export to removable media and what was done with it? "
             "Evidence: segmented E01, email and chat exports."
         )
         configured_log.record_tool_call("ez.evtxecmd 4624", True, False, 0, 0)
@@ -1547,7 +1564,7 @@ class TestReasonPreReportCheck:
         configured_log.record_reason_call("reason_hypothesize", True, "hyp", {})
         configured_log.record_reason_call("reason_synthesize", True, "ok", {})
         configured_log.record_finding(
-            "Daniel Roe copied classified ExampleCorp data and archived it for exfiltration.",
+            "John Roe moved the payroll export to removable media and archived it for transfer.",
             "LIKELY",
             "ez.mftecmd",
         )
@@ -1560,7 +1577,7 @@ class TestReasonPreReportCheck:
     def test_pcap_human_attribution_requires_identity_closure(self, configured_log):
         from tools.reasoning import reason_pre_report_check
         configured_log.record_tool_call(
-            "tcpdump -r /cases/nitroba/evidence/nitroba.pcap -A",
+            "tcpdump -r /cases/case-a/evidence/capture.pcap -A",
             True, False, 0, 0,
         )
         configured_log.record_reason_call("reason_plan", True, "plan", {})
@@ -1568,7 +1585,7 @@ class TestReasonPreReportCheck:
         configured_log.record_reason_call("reason_evaluate_finding", True, "SUPPORTED", {})
         configured_log.record_reason_call("reason_synthesize", True, "ok", {})
         configured_log.record_finding(
-            "Johnny Coach was responsible for the anonymous email from 192.168.15.4",
+            "John Roe was responsible for the anonymous email from 10.0.0.15",
             "CONFIRMED",
             "net.ngrep_search",
         )
@@ -1583,10 +1600,10 @@ class TestReasonPreReportCheck:
     def test_pcap_human_attribution_with_identity_closure_passes(self, configured_log):
         from tools.reasoning import reason_pre_report_check
         configured_log.record_tool_call(
-            "<py>:pcap_identity_timeline roster=CHEM109", True, False, 0, 0
+            "<py>:pcap_identity_timeline roster=ROSTER01", True, False, 0, 0
         )
         configured_log.record_tool_call(
-            "<py>:knowns_pattern_generate person_username CHEM109", True, False, 0, 0
+            "<py>:knowns_pattern_generate person_username ROSTER01", True, False, 0, 0
         )
         configured_log.record_tool_call("coverage.coverage_report", True, False, 0, 0)
         configured_log.record_reason_call("reason_plan", True, "plan", {})
@@ -1594,7 +1611,7 @@ class TestReasonPreReportCheck:
         configured_log.record_reason_call("reason_evaluate_finding", True, "SUPPORTED", {})
         configured_log.record_reason_call("reason_synthesize", True, "ok", {})
         configured_log.record_finding(
-            "Johnny Coach was responsible for the anonymous email from 192.168.15.4",
+            "John Roe was responsible for the anonymous email from 10.0.0.15",
             "CONFIRMED",
             "net.pcap_identity_timeline",
         )
@@ -1607,11 +1624,11 @@ class TestReasonPreReportCheck:
     def test_pcap_identity_finding_source_counts_as_closure(self, configured_log):
         from tools.reasoning import reason_pre_report_check
         configured_log.record_tool_call(
-            "sudo tcpdump -r /cases/nitroba/evidence/nitroba.pcap -nn -A tcp port 80",
+            "sudo tcpdump -r /cases/case-a/evidence/capture.pcap -nn -A tcp port 80",
             True, False, 0, 0,
         )
         configured_log.record_tool_call(
-            "<py>:knowns_pattern_generate person_username CHEM109", True, False, 0, 0
+            "<py>:knowns_pattern_generate person_username ROSTER01", True, False, 0, 0
         )
         configured_log.record_tool_call("coverage.coverage_report", True, False, 0, 0)
         configured_log.record_reason_call("reason_plan", True, "plan", {})
@@ -1619,7 +1636,7 @@ class TestReasonPreReportCheck:
         configured_log.record_reason_call("reason_evaluate_finding", True, "SUPPORTED", {})
         configured_log.record_reason_call("reason_synthesize", True, "ok", {})
         configured_log.record_finding(
-            "Structured PCAP identity inventory dispositions every account and the sender is LIKELY Johnny Coach.",
+            "Structured PCAP identity inventory dispositions every account and the sender is LIKELY John Roe.",
             "LIKELY",
             "net.http_session_inventory",
         )
@@ -2077,6 +2094,99 @@ class TestPreReportCheckSurfacesAuditWarnings:
         assert r["audit_summary"]["candidate_count"] == 2
 
 
+@pytest.mark.usefixtures("todays_report_check")
+class TestPreReportHelperUnavailable:
+    """A helper that gives no usable answer IDENTICAL_FAIL_LIMIT times in a
+    row turns its missing step into a documented limitation; fewer failures,
+    or a later usable answer, change nothing."""
+
+    @pytest.fixture
+    def base_log(self, tmp_path):
+        import json
+        from core.execution_log import ExecutionLog
+        l = ExecutionLog()
+        l.configure("TEST-HELPER", str(tmp_path / "trace.json"))
+        (tmp_path / ".atlas").mkdir(exist_ok=True)
+        (tmp_path / ".atlas" / "evidence_inventory.json").write_text(
+            json.dumps({"complete": True, "summary": {}}), encoding="utf-8")
+        l.record_tool_call("vol.psscan", True, False, 0, 0)
+        l.record_tool_call("coverage.coverage_report", True, False, 0, 0)
+        l.record_reason_call("reason_plan", True, "plan", {})
+        l.record_reason_call("reason_hypothesize", True, "hyp", {})
+        return l
+
+    def _fail(self, log, n, tool="reason_synthesize"):
+        for _ in range(n):
+            log.record_reason_call(tool, False, "", {}, gate="empty_reason_response",
+                                   error="Model returned empty response")
+
+    def _check(self, log):
+        from tools.reasoning import reason_pre_report_check
+        with patch("core.execution_log.log", log):
+            return reason_pre_report_check()
+
+    def test_limit_reached_is_a_limitation_not_a_blocker(self, base_log):
+        from agent.tool_investigate import IDENTICAL_FAIL_LIMIT
+        self._fail(base_log, IDENTICAL_FAIL_LIMIT)
+        r = self._check(base_log)
+        assert r["ready_to_report"] is True
+        assert r["has_synthesize"] is False
+        assert any(d.startswith("reason.synthesize could not run") and "not cross-checked" in d
+                   and f"{IDENTICAL_FAIL_LIMIT} requests in a row ({IDENTICAL_FAIL_LIMIT} sent to the model)" in d
+                   for d in r["documented_limitations"])
+        # The report prints it whatever a model writes.
+        from core.investigation_exit import open_limit_lines
+        with patch("core.execution_log.log", base_log):
+            lines = open_limit_lines(base_log.case_dir() or "/nonexistent")
+        assert any(x.startswith("reason.synthesize could not run") for x in lines)
+
+    def test_below_the_limit_still_blocks(self, base_log):
+        from agent.tool_investigate import IDENTICAL_FAIL_LIMIT
+        self._fail(base_log, IDENTICAL_FAIL_LIMIT - 1)
+        r = self._check(base_log)
+        assert r["ready_to_report"] is False
+        assert any("reason.synthesize" in i for i in r["blocking_issues"])
+
+    def test_a_usable_answer_after_failures_is_the_synthesis(self, base_log):
+        from agent.tool_investigate import IDENTICAL_FAIL_LIMIT
+        self._fail(base_log, IDENTICAL_FAIL_LIMIT)
+        base_log.record_reason_call("reason_synthesize", True, "ok", {})
+        r = self._check(base_log)
+        assert r["ready_to_report"] is True and r["has_synthesize"] is True
+        assert not any("could not run" in d for d in r["documented_limitations"])
+
+    def test_empty_trace_stays_structural(self, tmp_path):
+        from core.execution_log import ExecutionLog
+        l = ExecutionLog()
+        l.configure("TEST-HELPER-EMPTY", str(tmp_path / "trace.json"))
+        r = self._check(l)
+        assert r["ready_to_report"] is False
+        assert any("empty" in i.lower() for i in r["blocking_issues"])
+
+    def test_real_failure_path_reaches_the_limit(self, base_log):
+        """The transport's own failure path (a timed-out request) records the
+        unusable outcome the signal counts, with no hand-written entry."""
+        from agent.tool_investigate import IDENTICAL_FAIL_LIMIT
+        from tools.reasoning import reason_synthesize
+        base_log.record_dair_call(
+            current_phase="Report", phase_rationale="done", transition_recommended=False,
+            next_phase="", transition_rationale="", stack_action="stay",
+            investigation_focus="Synthesize findings")
+        with patch("core.execution_log.log", base_log), \
+             patch("httpx.post", side_effect=TimeoutError("request timed out")), \
+             patch("tools.reasoning.REASON_URL", "http://localhost:8000"), \
+             patch("tools.reasoning.REASON_BACKEND", "openai-compat"), \
+             patch("tools.reasoning._reason_memo_lookup", return_value=None):
+            for i in range(IDENTICAL_FAIL_LIMIT):
+                out = reason_synthesize(findings=f"[1] LIKELY: finding {i}",
+                                        investigation_summary="summary")
+                assert out.get("success") is False, out
+        r = self._check(base_log)
+        assert any(d.startswith("reason.synthesize could not run") for d in r["documented_limitations"]), [
+            (e.get("type"), e.get("tool"), e.get("success"), e.get("gate"), str(e.get("error"))[:80]) for e in base_log._entries]
+
+
+@pytest.mark.usefixtures("todays_report_check")
 class TestPreReportStructuralIntegrity:
     """Structural-integrity checks: covert-account controller (blocking),
     multi-channel exfil (warning), and named-recipient roster x-ref (warning)."""
@@ -2174,6 +2284,7 @@ class TestPreReportStructuralIntegrity:
         assert not any("roster" in w.lower() for w in r["warnings"])
 
 
+@pytest.mark.usefixtures("todays_report_check")
 class TestPreReportHypothesisLedger:
     """FIX 2 — every raised hypothesis must be resolved (cited by a finding's
     tested_hypothesis_id) or parked before Report. A distinct/second-principal
@@ -2257,6 +2368,7 @@ class TestPreReportHypothesisLedger:
         assert any("H0003" in i for i in r["blocking_issues"])
 
 
+@pytest.mark.usefixtures("todays_report_check")
 class TestPreReportAttributionClosure:
     """FIX 3b — a human/account verdict needs a logon/RDP inventory somewhere in
     the trace, and every surfaced controller-question principal must be
@@ -2452,6 +2564,7 @@ class TestHypothesizeSplit:
         assert _parse_sub_hypotheses("", "H0003") == []
 
 
+@pytest.mark.usefixtures("todays_report_check")
 class TestPreReportHypothesisExhaustion:
     """Part 3 — every MEDIUM+ contested principal must reach a verdict (controller
     established with a session/identity binding, or refuted). Parking ≠ terminal."""
@@ -2606,8 +2719,8 @@ class TestOverclaimCapabilityVsAct:
         gated_log.record_reason_call(
             "reason_evaluate_finding", True,
             "VERDICT: SUPPORTED — sync-log entries cited.", {},
-            inputs={"user_message": f"FINDING:\n{normalize_desc(self._GDRIVE_DESC)} "
-                                    "and more context"})
+            inputs={"user_message": f"FINDING:\n{normalize_desc(self._GDRIVE_DESC)}\n\n"
+                                    "SUPPORTING EVIDENCE:\nsync-log entries"})
         gated_log.record_finding(self._GDRIVE_DESC, "CONFIRMED", "ez.recmd",
                                  gate_metadata=self._GDRIVE_TECH)
         with patch("core.execution_log.log", gated_log):
@@ -2615,11 +2728,26 @@ class TestOverclaimCapabilityVsAct:
         assert any("capability" in w.lower() for w in r["warnings"])
         assert not any("capability" in i.lower() for i in r["blocking_issues"])
 
+    def test_a_review_that_only_quotes_the_finding_in_its_evidence_is_not_its_review(self, gated_log):
+        # The backstop reads a review by the record gate's one matcher
+        # (tools._gates._match.reviews): the FINDING it reviewed, never a
+        # statement its evidence happens to quote.
+        from tools.reasoning import reason_pre_report_check
+        gated_log.record_reason_call(
+            "reason_evaluate_finding", True, "VERDICT: SUPPORTED - the sync log is cited.", {},
+            inputs={"user_message": "FINDING:\nThe sync client uploaded report.docx\n\nSUPPORTING EVIDENCE:\n"
+                                    f"earlier finding: {self._GDRIVE_DESC}"})
+        gated_log.record_finding(self._GDRIVE_DESC, "CONFIRMED", "ez.recmd",
+                                 gate_metadata=self._GDRIVE_TECH)
+        with patch("core.execution_log.log", gated_log):
+            r = reason_pre_report_check()
+        assert any("capability" in i.lower() for i in r["blocking_issues"])
+
     def test_act_evidence_in_description_passes(self, gated_log):
         from tools.reasoning import reason_pre_report_check
         gated_log.record_finding(
             "Google Drive client uploaded 5 project files per sync log entries "
-            "on 2015-03-23",
+            "on 2031-03-23",
             "CONFIRMED", "strings.grep",
             gate_metadata={"validated_techniques": [
                 {"technique_id": "T1567.002",
@@ -2724,3 +2852,34 @@ class TestDeterministicFirstCiteCheck:
         inst = self._log(tmp_path, self._EVIDENCE)
         _r, client = self._check(inst, self._FINDING, self._EVIDENCE, None)
         client.assert_called_once()
+
+
+class TestEvaluatorUpgradeText:
+    """ATLAS_EXTERNAL_LOOKUP_FIRST: the evaluation's additional-investigation
+    section travels with it, and a repeated challenge no longer says the
+    tier does not matter."""
+
+    CONCLUSION = ("VERDICT: CHALLENGED\n5. GAPS - the binary was not scanned.\n"
+                  "**6. ADDITIONAL INVESTIGATION** - Scan the extracted copy with the installed rules.\n\n"
+                  "**7. VERDICT:** CHALLENGED - name from memory")
+
+    def test_the_section_is_read_up_to_the_verdict(self):
+        from tools.reasoning import additional_investigation
+        assert additional_investigation(self.CONCLUSION) == "Scan the extracted copy with the installed rules."
+        assert additional_investigation("VERDICT: SUPPORTED") == ""
+
+    def _evaluate(self, monkeypatch):
+        import tools.reasoning as r
+        monkeypatch.setattr(r, "_ask", lambda *a, **k: {"success": True, "conclusion": self.CONCLUSION})
+        monkeypatch.setattr(r, "_prior_challenges", lambda finding: 2)
+        return r.reason_evaluate_finding("svc_update.exe is a RedCurtain loader", "netscan row")
+
+    def test_a_repeated_challenge_parks_the_inference_with_the_read(self, monkeypatch):
+        g = self._evaluate(monkeypatch)["guidance"]
+        assert "CONFIRMED is not required" not in g
+        assert "the challenged inference separately at SUSPECTED" in g
+        assert "Scan the extracted copy with the installed rules." in g
+
+    def test_switch_off_keeps_the_old_guidance(self, monkeypatch):
+        monkeypatch.setenv("ATLAS_EXTERNAL_LOOKUP_FIRST", "0")
+        assert "CONFIRMED is not required" in self._evaluate(monkeypatch)["guidance"]

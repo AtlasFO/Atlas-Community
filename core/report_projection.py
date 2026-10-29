@@ -132,6 +132,12 @@ LEGACY_SECTION_ALIASES: dict[str, str] = {
 # The model role the narrative sections run as. Named so the reasoning level
 # can be set for it like any other role (ATLAS_EFFORT_REPORT), and so the trace
 # attributes its calls to the report rather than to the analyst.
+# The citation verdict a claim node carries once the report-time disclosure
+# stamped it (core.claim_graph._set_citation_fields).
+_CITATION_FIELDS = ("citation_status", "located_call_ids", "citation_detail")
+# The statuses Evidence Gaps discloses (and the pre-report warning names).
+_FLAGGED_CITATION_STATUSES = ("not_shown", "own_words")
+
 _REPORT_ROLE = "report"
 
 
@@ -202,6 +208,16 @@ def empty_manifest(case_id: str = "", *, language: str = "en") -> dict[str, Any]
             "as source of truth."
         ),
     }
+
+
+def _class_digest(case_dir) -> str:
+    """The ledger's class-state digest at assembly (core.report_exit
+    .class_state_digest), "" when it cannot be read."""
+    try:
+        from core.report_exit import class_state_digest
+        return class_state_digest(case_dir)
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 def load_manifest(case_dir: str | os.PathLike) -> dict[str, Any]:
@@ -545,6 +561,64 @@ def mark_stale_sections(
     }
 
 
+def engagement_block(case_dir: str | os.PathLike | None) -> dict[str, Any]:
+    """What the brief states about the engagement, for the sections a model
+    writes: the engagement type and the system owner only when the brief
+    states them (nothing is asserted on a bare brief: an unstated frame is
+    the very invention the summary must not make), and the brief's own
+    question and requests. The frame guess (indicators.frame_for) is never
+    passed: it is a default, not a statement."""
+    out: dict[str, Any] = {"engagement": "", "system_owner": "", "question": "", "requests": []}
+    if not case_dir:
+        return out
+    try:
+        from core.case_config import engagement_status
+        status = engagement_status(case_dir)
+        if status.get("stated") and not status.get("unrecognized"):
+            out["engagement"] = str(status.get("value") or "")
+        owner = status.get("system_owner") or {}
+        if owner.get("stated") and not owner.get("unrecognized"):
+            out["system_owner"] = str(owner.get("value") or "")
+    except Exception:  # noqa: BLE001 - an unreadable brief states nothing
+        pass
+    try:
+        from core.investigation_tasks import load_tasks
+        tasks = [t for t in (load_tasks(case_dir).get("tasks") or []) if isinstance(t, dict)
+                 and t.get("status") != "superseded" and not t.get("superseded_by")]
+        # The brief's own question is the one task split whole (one
+        # narrative part beside the requests that spell it out).
+        main = next((t for t in tasks if t.get("parts_whole")), None)
+        out["question"] = str((main or {}).get("text") or "")
+        # A long brief must not bloat a small model's prompt: twelve requests
+        # at most, each cut to its first 300 characters.
+        out["question"] = out["question"][:300]
+        out["requests"] = [str(t.get("text") or "")[:300] for t in tasks if t is not main][:12]
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+def engagement_lines(block: dict[str, Any]) -> str:
+    """The stated engagement facts as prompt lines, each field said either
+    as the brief states it or as unstated ("name none"), so a brief that
+    names a question but no engagement still gets no frame invented."""
+    lines = []
+    if block.get("engagement"):
+        lines.append(f"Engagement, as the brief states it: {block['engagement']}.")
+    else:
+        lines.append("Engagement: the brief states none; name none (not an incident, not an "
+                     "examination, not a breach).")
+    if block.get("system_owner"):
+        lines.append(f"System owner, as the brief states it: {block['system_owner']}.")
+    else:
+        lines.append("System owner: the brief states none; say nothing about whose systems these are.")
+    if block.get("question"):
+        lines.append(f"The brief's question: {block['question']}")
+    if block.get("requests"):
+        lines.append("The brief's requests: " + " | ".join(block["requests"]))
+    return "\n".join(lines)
+
+
 def section_context(
     case_dir: str | os.PathLike,
     section_id: str,
@@ -562,6 +636,7 @@ def section_context(
     """
     from core.case_config import get_report_language
     from core.claim_graph import get_node, load_graph, node_in_report_scope
+    from core.dependency_index import coverage_corrected
     from core.finding_index import f_id_for
     from core.report_i18n import language_instruction, section_title
 
@@ -586,27 +661,37 @@ def section_context(
         for i in ids:
             n = get_node(graph, i)
             if n and node_in_report_scope(n, scope, host):
-                fid = None
-                try:
-                    fid = f_id_for(case_dir, i)
-                except Exception:
-                    fid = None
-                out.append({
-                    "id": n.get("id"),
-                    "finding_id": fid,
-                    "kind": n.get("kind"),
-                    "status": n.get("status"),
-                    "confidence": n.get("confidence"),
-                    "statement": n.get("statement"),
-                    "reasoning": n.get("reasoning"),
-                    "gaps": n.get("gaps"),
-                    "evidence": n.get("evidence"),
-                    "temporal_qualifier": n.get("temporal_qualifier"),
-                    "host": n.get("host"),
-                    "scope": n.get("scope"),
-                    "tactics": tactics_map.get(i) or [],
-                })
+                out.append(_project(i, n))
         return out
+
+    def _project(i: str, n: dict) -> dict:
+        fid = None
+        try:
+            fid = f_id_for(case_dir, i)
+        except Exception:
+            fid = None
+        return {
+            "id": n.get("id"),
+            "finding_id": fid,
+            "kind": n.get("kind"),
+            "status": n.get("status"),
+            "confidence": n.get("confidence"),
+            "statement": n.get("statement"),
+            "reasoning": n.get("reasoning"),
+            "gaps": n.get("gaps"),
+            "evidence": n.get("evidence"),
+            "temporal_qualifier": n.get("temporal_qualifier"),
+            "host": n.get("host"),
+            "scope": n.get("scope"),
+            "tactics": tactics_map.get(i) or [],
+            # The stored citation verdict, when the disclosure wrote
+            # one: the Evidence Gaps lines and the narrative sections
+            # read the same value.
+            **{k: n[k] for k in _CITATION_FIELDS if n.get(k) is not None},
+            **({"review_reason": n.get("invalidation_reason") or "",
+                "coverage_corrected": coverage_corrected(n)}
+               if n.get("status") == "needs_review" else {}),
+        }
 
     scope_style = ""
     if scope == "host":
@@ -627,8 +712,9 @@ def section_context(
     anti = ""
     if section_id == "exec_summary":
         anti = (
-            " Executive Summary: 1–2 sentences per F-id only; cite F-ids; "
-            "NO Supporting Evidence blocks; NO full finding restatement."
+            " Executive Summary: a short plain account for management, no "
+            "identifiers; NO Supporting Evidence blocks; NO full finding "
+            "restatement; next steps are written by code, not here."
         )
     elif section_id == "key_findings":
         anti = (
@@ -660,12 +746,27 @@ def section_context(
             "of the case: do NOT characterise the investigation as a whole "
             "from the gaps (no 'nothing has been confirmed', no 'the case "
             "rests on one source', no 'no disk image has been referenced') "
-            "unless the findings you were given actually say so."
+            "unless the findings you were given actually say so. A finding with "
+            "status needs_review is under review (its review_reason says why): name "
+            "it as under review; a limitation whose review_reason says 'coverage "
+            "corrected' is not a standing gap."
         )
 
     claims = _nodes(sec.get("claim_ids") or [])
     conclusions = _nodes(sec.get("conclusion_ids") or [])
     conflicts = _nodes(sec.get("conflict_ids") or [])
+    # Evidence Gaps discloses every current claim whose stored citation
+    # status is not shown or own words, wherever the claim is bound: the
+    # pre-report warning names them all, and the report must list them all.
+    flagged: list[dict] = []
+    if section_id == "gaps":
+        from core.claim_graph import is_current_belief
+        bound = {n["id"] for n in claims}
+        for i, n in (graph.get("nodes") or {}).items():
+            if (isinstance(n, dict) and n.get("kind") == "claim" and i not in bound
+                    and n.get("citation_status") in _FLAGGED_CITATION_STATUSES
+                    and is_current_belief(n) and node_in_report_scope(n, scope, host)):
+                flagged.append(_project(i, n))
 
     resolved_evidence: dict[str, Any] = {}
     if section_id == "detailed_findings":
@@ -686,6 +787,7 @@ def section_context(
         "report_scope": scope,
         "report_host": host,
         "report_language": language,
+        "engagement": engagement_block(case_dir),
         "claim_ids": [n["id"] for n in claims],
         "conclusion_ids": [n["id"] for n in conclusions],
         "conflict_ids": [n["id"] for n in conflicts],
@@ -693,6 +795,7 @@ def section_context(
         "claims": claims,
         "conclusions": conclusions,
         "conflicts": conflicts,
+        "flagged_claims": flagged,
         "resolved_evidence": resolved_evidence,
         "finding_tactics": tactics_map,
         "style": (
@@ -705,6 +808,33 @@ def section_context(
             + scope_style
         ),
     }
+
+
+def _citation_gap_line(n: dict, fid: str, stmt: str) -> str:
+    """The Evidence Gaps line for a claim's stored citation status (one
+    value, read here and by the dashboard): a finding no tool output shows,
+    or one resting on the run's own words, is disclosed beside its recorded
+    tier; "" for any other status."""
+    cstatus = str(n.get("citation_status") or "")
+    if cstatus not in _FLAGGED_CITATION_STATUSES:
+        return ""
+    if cstatus == "own_words":
+        return f"{fid}: rests only on the run's own words (it cites findings, not tool output)."
+    if str(n.get("citation_detail") or "").startswith("a hash bound to a file"):
+        return f"{fid}: {n['citation_detail']}."
+    named, absence = "", False
+    try:
+        from tools._gates.citation_support import claim_terms, is_absence_claim
+        absence = is_absence_claim(stmt)
+        terms = claim_terms(stmt, host=str(n.get("host") or ""))
+        named = ", ".join(sorted(e.split(":", 1)[1] for e in terms["strong"])
+                          + sorted(terms["times"]))[:200]
+    except Exception:  # noqa: BLE001
+        named = ""
+    if absence:
+        return f"{fid}: no complete search in the trace grounds what it says is missing."
+    return (f"{fid}: no tool output in the trace shows what it names"
+            + (f" ({named})." if named else "."))
 
 
 def deterministic_section_generator(
@@ -755,9 +885,16 @@ def deterministic_section_generator(
         lines.append("")
     elif sid == "gaps":
         gaps: list[str] = []
+        citation_lines: list[str] = []
+        from core.dependency_index import COVERAGE_REVIEW_NOTE, coverage_corrected
         from core.evidence_noise import looks_like_evidence_gap_statement
         for n in conclusions + claims:
             fid = _fid(n)
+            if coverage_corrected(n):
+                # The coverage it states is what the recount corrected: not
+                # a standing gap.
+                gaps.append(f"{fid}: {COVERAGE_REVIEW_NOTE}")
+                continue
             for g in n.get("gaps") or []:
                 if g and g not in gaps:
                     gaps.append(f"{fid}: {g}")
@@ -779,11 +916,21 @@ def deterministic_section_generator(
                 )
                 if entry not in gaps:
                     gaps.append(entry)
-        if not gaps:
+            line = _citation_gap_line(n, fid, stmt)
+            if line and line not in citation_lines:
+                citation_lines.append(line)
+        # Flagged claims bound to other sections get their status line too.
+        for n in context.get("flagged_claims") or []:
+            line = _citation_gap_line(n, _fid(n), (n.get("statement") or "").strip())
+            if line and line not in citation_lines:
+                citation_lines.append(line)
+        if not gaps and not citation_lines:
             lines.append(t("no_gaps", lang))
             lines.append("")
         else:
-            for g in gaps[:40]:
+            # Every citation line is listed: the pre-report warning promises
+            # each flagged finding a line here.
+            for g in gaps[:40] + citation_lines:
                 lines.append(f"- {g}")
             lines.append("")
     elif sid == "scope_evidence":
@@ -816,6 +963,8 @@ def deterministic_section_generator(
                     stmt = stmt[:117] + "..."
                 host = (n.get("host") or "—").replace("|", "/")
                 conf = n.get("confidence") or "UNCONFIRMED"
+                if n.get("status") == "needs_review":
+                    conf += f", {t('under_review', lang)}"
                 fid = _fid(n)
                 anchor = fid.lower().replace(" ", "-")
                 lines.append(
@@ -887,14 +1036,15 @@ def deterministic_section_generator(
             lines.append("")
         for n in nodes:
             conf = n.get("confidence") or "UNCONFIRMED"
+            if n.get("status") == "needs_review":
+                conf += f", {t('under_review', lang)}"
             nid = n.get("id") or ""
             fid = _fid(n)
             anchor = fid.lower().replace(" ", "-")
             lines.append(f'<a id="{anchor}"></a>')
             lines.append("")
-            # A heading is a name, not the finding's full text. It used to
-            # be the entire statement, truncated mid-word, and then repeated
-            # verbatim under Summary two lines later.
+            # A heading is a name, not the finding's full text, which would be
+            # truncated mid-word and repeated verbatim under Summary.
             from core.answer_synthesis import headline as _headline
             _stmt = (n.get("statement") or "").strip()
             # Same shape the model is asked for ("### F-NNN — short title");
@@ -1078,11 +1228,12 @@ def default_llm_section_generator(
         out = []
         for n in nodes:
             out.append({
-                k: n.get(k) for k in (
+                **{k: n.get(k) for k in (
                     "id", "finding_id", "kind", "confidence", "statement",
                     "reasoning", "host", "scope", "temporal_qualifier",
                     "tactics", "gaps",
-                )
+                )},
+                **{k: n[k] for k in _CITATION_FIELDS if n.get(k) is not None},
             })
         return out
 
@@ -1111,19 +1262,25 @@ def default_llm_section_generator(
             f"Claims:\n{json.dumps(claims, indent=2)}\n"
         )
     elif sid == "exec_summary":
+        stated = engagement_lines(context.get("engagement") or {})
         user = (
             f"Write the Executive Summary for MANAGEMENT: a brief, plain-language "
-            f"account of what happened, for readers who will not read the rest. "
-            f"Take the room a clear account needs — a few short paragraphs, never "
-            f"a forced summary: (1) what happened and "
-            f"when, in one or two sentences; (2) what was affected and how badly "
-            f"— systems by their role (the file server, the domain controller), "
-            f"data, accounts, people; (3) what is still uncertain and the one or "
-            f"two most important next steps. NO technical depth: no event ids, "
-            f"log names, tool names, file paths, hashes, SIDs, IP addresses, "
-            f"record numbers, extensions or F-id citations — all of that belongs "
-            f"in Detailed Findings. State confidence in words (confirmed, likely, "
-            f"unclear). Language: {lang}.\n\n"
+            f"account of what the findings establish, for readers who will not "
+            f"read the rest. Take the room a clear account needs — a few short "
+            f"paragraphs, never a forced summary: (1) what happened and when, in "
+            f"one or two sentences; (2) what it affected, as far as the findings "
+            f"say — systems by their role (the file server, the web server), "
+            f"data, accounts, people; (3) what is still uncertain. "
+            + f"The brief's frame, field by field; describe the case in it and in nothing more:\n{stated}\n"
+            + "How an account, a system or a person was used, by whom, and "
+            "whether it was compromised, misused or attacked is said only where "
+            "a Conclusion or Claim below states it; otherwise say that it is not "
+            "established. Write no next steps and no recommendations: they are "
+            "listed by code from the recorded response plan, under this summary. "
+            f"NO technical depth: no event ids, log names, tool names, file paths, "
+            f"hashes, SIDs, IP addresses, record numbers, extensions or F-id "
+            f"citations — all of that belongs in Detailed Findings. State "
+            f"confidence in words (confirmed, likely, unclear). Language: {lang}.\n\n"
             f"Conclusions:\n{json.dumps(conclusions, indent=2)}\n\n"
             f"Claims:\n{json.dumps(claims, indent=2)}\n\n"
             f"Conflicts:\n{json.dumps(context.get('conflicts'), indent=2)}\n"
@@ -1162,10 +1319,8 @@ def default_llm_section_generator(
     # provider than the rest of the run.
     provider = providers.resolve(
         providers.role_name("ATLAS_REPORT_PROVIDER", "ATLAS_AGENT_PROVIDER"))
-    if not provider.api_key:
-        key_var = ("LLMHUB_API_KEY"
-                   if provider.name == providers.DEFAULT_NAME
-                   else providers.var(provider.name, "API_KEY"))
+    if provider.key_missing:
+        key_var = providers.var(provider.name, "API_KEY")
         raise RuntimeError(
             f"{key_var} not set — cannot AI-generate report section")
     if not provider.model:
@@ -1181,7 +1336,9 @@ def default_llm_section_generator(
             api_key=getattr(provider, "api_key", ""),
             model=getattr(provider, "model", ""),
             timeout=120, provider=getattr(provider, "name", ""))
-        resp = client.chat(
+        from agent.llm import one_answer_chat
+        resp = one_answer_chat(
+            client,
             [{"role": "system", "content": system},
              {"role": "user", "content": user_text}],
             role=_REPORT_ROLE,
@@ -1317,6 +1474,62 @@ def regenerate_sections(
     }
 
 
+def report_inputs_at_render() -> bool:
+    """ATLAS_REPORT_INPUTS_AT_RENDER: the next steps and the indicator files
+    a report shows are prepared where every report is assembled
+    (core.report_assemble.assemble_client_report), so no writer path (the
+    projected report, the assembled one, the exit floor) renders without
+    them. Off: each writer path prepares them itself."""
+    from core.envfile import env_flag
+    return env_flag("ATLAS_REPORT_INPUTS_AT_RENDER", True)
+
+
+# Per case: the claim graph's fingerprint after the last preparation in this
+# process, and its result. A close-out renders several reports in a row; the
+# catalogue behind the indicator files costs seconds on a large case.
+_PREPARED: dict[str, tuple[tuple, dict]] = {}
+
+
+def _graph_fingerprint(case_dir) -> tuple:
+    from core.claim_graph import claim_graph_path
+    try:
+        st = claim_graph_path(case_dir).stat()
+        return (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return ()
+
+
+def prepare_report_inputs(case_dir: str | os.PathLike) -> dict:
+    """Record the next investigative steps that rest on what is still open,
+    then write the indicator files the Indicators section points at; both
+    are idempotent and local (no model call). Skipped when the claim graph
+    is unchanged since the last preparation in this process and its files
+    are still there. Returns the indicator files' result ({} when they could
+    not be written). Never raises."""
+    key = str(Path(case_dir).resolve())
+    prior = _PREPARED.get(key)
+    if prior and prior[0] and prior[0] == _graph_fingerprint(case_dir) \
+            and Path(str(prior[1].get("markdown") or "/nonexistent")).is_file():
+        return prior[1]
+    out = _prepare_report_inputs(case_dir)
+    _PREPARED[key] = (_graph_fingerprint(case_dir), out)
+    return out
+
+
+def _prepare_report_inputs(case_dir: str | os.PathLike) -> dict:
+    try:
+        from core.case_config import get_report_language
+        from core.recommendations import derive_next_steps
+        derive_next_steps(case_dir, get_report_language(case_dir))
+    except Exception:  # noqa: BLE001 - the report is written whatever the plan does
+        pass
+    try:
+        from core.ioc_catalog import write_indicator_files
+        return write_indicator_files(case_dir) or {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 def render_markdown(
     case_dir: str | os.PathLike,
     *,
@@ -1441,6 +1654,7 @@ def assemble_report(
         manifest["last_assembled_at"] = _utcnow()
         manifest["last_assembled_path"] = output_path
         manifest["last_assembled_format"] = fmt_n
+        manifest["class_state_digest"] = _class_digest(case_dir)
         save_manifest(case_dir, manifest)
         return {
             "success": True,
@@ -1450,19 +1664,10 @@ def assemble_report(
             "stale_sections": stale,
         }
 
-    # The next investigative steps rest on what is still open at report
-    # time; they are recorded before the plan is rendered.
-    try:
-        from core.case_config import get_report_language
-        from core.recommendations import derive_next_steps
-        derive_next_steps(case_dir, get_report_language(case_dir))
-    except Exception:  # noqa: BLE001 - the report is written whatever the plan does
-        pass
-    # The indicator files are a deliverable of their own; the report's
-    # Indicators section (core.report_assemble) points at them, so they are
-    # written before it is rendered.
-    from core.ioc_catalog import write_indicator_files
-    write_indicator_files(case_dir)
+    # The next steps and the indicator files are prepared before the report
+    # is rendered (by the assembler itself under the switch).
+    if not report_inputs_at_render():
+        prepare_report_inputs(case_dir)
     md_text = render_markdown(
         case_dir, report_scope=scope, report_host=host,
     )
@@ -1509,6 +1714,7 @@ def assemble_report(
     manifest["last_assembled_at"] = _utcnow()
     manifest["last_assembled_path"] = output_path
     manifest["last_assembled_format"] = fmt_n
+    manifest["class_state_digest"] = _class_digest(case_dir)
     save_manifest(case_dir, manifest)
 
     return {

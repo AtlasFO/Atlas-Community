@@ -1,40 +1,18 @@
 """
-Shared T-Systems LLM Hub configuration.
+Shared request helpers: URLs a base URL serves, and the reasoning effort
+each role asks for.
 
-One set of env vars powers every model surface in Atlas — the analyst agent
-(`agent/`), the adversarial reviewer (`REASON_BACKEND=llmhub`), and the DAIR
-phase director (`DAIR_BACKEND=llmhub`):
-
-    LLMHUB_BASE_URL   OpenAI-compatible base URL
-                      (default: https://llm-server.llmhub.t-systems.net/v2)
-    LLMHUB_API_KEY    API key from the LLM Hub portal
-                      (TSYSTEMS_API_KEY accepted as an alias)
-    LLMHUB_MODEL      model id — list available ids with `atlas models`
-
-Role-specific vars (REASON_URL/REASON_MODEL, DAIR_URL/DAIR_MODEL,
-ATLAS_AGENT_MODEL) always override these shared defaults, so different roles
-can still point at different models on the same hub.
+The Telekom LLM Hub itself is a provider profile (provider_profiles/
+llmhub.toml): its default base URL and model, and the variables it is
+configured through (LLMHUB_BASE_URL, LLMHUB_API_KEY with TSYSTEMS_API_KEY
+as an alias, LLMHUB_MODEL), are data there. Role-specific vars
+(REASON_URL/REASON_MODEL, DAIR_URL/DAIR_MODEL, ATLAS_AGENT_MODEL) always
+override a provider's own, so different roles can still point at different
+models on the same endpoint.
 """
 from __future__ import annotations
 
-import os
 import re
-
-DEFAULT_BASE_URL = "https://llm-server.llmhub.t-systems.net/v2"
-DEFAULT_MODEL = "GLM-5.2"
-
-
-def base_url() -> str:
-    return (os.environ.get("LLMHUB_BASE_URL") or DEFAULT_BASE_URL).rstrip("/")
-
-
-def api_key() -> str:
-    return (os.environ.get("LLMHUB_API_KEY")
-            or os.environ.get("TSYSTEMS_API_KEY") or "")
-
-
-def model() -> str:
-    return os.environ.get("LLMHUB_MODEL") or DEFAULT_MODEL
 
 
 # ── per-role reasoning effort ─────────────────────────────────────────────
@@ -87,7 +65,7 @@ def reasoning_effort_for(role: str) -> str | None:
 
 def _strip_generation_suffix(base: str) -> str:
     b = base.rstrip("/")
-    for suffix in ("/chat/completions", "/responses"):
+    for suffix in ("/chat/completions", "/responses", "/messages"):
         if b.endswith(suffix):
             return b[: -len(suffix)]
     return b
@@ -126,5 +104,46 @@ def build_responses_url(base: str) -> str:
     return _versioned_base(b) + "/responses"
 
 
+def build_messages_url(base: str) -> str:
+    """Resolve an Anthropic Messages URL from the same base."""
+    b = base.rstrip("/")
+    if b.endswith("/messages"):
+        return b
+    return _versioned_base(b) + "/messages"
+
+
 def build_models_url(base: str) -> str:
     return _versioned_base(base) + "/models"
+
+
+def get_models(base: str, headers: dict, *, paging: str = "none", timeout: float = 20.0):
+    """GET the model list with every page it has: (the last response, the
+    entries of the pages read; None when the first body holds no list).
+
+    paging "after_id" is the cursor style Anthropic's list uses: up to 1000
+    a page, the next one after the last id while has_more. An error status
+    ends the reading; the caller reads it off the response. A cursor seen
+    before ends it too, so a server that repeats one cannot loop."""
+    import httpx
+
+    url = build_models_url(base)
+    params = {"limit": 1000} if paging == "after_id" else None
+    entries: list | None = None
+    seen: set = set()
+    while True:
+        resp = httpx.get(url, headers=headers, timeout=timeout, **({"params": params} if params else {}))
+        if resp.status_code >= 400:
+            return resp, entries
+        try:
+            body = resp.json()
+        except ValueError:
+            return resp, entries
+        page = body.get("data") if isinstance(body, dict) else body
+        if not isinstance(page, list):
+            return resp, entries
+        entries = (entries or []) + [e for e in page if isinstance(e, dict)]
+        cursor = body.get("last_id") if isinstance(body, dict) else None
+        if paging != "after_id" or not body.get("has_more") or not cursor or cursor in seen:
+            return resp, entries
+        seen.add(cursor)
+        params = {"limit": 1000, "after_id": cursor}

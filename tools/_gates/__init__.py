@@ -19,7 +19,7 @@ from typing import Callable, Optional, Any
 
 from . import (
     mcp_routing, dair_required, lineage_required, lineage_relevance, contracts,
-    access_limitation_dedupe, universal_from_truncated, quoted_text_grounding,
+    access_limitation_dedupe, universal_from_truncated, quoted_text_grounding, hash_pair_grounding,
     instruction_text_grounding, tool_output_inventory, supersedes_target,
 )
 
@@ -64,6 +64,12 @@ class GateContext:
     # basis (pinned in test_universal_from_truncated_scope as a known gap);
     # judging it made the analyst unable to record a true finding at all.
     analyst_call_ids: list[int] = None  # type: ignore[assignment]
+
+    # The calls Atlas located beside the analyst's citation because the
+    # cited calls do not show the claim by their rows (tools._gates
+    # .citation_support.locate). Lineage for lineage_relevance and the
+    # report, never for the universal gate or indicator validation.
+    located_call_ids: list[int] = None  # type: ignore[assignment]
 
     # Agent-declared MITRE technique IDs for this finding (e.g. ["T1190",
     # "T1059.005"]). A structured channel so techniques the analyst mapped via
@@ -120,6 +126,8 @@ class GateContext:
             self.validated_techniques = []
         if self.input_call_ids is None:
             self.input_call_ids = []
+        if self.located_call_ids is None:
+            self.located_call_ids = []
         if self.mitre_techniques is None:
             self.mitre_techniques = []
         if self.reason_window is None:
@@ -143,6 +151,7 @@ GATES: list[tuple[str, GateFn]] = [
     ("universal_from_truncated", universal_from_truncated.check),
     ("quoted_text_grounding", quoted_text_grounding.check),
     ("instruction_text_grounding", instruction_text_grounding.check),
+    ("hash_pair_grounding", hash_pair_grounding.check),
     ("access_limitation_dedupe", access_limitation_dedupe.check),
     ("evidence_strength", contracts.evidence_strength),
     ("completeness", contracts.completeness),

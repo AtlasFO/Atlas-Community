@@ -13,6 +13,9 @@ from core.execution_log import ExecutionLog
 from core.run_state import OBJECTIVE_FILE, read_objective, record_objective
 
 
+pytestmark = pytest.mark.usefixtures("todays_report_check")
+
+
 @pytest.fixture
 def case(tmp_path):
     """A case folder with its trace under analysis/ and a met coverage floor."""

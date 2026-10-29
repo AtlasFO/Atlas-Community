@@ -396,7 +396,7 @@ def test_same_case_concept_excluded(brain, tmp_path):
     _origin_note(brain, "wiki/concepts/other.md",
                  "Other lesson CROSSCASEMARKER", "concept",
                  "tiering", "lesson from another case",
-                 origin_case_id="CFREDS-LEAK")
+                 origin_case_id="CASE-D-1")
     prompt = build_system_prompt(case)
     assert "SAMECASEMARKER" not in prompt
     assert "CROSSCASEMARKER" in prompt
@@ -468,7 +468,7 @@ def test_excluded_concepts_free_up_count_cap(brain, tmp_path):
                      origin_case_id="CASE-C-1",
                      extra='updated: "2026-07-10"')
     _origin_note(brain, "wiki/concepts/keep.md", "Keeper KEEPERMARKER",
-                 "concept", "tiering", "body", origin_case_id="CFREDS-LEAK",
+                 "concept", "tiering", "body", origin_case_id="CASE-D-1",
                  extra='updated: "2026-07-01"')
     prompt = build_system_prompt(case)
     assert "KEEPERMARKER" in prompt

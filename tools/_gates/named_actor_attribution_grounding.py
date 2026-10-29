@@ -87,7 +87,7 @@ def _name_shaped(token: str, desc: str) -> bool:
         return True
     # DOMAIN\Name: a NetBIOS-shaped domain, one backslash, the name, and no
     # further segment. A path segment after a lower-case directory
-    # ("Users\informant\Google Drive") is a folder, not a person.
+    # ("Users\jane.doe\Google Drive") is a folder, not a person.
     if re.search(rf"(?<![\w\\/])[A-Z][A-Z0-9-]{{1,15}}\\{t}\b(?![\\/])", desc):
         return True
     for m in re.finditer(rf"\b([A-Z][a-z]{{2,20}})\s+{t}\b|\b{t}\s+([A-Z][a-z]{{2,20}})\b", desc):
@@ -103,6 +103,29 @@ def _name_shaped(token: str, desc: str) -> bool:
 # placed", "subject activity").
 _SUBJECT_RE = re.compile(r"(?i:\bsubject(?:\s+is)?\s*:?\s+)([A-Z][a-z]{2,20})\b")
 _BY_ACTOR_RE = re.compile(r"\bby\s+([A-Z][a-z]{2,20})\b")
+
+# A maximal run of capitalised words, read whole: a name pair inside a longer
+# run ("... Control Manager") is the run's tail, not a person.
+_CAP_RUN_RE = re.compile(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b")
+# Where a run labels a log record instead of naming a person: in parentheses
+# right after a source noun ("System log (Service Control Manager 7045)"), or
+# followed by an event-id-shaped number that closes the parentheses (a number
+# in running prose, a count or a year, labels nothing). The nouns are how a record's source
+# is written in English and German prose, not knowledge of any case.
+_LABEL_OPEN_RE = re.compile(r"(?i)\b(?:log|logs|channel|provider|source|event|events|record|records|"
+                            r"protokoll|kanal|quelle|ereignis)\s*\(\s*$")
+_LABEL_ID_RE = re.compile(r"^\s*\d{3,5}\s*\)")
+
+
+def _label_words(text: str) -> set[str]:
+    """The words of the capitalised runs ``text`` writes as a record's
+    label (in parentheses after a source noun, or before an event id that
+    closes the parentheses)."""
+    out: set[str] = set()
+    for m in _CAP_RUN_RE.finditer(text):
+        if _LABEL_OPEN_RE.search(text[:m.start()]) or _LABEL_ID_RE.match(text[m.end():]):
+            out.update(m.group(0).split())
+    return out
 
 
 def _case_subject_names(ctx) -> set[str]:
@@ -127,16 +150,62 @@ def _case_subject_names(ctx) -> set[str]:
 def check(ctx) -> Optional[dict]:
     if ctx.tier not in {"CONFIRMED", "LIKELY"}:
         return None
+    named = actor_names(ctx)
+    if not named:
+        return None
 
+    from core.attribution_identity import identity_rows_on
+    if identity_rows_on():
+        # The person (with the account spellings of each full name that
+        # begins with the name) stands in a row of a cited call beside
+        # another term of the claim.
+        from core.attribution_identity import full_names, person_variants
+        from ._identity_rows import binding_rows, refusal
+        texts = [ctx.description or ""] + _finding_texts(ctx)
+        ident: set[str] = set()
+        bare = []
+        for name in named:
+            names = full_names(name, texts)
+            if not names:
+                bare.append(name)
+            for n in names or [name]:
+                ident |= set(person_variants(n))
+        ok, cited, others = binding_rows(ctx, ident)
+        if ok:
+            return None
+        hint = (f"No full name is written for {', '.join(sorted(bare))}: write the account the evidence "
+                "prints for the person." if bare else "")
+        return refusal(ctx, "named_actor_attribution_grounding", ", ".join(sorted(named)), "the act",
+                       cited, others, hint)
+
+    evidence = lineage_evidence_text(ctx)
+    if _SESSION_RE.search(evidence):
+        return None
+    return _refusal(ctx, named)
+
+
+def _finding_texts(ctx) -> list[str]:
+    """The recorded findings' statements and the case context the trace
+    holds: where a person's full name may be written."""
+    by_type = getattr(ctx.idx, "by_type", {}) or {}
+    out = [as_text(e.get("description")) for e in by_type.get("finding", [])]
+    for e in by_type.get("dair_call", []):
+        out.append(as_text((e.get("inputs") or {}).get("case_context")))
+    return [t for t in out if t]
+
+
+def actor_names(ctx) -> set[str]:
+    """The persons the finding names as the actor of its core act: the
+    named-actor shape of an attribution verdict (empty when it has none)."""
     desc = ctx.description or ""
     m = _CORE_ACT_RE.search(desc)
     if not m:
-        return None
+        return set()
 
     # If the description is already an account+copula binding, the sibling gate
     # principal_attribution_grounding owns it — don't double-fire.
     if _ACCOUNT_RE.search(desc) and _ATTRIB_RE.search(desc):
-        return None
+        return set()
 
     # Candidate actors: capitalized names in subject position (before the verb)
     # or "by <Name>", minus noise; PLUS the case subject (always in scope even
@@ -151,6 +220,8 @@ def check(ctx) -> Optional[dict]:
     if subj:
         candidates.add(subj.group(1))
     candidates -= _NAME_STOPS
+    # A run written as a record's label names its source, not an actor.
+    candidates -= _label_words(prefix)
     # Software the cited evidence names (an executable, a program directory)
     # is not an actor, however name-like the product reads.
     from ._match import labelled_quote_words, named_things_in_text, program_names_in_evidence
@@ -164,14 +235,10 @@ def check(ctx) -> Optional[dict]:
     candidates = {c for c in candidates if c.casefold() not in things}
     subjects = _case_subject_names(ctx)
     subject_in_desc = {s for s in subjects if re.search(rf"\b{re.escape(s)}\b", desc)}
-    named = candidates | subject_in_desc
-    if not named:
-        return None
+    return candidates | subject_in_desc
 
-    evidence = lineage_evidence_text(ctx)
-    if _SESSION_RE.search(evidence):
-        return None
 
+def _refusal(ctx, named: set[str]) -> dict:
     who = ", ".join(sorted(named))
     return {
         "success": False,

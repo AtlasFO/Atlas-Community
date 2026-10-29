@@ -13,6 +13,13 @@ import pytest
 from core import answer_synthesis as syn
 from core import providers
 
+@pytest.fixture(autouse=True)
+def _todays_answer_path(monkeypatch):
+    """This module pins the answer path before the composer: the scaffold,
+    the prose pass, the conclusion lead (ATLAS_ANSWER_COMPOSE=0)."""
+    monkeypatch.setenv("ATLAS_ANSWER_COMPOSE", "0")
+
+
 GAP_CLAIM = {
     "id": "C0006", "confidence": "SUSPECTED", "status": "new",
     "statement": ("Absence hypothesis (H0004) lists 5 evidence categories "
@@ -191,6 +198,7 @@ class _Provider:
     model = "a-model"
     base_url = "https://endpoint.example/v1"
     api_key = "k"
+    key_missing = False
 
 
 class _NoKeyProvider:
@@ -198,6 +206,7 @@ class _NoKeyProvider:
     model = ""
     base_url = ""
     api_key = ""
+    key_missing = True
 
 
 def _chat_body(content="An answer.", finish="stop"):
@@ -362,11 +371,11 @@ class TestFirstSentence:
     end of a sentence; a headline cut there loses the fact it carries."""
 
     def test_a_title_does_not_end_the_sentence(self):
-        s = ("Intercepted capture (e0030703.pcap in Mr. Evil profile): victim device "
-             "192.168.254.2. Captured session cookies.")
+        s = ("Intercepted capture (cap0042.pcap in Mr. Roe profile): victim device "
+             "10.0.0.254. Captured session cookies.")
         assert syn.first_sentence(s) == (
-            "Intercepted capture (e0030703.pcap in Mr. Evil profile): victim device 192.168.254.2.")
-        assert "e0030703.pcap" in syn._plain_headline(s)
+            "Intercepted capture (cap0042.pcap in Mr. Roe profile): victim device 10.0.0.254.")
+        assert "cap0042.pcap" in syn._plain_headline(s)
 
     def test_an_initial_and_an_abbreviation_stay_inside(self):
         assert syn.first_sentence("Files were copied by J. Smith at 10:00. Then deleted.") == \
@@ -381,8 +390,8 @@ class TestFirstSentence:
     def test_an_ordinary_stop_still_ends_the_sentence(self):
         assert syn.first_sentence("Dc1.exe was found in the bin. Next line.") == \
             "Dc1.exe was found in the bin."
-        assert syn.first_sentence("Logon from 192.168.1.111. Then a logoff.") == \
-            "Logon from 192.168.1.111."
+        assert syn.first_sentence("Logon from 10.0.0.111. Then a logoff.") == \
+            "Logon from 10.0.0.111."
 
 
 class TestCarries:
@@ -402,14 +411,14 @@ class TestCarries:
 
     def test_one_shared_common_word_is_coincidence_not_content(self):
         scaffold = dict(SCAFFOLD, points=[
-            "Security.evtx on PC spans 2015-03-22 14:33:53 to 2015-03-25 15:31:00 (1,193 records)",
+            "Security.evtx on PC spans 2031-03-22 09:10:05 to 2031-03-25 17:44:12 (1,407 records)",
             "Nine LNK files in the Recent folders reference the confidential documents"])
         question = "Timeline - solicitation, staging, exfiltration and cover-up, in local time and UTC"
         assert not syn._carries(
             "Indicators were found. No specific hosts, time spans or supporting findings are established.",
             scaffold, question)
         assert syn._carries(
-            "Security.evtx on the PC covers 2015-03-22 to 2015-03-25 and nine LNK files reference the documents.",
+            "Security.evtx on the PC covers 2031-03-22 to 2031-03-25 and nine LNK files reference the documents.",
             scaffold, question)
 
     def test_words_the_question_itself_uses_do_not_count(self):
@@ -447,16 +456,16 @@ class TestMalwareQuestion:
     Q = "Malware - whether the machine carries viruses."
 
     def test_a_detection_speaks_to_it(self):
-        assert syn.speaks_to(self.Q, "ClamAV detected Win.Trojan.Cain-9 in Abel.dll", strict=True)
+        assert syn.speaks_to(self.Q, "ClamAV detected Win.Trojan.Example-9 in helper.dll", strict=True)
 
     def test_findings_that_merely_name_files_or_tools_do_not(self):
-        for s in ("Identity binding: Look@LAN irunin.ini contains REGOWNER=Greg Schardt",
+        for s in ("Identity binding: NetScan scan.ini contains REGOWNER=John Roe",
                   "Hacking toolset on Desktop/Tools/: 12 shortcuts to attack tools",
-                  "Recycle bin contains 4 deleted files: Dc1.exe, Dc2.exe"):
+                  "Recycle bin contains 2 deleted files: Dc1.exe, Dc2.exe"):
             assert not syn.speaks_to(self.Q, s, strict=True), s
 
     def test_a_tool_question_is_still_answered_by_the_tools(self):
-        assert syn.speaks_to("Which tools were installed?", "Cain.exe and Ethereal installed", strict=True)
+        assert syn.speaks_to("Which tools were installed?", "nmap.exe and Wireshark installed", strict=True)
 
     def test_a_cached_reply_that_fails_the_checks_is_re_asked(self, llm_reply, tmp_path):
         fp = syn.scaffold_fingerprint(LEAD_SCAFFOLD)
@@ -505,16 +514,16 @@ class TestHeadlineKeepsTheFacts:
     only entity keeps its place; a sentence that fits is untouched."""
 
     def test_the_facts_after_a_label_colon_lead(self):
-        st = ("Network identity of the notebook during the Look@LAN setup: IP address "
-              "192.168.1.111, NIC MAC 0010a4933e09 (00-10-A4-93-3E-09) on the Xircom card")
+        st = ("Network identity of the notebook during the scanner setup: IP address "
+              "10.0.0.111, NIC MAC 00005e005301 (00-00-5E-00-53-01) on the PCMCIA card")
         h = syn.headline(st)
-        assert h.startswith("IP address 192.168.1.111") and "Look@LAN" not in h
+        assert h.startswith("IP address 10.0.0.111") and "scanner" not in h
 
     def test_a_citation_used_as_a_label_yields_to_the_facts(self):
-        st = ("rhino2.log (2004-04-28 21:08 UTC): HTTP download of rhino4.jpg from "
-              "137.30.120.40 by the suspect host completed in one session of the capture")
+        st = ("capture2.log (2031-04-28 21:08 UTC): HTTP download of photo4.jpg from "
+              "198.51.100.40 by the suspect host completed in one session of the capture")
         h = syn.headline(st)
-        assert h.startswith("HTTP download of rhino4.jpg") and "137.30.120.40" in h
+        assert h.startswith("HTTP download of photo4.jpg") and "198.51.100.40" in h
 
     def test_a_label_that_carries_the_only_entity_keeps_its_place(self):
         st = ("D:\\Finance share listing of the quarter: the folder holds the quarterly "
@@ -553,12 +562,12 @@ class TestRequestKindsAndUmbrellas:
 
 
 class TestVerdictByKind:
-    DIARY = {"id": "C1", "kind": "claim", "status": "new", "confidence": "CONFIRMED", "host": "RHINOUSB",
+    DIARY = {"id": "C1", "kind": "claim", "status": "new", "confidence": "CONFIRMED", "host": "USBKEY01",
              "statement": "Diary carved from the USB key contains the anti-forensics narrative."}
     FTP = {"id": "C2", "kind": "claim", "status": "new", "confidence": "LIKELY", "host": "",
-           "statement": "FTP upload of rhino images to the cook server appears in the network capture."}
+           "statement": "FTP upload of photo images to the remote server appears in the network capture."}
     SAME = {"id": "C3", "kind": "claim", "status": "new", "confidence": "CONFIRMED", "host": "",
-            "statement": ("rhino1.jpg carved from the USB key is identical to the rhino1.jpg uploaded in "
+            "statement": ("photo1.jpg carved from the USB key is identical to the photo1.jpg uploaded in "
                           "the FTP session of the network capture (same MD5 sum).")}
     Q_LINK = "Cross-evidence link — prove the connection between USB content and network traffic."
 
@@ -571,7 +580,7 @@ class TestVerdictByKind:
     def test_a_relation_request_is_led_by_a_finding_that_states_the_link(self):
         a = syn.synthesize_answer(self.Q_LINK, [self.DIARY, self.FTP, self.SAME])
         assert a["verdict"] == "Lead finding"
-        assert "identical" in a["lead"] and "rhino1.jpg" in a["lead"]
+        assert "identical" in a["lead"] and "photo1.jpg" in a["lead"]
 
     def test_a_conclusion_without_the_relation_does_not_answer_a_relation_request(self):
         concl = dict(self.DIARY, id="N1", kind="conclusion",
@@ -581,9 +590,9 @@ class TestVerdictByKind:
 
     def test_a_value_request_is_led_by_the_direct_finding_without_a_completeness_word(self):
         net = {"id": "C4", "kind": "claim", "status": "new", "confidence": "LIKELY", "host": "DC01",
-               "statement": "Network: delivery IP is 194.61.24.102 (external, attacker host 'kali'); C2 IP is 10.90.90.90"}
+               "statement": "Network: delivery IP is 203.0.113.44 (external, attacker host 'attacker-vm'); C2 IP is 10.0.0.90"}
         a = syn.synthesize_answer("Network — the delivery IP and the C2 IP.", [net])
-        assert a["verdict"] == "Lead finding" and "194.61.24.102" in a["lead"]
+        assert a["verdict"] == "Lead finding" and "203.0.113.44" in a["lead"]
         assert "Indicators found" not in a["text"] and "Answered" not in a["text"]
         other = {"id": "C5", "kind": "claim", "status": "new", "confidence": "LIKELY", "host": "DC01",
                  "statement": "A scheduled task named updater persisted the payload on the server."}
@@ -593,12 +602,12 @@ class TestVerdictByKind:
     def test_a_yes_no_detection_question_keeps_its_verdicts(self):
         a = syn.synthesize_answer("Was the domain controller compromised?", [{
             "id": "C6", "kind": "claim", "status": "new", "confidence": "CONFIRMED", "host": "DC01",
-            "statement": "DC01 was compromised through RDP brute force from 194.61.24.102."}])
+            "statement": "DC01 was compromised through RDP brute force from 203.0.113.44."}])
         assert a["verdict"] == "Indicators found" and a["text"].startswith("Yes")
 
 
 class TestAddsRelation:
-    HEADS = ["rhino1.jpg carved from the USB key", "rhino1.jpg uploaded in the FTP session"]
+    HEADS = ["photo1.jpg carved from the USB key", "photo1.jpg uploaded in the FTP session"]
 
     def test_a_relation_the_headlines_do_not_state_is_detected(self):
         assert syn._adds_relation("The two files are identical.", self.HEADS)
@@ -606,29 +615,29 @@ class TestAddsRelation:
         assert syn._adds_relation("Daher stammt die Datei vom USB-Stick.", self.HEADS)
 
     def test_facts_stated_plainly_pass(self):
-        assert not syn._adds_relation("rhino1.jpg was carved from the USB key and uploaded in the FTP session.", self.HEADS)
+        assert not syn._adds_relation("photo1.jpg was carved from the USB key and uploaded in the FTP session.", self.HEADS)
 
     def test_a_relation_a_headline_states_may_be_repeated(self):
-        heads = ["rhino1.jpg on the key is identical to the uploaded rhino1.jpg"]
-        assert not syn._adds_relation("The two copies of rhino1.jpg are identical.", heads)
+        heads = ["photo1.jpg on the key is identical to the uploaded photo1.jpg"]
+        assert not syn._adds_relation("The two copies of photo1.jpg are identical.", heads)
 
 
 class TestConclusionLead:
     GRAPH = {"nodes": {
         "C0001": {"id": "C0001", "kind": "claim", "status": "new", "confidence": "LIKELY",
-                  "host": "LONEWOLF", "statement": "Planning.docx and the presentation were opened from the Documents folder."},
+                  "host": "CORP-WS02", "statement": "Plans.docx and the presentation were opened from the Documents folder."},
         "N0001": {"id": "N0001", "kind": "conclusion", "status": "new", "confidence": "LIKELY",
-                  "host": "LONEWOLF",
-                  "statement": ("The planning material comprises Planning.docx, the manifesto and the presentation. "
+                  "host": "CORP-WS02",
+                  "statement": ("The planning material comprises Plans.docx, the outline and the presentation. "
                                 "They were edited over three days.")},
     }}
 
     def test_the_conclusions_first_sentence_is_the_lead(self):
-        task = {"id": "task-0001", "text": "Intent — locate the planning material (manifesto, plan documents, presentation).",
+        task = {"id": "task-0001", "text": "Intent — locate the planning material (outline, plan documents, presentation).",
                 "status": "answered", "related_claim_ids": ["C0001", "N0001"]}
         ans = syn.answer_for_task(task, self.GRAPH, {})
         assert ans["conclusion_lead"] is True
-        assert ans["lead"] == "The planning material comprises Planning.docx, the manifesto and the presentation."
+        assert ans["lead"] == "The planning material comprises Plans.docx, the outline and the presentation."
         assert ans["text"].startswith(ans["lead"])
 
 
@@ -636,9 +645,9 @@ class TestShortenedPoints:
     """A point the answer had to shorten says so with an ellipsis; a
     fragment never ends in a full stop that makes it read as whole."""
 
-    UPLOAD = ("FTP upload session in capture.pcap: 10.0.0.9 uploaded alpha1.jpg (65703 bytes), "
-              "alpha3.jpg (193797 bytes), and bundle.zip (230566 bytes) to 10.0.0.40:21 using "
-              "credentials USER jdoe / PASS example123 (2004-04-26 22:21-22:26 UTC)")
+    UPLOAD = ("FTP upload session in capture.pcap: 10.0.0.9 uploaded alpha1.jpg (41200 bytes), "
+              "alpha3.jpg (88310 bytes), and bundle.zip (129875 bytes) to 10.0.0.40:21 using "
+              "credentials USER jdoe / PASS example123 (2031-04-26 21:10-21:15 UTC)")
 
     def test_a_cut_point_ends_in_an_ellipsis(self):
         point = syn._plain_headline(self.UPLOAD)
@@ -666,8 +675,8 @@ class TestAnswerPointsKeepTheFacts:
     label), and a cut inside a parenthetical that only a label precedes
     keeps the parenthetical."""
 
-    LABELLED = ("Categories of the copied material: design documents (slide decks), progress "
-                "reports (text documents), proposals (text documents), and pricing decisions "
+    LABELLED = ("Categories of the copied material: layout drafts (slide decks), status "
+                "reports (text documents), offers (text documents), and budget plans "
                 "(spreadsheets). The four categories follow from the file names on the key.")
     PHASES = ("Phases: contact (an initial mail from third.party@example.com to "
               "jane.doe@example.com, recovered from the mailbox export of the workstation), "
@@ -675,7 +684,7 @@ class TestAnswerPointsKeepTheFacts:
 
     def test_a_labelled_lead_keeps_its_facts(self):
         point = syn._plain_headline(self.LABELLED)
-        assert point.startswith("Categories of the copied material: design documents")
+        assert point.startswith("Categories of the copied material: layout drafts")
         assert point.endswith("…")
 
     def test_the_heading_of_the_same_finding_is_still_its_label(self):
@@ -791,3 +800,203 @@ class TestTheOverviewLeadSaysWhereAndWhen:
                  _belief(2, "A scheduled task Updater was created.", host="CORP-WS02")]
         a = syn.synthesize_answer("What happened?", twins, chronological=True, max_points=4, language="de")
         assert a["text"].startswith("Auf CORP-WS01, CORP-WS02: ") and "created auf CORP-WS02" in a["text"]
+
+
+class TestTheBeliefThatAnswersThisQuestionLeadsIt:
+    """A word in most of the case's beliefs (the organisation's name, the
+    domain in every account name) says nothing about which belief answers
+    what; a conclusion leads the question it is about, not every question
+    it shares a word with, and relevance comes before confidence."""
+
+    QUESTIONS = (
+        "How did the attacker keep persistence on the EXAMPLECORP hosts?",
+        "Which EXAMPLECORP mail account sent the phishing mail?",
+        "Was EXAMPLECORP data uploaded to cloud storage?",
+        "Which network indicators did the attacker use against EXAMPLECORP?",
+        "Was the EXAMPLECORP domain administrator password reset?",
+    )
+
+    @staticmethod
+    def _graph():
+        def node(nid, kind, statement, confidence="LIKELY"):
+            return {"id": nid, "kind": kind, "status": "new", "statement": statement,
+                    "confidence": confidence, "host": ""}
+        nodes = [
+            node("K1", "conclusion", "EXAMPLECORP persistence: the attacker installed a scheduled task "
+                                     "Updater on CORP-WS01 running as examplecorp\\svc_backup.", "CONFIRMED"),
+            node("K2", "conclusion", "EXAMPLECORP phishing: the mail account examplecorp\\jane.doe sent the "
+                                     "phishing mail with the invoice attachment."),
+            node("K3", "conclusion", "EXAMPLECORP upload: 4.2 GB were uploaded from CORP-FS01 to cloud "
+                                     "storage at storage.example.com."),
+            node("K4", "conclusion", "EXAMPLECORP network indicators: the attacker used 203.0.113.7 and "
+                                     "c2.example.net."),
+            node("C1", "claim", "EXAMPLECORP mail gateway logs cover the whole incident window."),
+            node("C2", "claim", "The backup server CORP-BK01 shows no logon in the window."),
+        ]
+        return {"nodes": {n["id"]: n for n in nodes}}
+
+    def test_each_question_is_led_by_its_own_conclusion(self):
+        from core.answer_synthesis import answer_for_task
+        graph = self._graph()
+        for i, own in enumerate(("K1", "K2", "K3", "K4")):
+            # the strong persistence conclusion is linked to every question
+            # by word overlap, as record-time linking does
+            task = {"id": f"t{i}", "text": self.QUESTIONS[i], "status": "answered",
+                    "related_claim_ids": sorted({"K1", own})}
+            ans = answer_for_task(task, graph, questions=list(self.QUESTIONS))
+            first = graph["nodes"][own]["statement"].split(":")[0]
+            assert ans["conclusion_lead"] and ans["lead"].startswith(first), (self.QUESTIONS[i], ans["lead"])
+
+    def test_a_question_without_a_conclusion_of_its_own_is_not_led_by_one(self):
+        from core.answer_synthesis import answer_for_task
+        task = {"id": "t5", "text": self.QUESTIONS[4], "status": "open", "related_claim_ids": []}
+        ans = answer_for_task(task, self._graph(), questions=list(self.QUESTIONS))
+        assert not ans["conclusion_lead"]
+
+    def test_relevance_survives_the_cut_before_confidence(self):
+        from core.answer_synthesis import answer_for_task
+        nodes = {f"S{i}": {"id": f"S{i}", "kind": "claim", "status": "new", "confidence": "CONFIRMED",
+                           "statement": f"EXAMPLECORP share {i} was mapped on CORP-WS0{i % 9 + 1}.", "host": ""}
+                 for i in range(10)}
+        nodes["R"] = {"id": "R", "kind": "claim", "status": "new", "confidence": "LIKELY", "host": "",
+                      "statement": "examplecorp\\jane.doe ran the encryptor locker.exe on CORP-WS03."}
+        task = {"id": "t", "text": "Which EXAMPLECORP account ran the encryptor binary locker.exe?",
+                "status": "open", "related_claim_ids": []}
+        ans = answer_for_task(task, {"nodes": nodes})
+        assert ans["supporting"] and ans["supporting"][0]["id"] == "R"
+        assert "locker.exe" in ans["lead"]
+
+    def test_weights_in_tiny_pools(self):
+        from core.answer_synthesis import belief_weights
+        one = {"statement": "alpha bravo", "host": ""}
+        assert belief_weights([one]) is None
+        two = belief_weights([one, {"statement": "alpha charlie", "host": ""}])
+        assert two["alpha"] == 0.0 and two["bravo"] > 0 and two["charlie"] > 0
+        three = belief_weights([one, {"statement": "alpha charlie", "host": ""},
+                                {"statement": "delta charlie", "host": ""}])
+        assert three["alpha"] == 0.0 and three["charlie"] == 0.0 and three["delta"] > 0
+
+    def test_a_tie_between_two_questions_makes_the_conclusion_neither_ones(self):
+        from core.answer_synthesis import answers_this_question
+        stmt = "The attacker staged the archive on CORP-FS01."
+        q1, q2 = "Is CORP-FS01 affected?", "Was CORP-FS01 encrypted?"
+        assert not answers_this_question(q1, stmt, [q2]) and not answers_this_question(q2, stmt, [q1])
+        assert answers_this_question(q1, stmt, [])
+
+    def test_a_closed_question_takes_an_unlinked_conclusion_only_when_it_is_closer(self):
+        from core.answer_synthesis import answer_for_task
+        def node(nid, kind, statement):
+            return {"id": nid, "kind": kind, "status": "new", "confidence": "LIKELY",
+                    "statement": statement, "host": ""}
+        q = "Which accounts were used on CORP-WS01?"
+        graph = {"nodes": {
+            "C1": node("C1", "claim", "Accounts jane.doe and svc_backup were used on CORP-WS01 for RDP."),
+            "K1": node("K1", "conclusion", "CORP-WS01 was encrypted at 14:00 UTC."),
+            "C2": node("C2", "claim", "Another logon was seen on CORP-FS01."),
+        }}
+        task = {"id": "t", "text": q, "status": "answered", "related_claim_ids": ["C1"]}
+        # a conclusion that only names the question's host is no closer than the link
+        ans = answer_for_task(task, graph, questions=[q, "When was CORP-WS01 encrypted?"])
+        assert not ans["conclusion_lead"] and [n["id"] for n in ans["supporting"]] == ["C1"]
+        graph["nodes"]["C1"]["statement"] = "A logon session to CORP-WS01 was observed."
+        ans = answer_for_task(task, graph, questions=[q])
+        assert not ans["conclusion_lead"], "as close as the link is not closer"
+        graph["nodes"]["K2"] = node("K2", "conclusion",
+                                    "The accounts jane.doe and svc_backup were used on CORP-WS01.")
+        ans = answer_for_task(task, graph, questions=[q])
+        assert ans["conclusion_lead"] and ans["lead"].startswith("The accounts jane.doe")
+        assert {n["id"] for n in ans["supporting"]} == {"K2", "C1"}
+        assert task["status"] == "answered" and task["related_claim_ids"] == ["C1"]
+
+    def test_a_task_that_links_a_conclusion_of_its_own_takes_no_other(self):
+        from core.answer_synthesis import answer_for_task
+        def node(nid, kind, statement):
+            return {"id": nid, "kind": kind, "status": "new", "confidence": "LIKELY",
+                    "statement": statement, "host": ""}
+        q = "Which accounts were used on CORP-WS01?"
+        graph = {"nodes": {
+            "K1": node("K1", "conclusion", "Only jane.doe logged on to CORP-WS01."),
+            "K2": node("K2", "conclusion", "The accounts jane.doe and svc_backup were used on CORP-WS01."),
+        }}
+        task = {"id": "t", "text": q, "status": "partial", "related_claim_ids": ["K1"]}
+        ans = answer_for_task(task, graph, questions=[q])
+        assert [n["id"] for n in ans["supporting"]] == ["K1"] and ans["lead"].startswith("Only jane.doe")
+
+    def test_an_unlinked_conclusion_leads_where_the_links_do_not_answer(self):
+        from core.answer_synthesis import answer_for_task
+        def node(nid, kind, statement):
+            return {"id": nid, "kind": kind, "status": "new", "confidence": "LIKELY",
+                    "statement": statement, "host": ""}
+        q = "Which network indicators did the attacker use?"
+        graph = {"nodes": {
+            "C1": node("C1", "claim", "jane.doe logged on to CORP-WS02 interactively."),
+            "K1": node("K1", "conclusion", "The attacker used the network indicators 203.0.113.7 and "
+                                           "c2.example.net."),
+        }}
+        task = {"id": "t", "text": q, "status": "partial", "related_claim_ids": ["C1"]}
+        ans = answer_for_task(task, graph, questions=[q])
+        assert ans["has_answer"] and ans["conclusion_lead"] and "203.0.113.7" in ans["lead"]
+        assert task["related_claim_ids"] == ["C1"] and task["status"] == "partial"
+
+    def test_the_report_and_the_dashboard_give_the_same_answer(self):
+        from core.answer_synthesis import answer_for_task, competing_questions
+        from dashboard import read_models as rm
+        graph = self._graph()
+        tasks = [{"id": f"t{i}", "text": q, "status": "answered", "related_claim_ids": ["K1", f"K{i + 1}"]}
+                 for i, q in enumerate(self.QUESTIONS[:4])]
+        tasks.append({"id": "tx", "text": "Dropped question about the printer", "status": "dropped"})
+        questions = competing_questions(tasks)
+        assert "Dropped question about the printer" not in questions
+        for t in tasks[:4]:
+            report = answer_for_task(t, graph, {}, questions=questions)
+            dash = rm.derive_task_answer(t, graph, questions)
+            assert dash["summary"] == report["text"]
+
+    def test_a_linked_conclusion_answers_a_yes_no_question_no_other_question_claims(self):
+        from core.answer_synthesis import answer_for_task
+        graph = {"nodes": {"K1": {"id": "K1", "kind": "conclusion", "status": "new", "confidence": "LIKELY",
+                                  "host": "", "statement": "The attacker accessed CORP-FS01 over SMB."}}}
+        task = {"id": "t", "text": "Did the attacker access the file server CORP-FS01?",
+                "status": "answered", "related_claim_ids": ["K1"]}
+        ans = answer_for_task(task, graph, questions=[task["text"], "Was data taken?"])
+        assert ans["conclusion_lead"] and ans["lead"].startswith("The attacker accessed CORP-FS01")
+
+
+def test_the_answer_reads_the_part_bindings_before_the_task_links():
+    """A close that bound a part to the answering belief while the task's
+    links point at a belief about the excluded thing must still answer with
+    the bound belief: a question that excludes a thing shares its words
+    with the belief that names it."""
+    from core.answer_synthesis import answer_for_task
+
+    graph = {"nodes": {
+        "C0001": {"id": "C0001", "kind": "claim", "status": "new", "confidence": "LIKELY",
+                  "statement": "The nightly backup job on CORP-WS02 ran as scheduled at 02:00 UTC every day.",
+                  "host": "CORP-WS02"},
+        "C0002": {"id": "C0002", "kind": "claim", "status": "new", "confidence": "LIKELY",
+                  "statement": "The job SyncHelperUpdate on CORP-WS05 launched dropper.exe on 2031-02-04 10:00 UTC.",
+                  "host": "CORP-WS05"},
+    }}
+    task = {"id": "task-0001", "status": "answered",
+            "text": "Which scheduled job other than the nightly backup launched the dropper?",
+            "related_claim_ids": ["C0001"],
+            "parts": [{"id": "p1", "text": "which scheduled job other than the nightly backup launched the dropper",
+                       "type": "list", "kind": "value", "status": "answered", "claim_ids": ["C0002"],
+                       "closed_by": "analyst"}]}
+    out = answer_for_task(task, graph)
+    assert out["has_answer"]
+    assert out["supporting"][0]["id"] == "C0002"
+    assert out["text"].lower().startswith("job synchelperupdate on corp-ws05")
+
+
+def test_the_persistence_vocabulary_needs_the_word_service():
+    """``service`` counts as a whole word or as the ServiceDll value, never
+    inside another name; ``dienst`` never inside the weekday."""
+    from core.answer_synthesis import speaks_to
+
+    question = "What persistence mechanism did the implant set up?"
+    assert not speaks_to(question, "SyncServiceHost.exe was copied to C:\\ProgramData\\SyncHelper\\ on CORP-WS03.")
+    assert not speaks_to(question, "Am Dienstag wurde die Datei nach CORP-WS03 kopiert.")
+    assert speaks_to(question, "A service named SyncHelper was created on CORP-WS03 to start SyncServiceHost.exe at boot.")
+    assert speaks_to(question, "The ServiceDll value of the netsvcs group on CORP-WS03 points at a dropped DLL.")
+    assert speaks_to(question, "Der Dienst SyncHelper wurde auf CORP-WS03 angelegt.")

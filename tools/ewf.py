@@ -115,7 +115,7 @@ def _mount_fat_volume(ewf_device: str, mount_point: str, offset_bytes: int, fs: 
         mp, src, offset = existing
         if (os.path.realpath(mp) == os.path.realpath(mount_point)
                 and (offset is None or offset == offset_bytes)):
-            return {"success": True, "reused": True, "mount_point": mp,
+            return {"success": True, "reused": True, "offset_verified": offset is not None, "mount_point": mp,
                     "stdout": f"{ewf_device} is already mounted read-only at {mp}; reusing it"}
     err = ensure_mount_point(mount_point)
     if err:
@@ -237,6 +237,7 @@ def mount_ntfs(
             return {
                 "success": True,
                 "reused": True,
+                "offset_verified": offset is not None,
                 "mount_point": mp,
                 "stdout": (
                     f"{ewf_device} is already mounted read-only at {mp} "
@@ -259,6 +260,7 @@ def mount_ntfs(
         return {
             "success": True,
             "reused": True,
+            "offset_verified": offset is not None,
             "mount_point": mp,
             "warning": "reused_foreign_mount_point",
             "stdout": (
@@ -329,7 +331,9 @@ def mount_full_image(image_e01: str, ewf_mount_point: str, fs_mount_point: str) 
         whole = _volume_type_at(ewf_device, 0)
         if whole:
             best = (0, 0, 512, whole)
-    if best is None and not mmls_result["success"]:
+    # mmls's own error is the answer; a silent exit 1 (no volume system, or
+    # nothing it reads) says nothing, so the guidance below speaks instead.
+    if best is None and not mmls_result["success"] and str(mmls_result.get("stderr") or "").strip():
         return mmls_result
     if best is None:
         return {
@@ -357,6 +361,14 @@ def mount_full_image(image_e01: str, ewf_mount_point: str, fs_mount_point: str) 
         mount_result = _mount_fat_volume(ewf_device, fs_mount_point, offset_bytes, fs)
     mount_result["fs_type"] = fs
     mount_result["volume_offset_bytes"] = offset_bytes
+    # The volume's start in the partition table's sectors: the contents
+    # index's volume number for the same volume (core.evidence_identity).
+    # Only a volume the mount proved: one mounted now, or a reused mount of
+    # this case whose offset was checked. A reused fuse mount (offset not
+    # readable) or another case's mount leaves it unknown.
+    proved = not mount_result.get("reused") or (
+        bool(mount_result.get("offset_verified")) and not mount_result.get("warning"))
+    mount_result["volume_offset_sectors"] = offset_sectors if proved else None
     mount_result["ewf_device"] = ewf_device
     if ewf_result.get("reused"):
         mount_result["ewf_reused"] = True

@@ -90,8 +90,25 @@ class TestContact:
         _probe(case, "yara_scan", {"path": "evidence/kape"})
         assert all(i["status"] == "unseen" for i in _items(case).values())
 
-    def test_a_job_start_reads_the_evidence_it_names(self, case):
-        _probe(case, "job_job_start_bulk_extractor", {"image_path": "evidence/split/image.001"})
+    def test_a_job_start_reads_nothing_until_its_job_has(self, case, monkeypatch):
+        """The start's result stands for its trace record (tools.jobs stamps
+        it): the job's outcome is the read, not the start's success."""
+        from core.execution_log import ExecutionLog
+        (case / "analysis").mkdir(exist_ok=True)
+        log = ExecutionLog()
+        log.configure("CASE-A", str(case / "analysis" / "trace.json"), save_session=False)
+        monkeypatch.setattr("core.execution_log.log", log)
+        job = "20310301T081200_bulk_extractor_7_0"
+        cid = log.record_tool_call(f"[background job {job}] bulk_extractor -o analysis/be evidence/split/image.001",
+                                   True, False, 0, 0)
+        args, result = {"image_path": "evidence/split/image.001"}, json.dumps({"_atlas_call_id": cid, "success": True})
+        _probe(case, "job_job_start_bulk_extractor", args, result=result)
+        assert _items(case)["evidence/split/image.001"]["status"] == "unseen"        # no record: still running
+        jd = case / "analysis" / "jobs" / job
+        jd.mkdir(parents=True)
+        (jd / "meta.json").write_text(json.dumps({"job_id": job, "exit_code": 0}), encoding="utf-8")
+        (jd / "exit_code").write_text("0", encoding="utf-8")
+        _probe(case, "job_job_start_bulk_extractor", args, result=result)
         assert _items(case)["evidence/split/image.001"]["status"] == "examined"
 
     def test_a_failed_call_credits_nothing(self, case):
@@ -130,9 +147,12 @@ class TestBlocked:
         _probe(case, "coverage_mark_blocked", {"path": "evidence/traffic.pcap"})
         assert _items(case)["evidence/traffic.pcap"]["status"] == "blocked"
         _probe(case, "table_table_query", {"path": "evidence/logs/app.log.001"})
-        trace = [{"type": "tool_call", "cmd": "<py>:x evidence/logs"}]
+        # Read is the trace's answer: the call that read a file of the folder.
+        trace = [{"type": "tool_call", "call_id": 7, "cmd": "<py>:table_table_query", "success": True,
+                  "args": json.dumps({"path": "evidence/logs/app.log.001"})},
+                 {"type": "tool_call", "cmd": "<py>:x evidence/logs", "success": False, "failure_class": "tool_error"}]
         r = cl.mark_unit_blocked(case, "evidence/logs", reason="unreadable encoding throughout", trace_entries=trace)
-        assert not r["success"] and "was read" in r["error"]
+        assert not r["success"] and "was read by call 7" in r["error"]
 
     def test_a_blocked_unit_blocks_its_item(self, case):
         trace = [{"type": "tool_call", "cmd": "fls evidence/disk.E01", "mcp_tool": "tsk_tsk_fls",
@@ -142,7 +162,8 @@ class TestBlocked:
 
 
 class TestReaders:
-    def test_report_table_and_gaps_in_both_languages(self, case):
+    def test_report_table_and_gaps_in_both_languages(self, case, monkeypatch):
+        monkeypatch.setenv("ATLAS_COVERAGE_HONESTY", "0")  # the table before listed and read were apart
         _probe(case, "net_tshark", {"pcap_path": "evidence/traffic.pcap"})
         findings = [{"finding_id": "F-001", "input_call_ids": [7]}, {"finding_id": "F-002", "input_call_ids": [9]}]
         en = ei.report_lines(case, findings, "en")

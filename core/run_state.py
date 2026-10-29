@@ -23,12 +23,18 @@ from pathlib import Path
 # writes none, reads the last run's record only while that trace is the
 # one it has open.
 OBJECTIVE_FILE = "run_objective.json"
+
+# The names the run's trace and the agent's transcript carry under
+# ``analysis/``: ``<case>_trace.json`` with its line mirror
+# ``<case>_trace.jsonl``, and ``agent_transcript_<stamp>.jsonl``.
+TRACE_SUFFIXES = ("_trace.json", "_trace.jsonl")
+TRANSCRIPT_PREFIX = "agent_transcript_"
 OBJECTIVE_SOURCES = ("question", "tasks", "default", "rerun")
 
 # The endings a run records for itself. "starting" is the marker the clear
 # leaves behind for the run about to begin and is not an ending.
 TERMINAL_STOP_REASONS = frozenset({
-    "finished", "quiet", "stall", "keyboard_interrupt", "llm_error",
+    "finished", "quiet", "stall", "keyboard_interrupt", "stop_requested", "llm_error",
 })
 
 
@@ -60,8 +66,8 @@ def prior_process_artifacts_present(case_dir: str | os.PathLike) -> bool:
     try:
         for p in analysis.iterdir():
             name = p.name.lower()
-            if p.is_file() and (name.endswith(("_trace.json", "_trace.jsonl"))
-                                or name.startswith("agent_transcript_")):
+            if p.is_file() and (name.endswith(TRACE_SUFFIXES)
+                                or name.startswith(TRANSCRIPT_PREFIX)):
                 return True
     except OSError:
         return False
@@ -185,7 +191,7 @@ def transcript_fresh(case_dir: str | os.PathLike, window_seconds: int) -> bool:
     newest = None
     try:
         for name in os.listdir(analysis):
-            if name.startswith("agent_transcript_") and name.endswith(".jsonl"):
+            if name.startswith(TRANSCRIPT_PREFIX) and name.endswith(".jsonl"):
                 try:
                     m = os.path.getmtime(os.path.join(analysis, name))
                 except OSError:
@@ -207,9 +213,9 @@ def agent_busy(case_dir: str | os.PathLike, *, window_seconds: int = 90) -> bool
 def active_runs(cases_root: str) -> list[dict]:
     """Every case under ``cases_root`` with a run in progress right now.
 
-    The shell's "Atlas working" indicator used to ask the per-case questions
-    projection for the *selected* case only, so a run started in another case
-    -- or any run at all, before a case was picked -- left the header saying
+    The shell's "Atlas working" indicator needs more than the per-case
+    questions projection of the *selected* case: a run started in another case
+    -- or any run at all, before a case was picked -- would leave the header saying
     "idle". This is the case-wide answer, kept deliberately cheap because the
     shell polls it on a timer: per case it reads one small JSON and, only as
     the fallback path, lists one directory. It does not touch traces.

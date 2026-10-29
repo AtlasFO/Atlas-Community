@@ -193,9 +193,12 @@ def build_journal_from_plane_a(plane_a: dict[str, Any]) -> list[dict[str, Any]]:
 
     inv = plane_a.get("invalidation") or {}
     ctx_marked = set(inv.get("context_marked") or [])
+    cov_marked = set(inv.get("coverage_marked") or [])
     for nid in inv.get("marked") or []:
         if nid in ctx_marked:
             why = "analyst context changed interpretation"
+        elif nid in cov_marked:
+            why = "coverage corrected by the recount from the trace"
         else:
             why = "dependent evidence added/changed/removed"
         entries.append(journal_entry(

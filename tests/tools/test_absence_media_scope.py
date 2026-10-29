@@ -1,7 +1,7 @@
 """An absence asserted of an opened image is not blocked because another
 image in the case is still waiting to be opened. The media check reads what
 the claim, its evidence and its cited calls name; a claim naming no medium
-is judged against every pending one, as before."""
+is judged against every pending one."""
 from __future__ import annotations
 
 import json
@@ -18,7 +18,7 @@ from tools._gates import negative_completeness as nc
 @pytest.fixture
 def case(tmp_path):
     (tmp_path / ".atlas").mkdir()
-    for rel in ("evidence/PC/host_pc.E01", "evidence/RM3/host_rm#3_type1.iso"):
+    for rel in ("evidence/PC/host_pc.E01", "evidence/DVD2/host_dvd#2_part1.iso"):
         f = tmp_path / rel
         f.parent.mkdir(parents=True, exist_ok=True)
         f.write_bytes(b"\0" * 16)
@@ -28,8 +28,8 @@ def case(tmp_path):
          "stem": "host_pc", "access_gated": True, "media_role": "disk", "image_type": "ewf",
          "status": "mounted",
          "mount_result": {"success": True, "mount_point": str(tmp_path / "mnt/host_pc/fs")}},
-        {"path": str(tmp_path / "evidence/RM3/host_rm#3_type1.iso"),
-         "basename": "host_rm#3_type1.iso", "stem": "host_rm#3_type1", "access_gated": True,
+        {"path": str(tmp_path / "evidence/DVD2/host_dvd#2_part1.iso"),
+         "basename": "host_dvd#2_part1.iso", "stem": "host_dvd#2_part1", "access_gated": True,
          "media_role": "disk", "image_type": "iso", "action": "plan_only"},
     ]}
     (tmp_path / ".atlas" / "mount_plan.json").write_text(json.dumps(plan), encoding="utf-8")
@@ -41,7 +41,7 @@ def case(tmp_path):
 
 def test_the_case_has_one_opened_and_one_pending_medium(case):
     stages = {e["basename"]: e["access_stage"] for e in ea.media_entries(case)}
-    assert stages == {"host_pc.E01": "opened", "host_rm#3_type1.iso": "planned"}
+    assert stages == {"host_pc.E01": "opened", "host_dvd#2_part1.iso": "planned"}
 
 
 def test_an_absence_about_the_opened_image_is_not_blocked(case):
@@ -52,8 +52,8 @@ def test_an_absence_about_the_opened_image_is_not_blocked(case):
 
 def test_an_absence_about_the_pending_image_is_blocked_and_names_it(case):
     reason = ea.absence_escape_blocked_by_access(
-        case, about_text="no documents are present on the RM#3 disc")
-    assert reason and "rm#3" in reason
+        case, about_text="no documents are present on the DVD#2 disc")
+    assert reason and "dvd#2" in reason
 
 
 def test_an_absence_naming_no_medium_is_judged_against_every_pending_one(case):
@@ -93,8 +93,43 @@ def test_the_gate_reads_the_cited_calls_to_scope_the_claim(case):
 
 def test_the_gate_still_blocks_an_absence_about_the_unopened_disc(case):
     strings = {"type": "tool_call", "call_id": 31, "success": True,
-               "cmd": "strings -a " + str(case / "evidence/RM3/host_rm#3_type1.iso"),
+               "cmd": "strings -a " + str(case / "evidence/DVD2/host_dvd#2_part1.iso"),
                "stdout_excerpt": "ISO9660"}
-    ctx = _ctx("No Prefetch or event log is present on the RM#3 disc image", {31: strings}, case)
+    ctx = _ctx("No Prefetch or event log is present on the DVD#2 disc image", {31: strings}, case)
     out = nc._absence_before_container_opened(ctx)
     assert out is not None and out["detail_gate"] == "access_not_opened"
+
+
+@pytest.fixture
+def shared_dir_case(tmp_path):
+    """Two images collected under one operator directory: the directory
+    names neither of them."""
+    (tmp_path / ".atlas").mkdir()
+    for rel in ("evidence/CORP/ws01.raw", "evidence/CORP/ws02.raw"):
+        f = tmp_path / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_bytes(b"\0" * 16)
+    plan = {"schema_version": "1.0", "case_id": "T", "images": [
+        {"path": str(tmp_path / "evidence/CORP/ws01.raw"), "basename": "ws01.raw", "stem": "ws01",
+         "access_gated": True, "media_role": "disk", "image_type": "raw", "action": "plan_only"},
+        {"path": str(tmp_path / "evidence/CORP/ws02.raw"), "basename": "ws02.raw", "stem": "ws02",
+         "access_gated": True, "media_role": "disk", "image_type": "raw", "status": "opened"},
+    ]}
+    (tmp_path / ".atlas" / "mount_plan.json").write_text(json.dumps(plan), encoding="utf-8")
+    (tmp_path / ".atlas" / "evidence_profile.json").write_text(json.dumps(
+        {"schema_version": "1.0", "present_classes": ["disk"], "absent_classes": [],
+         "files": [], "counts": {"disk": 2}}), encoding="utf-8")
+    return tmp_path
+
+
+def test_a_directory_shared_by_two_images_names_neither(shared_dir_case):
+    about = "No log clearing on the CORP workstation ws02."
+    assert ea.absence_escape_blocked_by_access(shared_dir_case, about_text=about) is None
+    reason = ea.absence_escape_blocked_by_access(shared_dir_case, about_text="No log clearing on ws01.")
+    assert reason and "ws01" in reason
+
+
+def test_switch_off_keeps_the_shared_directory_as_a_label(shared_dir_case, monkeypatch):
+    monkeypatch.setenv("ATLAS_ABSENCE_GATE_V2", "0")
+    about = "No log clearing on the CORP workstation ws02."
+    assert ea.absence_escape_blocked_by_access(shared_dir_case, about_text=about)

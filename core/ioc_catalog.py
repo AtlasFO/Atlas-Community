@@ -36,7 +36,7 @@ import re
 import datetime as _dt
 from pathlib import Path
 from dataclasses import dataclass, field
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from typing import Any, Optional
 
 SCHEMA_VERSION = "1.0"
@@ -52,10 +52,11 @@ PATTERN = "pattern"
 AFFECTED_ASSET = "affected_asset"
 SUBJECT_IDENTIFIER = "subject_identifier"
 THIRD_PARTY = "third_party"
+UNDETERMINED = "undetermined"
 
 _ROLE_ORDER = [ATTACKER_TOOL, ATTACKER_INFRA, ATTACKER_HOST, ATTACKER_ACCOUNT,
                ATTACKER_FILE, PATTERN, COMPROMISED_HOST, SUBJECT_IDENTIFIER,
-               THIRD_PARTY, AFFECTED_ASSET]
+               THIRD_PARTY, UNDETERMINED, AFFECTED_ASSET]
 
 _CONFIDENCE_RANK = {"CONFIRMED": 4, "LIKELY": 3, "SUSPECTED": 2,
                     "UNCONFIRMED": 1}
@@ -83,7 +84,7 @@ _ATTACK_ACTION_RE = re.compile(
 )
 # Characterisation of the *artifact*: this thing is bad.
 #
-# "attacker", "intrusion" and "compromised" used to live here, which made
+# "attacker", "intrusion" and "compromised" are not listed here: they would make
 # every sentence in an intrusion report read as malicious characterisation
 # of everything it named — "tools executed by the attacker: taskmgr.exe"
 # then promoted taskmgr.exe on the strength of the word "attacker". Framing
@@ -126,7 +127,7 @@ _DISMISSAL_NEGATOR = re.compile(
     r"(?:(?:a|an|the|any)\s+)?(?:(?!(?:and|but|or)\b)[\w/-]+\s+){0,3}$")
 # An attack word the sentence negates ("not network exfiltration channels",
 # "no C2 traffic") describes no attack: the analyst's clearing of a value
-# used to attribute it on the strength of the very word being denied. Read
+# must not attribute it on the strength of the very word being denied. Read
 # narrowly, a negator within two words that stops at "and" and "but" ("was
 # not blocked and exfiltrated data to X" asserts the exfiltration; "did not
 # alert or exfiltrate" denies both): a missed negator on an attack word
@@ -355,6 +356,12 @@ def _host_of(value: str) -> str:
     return v.split(":")[0].rstrip(".")
 
 
+def _carries(name: str, term: str) -> bool:
+    """A file name carries a tool term between non-letters ("psexec" in
+    "psexec64.exe"; "net" is not in "magnet.exe")."""
+    return re.search(r"(?<![a-z])" + re.escape(term) + r"(?![a-z])", name) is not None
+
+
 def _has_term(term: str, low: str) -> bool:
     """A lexicon term matches whole tokens only: ``mimikatz`` is in
     ``mimikatz.exe`` and not in ``beaconing``."""
@@ -382,6 +389,9 @@ _NOT_A_HOST = frozenset({
     "users", "all", "windows", "shares", "share", "programdata", "temp",
     "downloads", "desktop", "documents", "public", "system32", "appdata",
     "program files", "winevt", "logs", "config",
+    # Windows' fixed pseudo-domain of its built-in groups (S-1-5-32):
+    # universal OS naming, never a machine or an account's domain.
+    "builtin",
 })
 # host:port as written in prose ("connects to relay.example.com:443").
 _DOMAIN_RE = re.compile(
@@ -443,6 +453,19 @@ class Ioc:
     last_seen: str = ""
     compromised: bool = False
     note: str = ""
+    # Where a tool output that read evidence shows the value (typed rows,
+    # and named values once refresh_sightings checked them), None when not
+    # yet checked; the standing they give; the published shared-
+    # infrastructure mark; how the role reads; the role the prose wording
+    # suggested (internal); who named a value no typed row carries.
+    sightings: list[dict] | None = None
+    standing: str = ""
+    mark: str = ""
+    mark_kind: str = ""
+    role_label: str = ""
+    prose_role: str = ""
+    named_by: list[str] = field(default_factory=list)
+    search_status: str = ""
 
     def key(self) -> tuple[str, str]:
         return (self.category, self.value.lower())
@@ -457,6 +480,10 @@ class Ioc:
             "side": self.side, "use": list(self.use), "source": self.source,
             "first_seen": self.first_seen, "last_seen": self.last_seen,
             "compromised": self.compromised, "note": self.note,
+            "sightings": list(self.sightings or []), "standing": self.standing,
+            "mark": self.mark, "mark_kind": self.mark_kind, "role_label": self.role_label,
+            "prose_role": self.prose_role,
+            "named_by": list(self.named_by), "search_status": self.search_status,
         }
 
 
@@ -481,10 +508,21 @@ def _fold(target: Ioc, ioc: Ioc) -> None:
         target.role = ioc.role
     if ioc.source == "typed" and target.source != "typed":
         target.source, target.side, target.use = ioc.source, ioc.side, list(ioc.use)
+    elif ioc.source == "typed" and target.side == UNDETERMINED and ioc.side not in ("", UNDETERMINED):
+        # A side one finding's basis states is the row's, whichever belief
+        # came first (the neutral frame leaves the others undetermined).
+        target.side, target.use, target.role = ioc.side, list(ioc.use), ioc.role
     target.first_seen = min(filter(None, (target.first_seen, ioc.first_seen)), default=target.first_seen)
     target.last_seen = max(filter(None, (target.last_seen, ioc.last_seen)), default=target.last_seen)
     target.compromised = target.compromised or ioc.compromised
     target.note = target.note or ioc.note
+    if ioc.sightings is not None:
+        have = {(x.get("call"), x.get("host")) for x in target.sightings or []}
+        target.sightings = list(target.sightings or []) + [
+            x for x in ioc.sightings if (x.get("call"), x.get("host")) not in have]
+    for n in ioc.named_by:
+        if n not in target.named_by:
+            target.named_by.append(n)
 
 
 _EXEC_TYPES = frozenset({"file", "path", "hash"})
@@ -508,6 +546,8 @@ def _typed_role(side: str, kind: str, value: str, named: bool) -> str:
         return COMPROMISED_HOST if kind == "host" else AFFECTED_ASSET
     if side == "subject":
         return SUBJECT_IDENTIFIER
+    if side == UNDETERMINED:
+        return UNDETERMINED
     return THIRD_PARTY
 
 
@@ -723,10 +763,9 @@ def _explain(value: str, statement: str, role: str, why: list[str],
     """A short, always-grammatical reason this indicator is listed.
 
     Built from what the belief says *happened* plus the indicator's role.
-    An earlier version sliced the sentence and removed the indicator from
-    it, which produced fragments like "(imagePath)" and unbalanced
-    parentheses — the value is already on the line, so the reader needs the
-    meaning, not the leftovers.
+    Slicing the sentence and removing the indicator from it would produce
+    fragments like "(imagePath)" and unbalanced parentheses — the value is
+    already on the line, so the reader needs the meaning, not the leftovers.
     """
     text = _normalize_statement(statement)
     context = _window(text, value, width=_ATTRIBUTION_RADIUS)
@@ -857,6 +896,16 @@ def _confidence_for(node_conf: Any) -> str:
 
 # ── candidate harvesting ─────────────────────────────────────────────────
 
+def statement_candidates(statement: str, tool_terms: Iterable[str] = ()) -> list[tuple[str, str]]:
+    """The (category, value) pairs one belief's statement names: the public
+    name of the harvester the catalogue builds its prose rows from, for the
+    readers that need a statement's names (the answer check's lexicon of
+    accounts and hosts). ``tool_terms`` are the tool names to read as files
+    when written as words (the catalogue passes the Brain's adversary tool
+    terms; a caller without them passes none)."""
+    return _candidates(statement, set(tool_terms))
+
+
 def _candidates(statement: str, tool_terms: set[str]) -> list[tuple[str, str]]:
     """(category, value) pairs mentioned by one belief."""
     statement = _normalize_statement(statement)
@@ -902,12 +951,36 @@ def _candidates(statement: str, tool_terms: set[str]) -> list[tuple[str, str]]:
                 elif kind not in ("domain", "internal"):
                     return
         elif cat == "email":
-            if _dotted_kind(low.rsplit("@", 1)[-1]) != "domain":
+            # The part after "@" is a host, judged as a URL's host is and never
+            # by the file-name rules (pl, sh, so, md and zip are extensions and
+            # delegated domains alike); a special-use host stays out.
+            host = low.rsplit("@", 1)[-1]
+            if not _url_host_ok(host) or _SPECIAL_USE_RE.search(host):
                 return
         k = (cat, low)
         if k not in seen:
             seen.add(k)
             out.append((cat, val))
+
+    # A multi-word group name written DOMAIN\Word Word ("CORP\Remote
+    # Management Users"): the account reader stops at the space and would
+    # make its first word a principal. Skipped only when every occurrence is
+    # a title-case word with no digit, dot, underscore or $ whose run of
+    # capitalised words after it ends in a plural shape (a final s, not ss:
+    # Users, Operators, Admins); a logon name before "Logon Type" or "RDP"
+    # stays, and in doubt the row stays. Ceiling: a title-case name before
+    # a capitalised word in s, a verb or a plural noun ("CORP\Jdoe
+    # Connects ...", "CORP\Administrator Logon Events"), is missed.
+    from core.entities import _ACCOUNT_RE
+    group_shaped: dict[str, bool] = {}
+    for m in _ACCOUNT_RE.finditer(statement):
+        word = m.group(2)
+        run = re.match(r"(?:\s+[A-Z][A-Za-z]*)+", statement[m.end():])
+        last = run.group(0).split()[-1] if run else ""
+        shaped = (word.isalpha() and word[:1].isupper() and word[1:].islower()
+                  and last.endswith("s") and not last.endswith("ss"))
+        key = f"{m.group(1).lower()}/{word.lower()}"
+        group_shaped[key] = group_shaped.get(key, True) and shaped
 
     try:
         from core.entities import extract
@@ -923,7 +996,7 @@ def _candidates(statement: str, tool_terms: set[str]) -> list[tuple[str, str]]:
                 # DOMAIN\user only when the left part could be a domain: a
                 # directory name in that position is a path, not a principal.
                 dom = value.split("/")[0].lower() if "/" in value else ""
-                if dom and (dom in _NOT_A_HOST or dom in _NOT_A_PRINCIPAL):
+                if dom and (dom in _NOT_A_HOST or dom in _NOT_A_PRINCIPAL or group_shaped.get(value.lower())):
                     continue
                 add("account", value.split("/")[-1])
             elif kind == "email":
@@ -952,8 +1025,11 @@ def _candidates(statement: str, tool_terms: set[str]) -> list[tuple[str, str]]:
 
     # Tool names that appear as words rather than filenames ("Mimikatz
     # driver", "an Rclone upload").
+    # A bare term adds nothing when a file candidate already carries it
+    # ("psexec" beside "PsExec64.exe").
+    files = [v.lower().replace("\\", "/").rsplit("/", 1)[-1] for c, v in out if c == "file"]
     for term in tool_terms:
-        if _has_term(term, low_statement):
+        if _has_term(term, low_statement) and not any(_carries(f, term) for f in files):
             add("file", term)
 
     # A mass-effect statement contributes one pattern, never its members.
@@ -1025,6 +1101,196 @@ def _not_exported(refused: list[dict[str, Any]], *buckets: dict[tuple[str, str],
     return list(rows.values())
 
 
+# How a row's role reads when the analyst did not state one.
+_NAMED_NO_ROLE = "named, role not stated"
+_PROSE_NO_ROLE = "not stated"
+_UNCHECKED = "sighting unchecked"
+_UNLOCATED = "seen, location unresolved"
+_ELSEWHERE = "seen elsewhere in this evidence"
+_BLOCKING_USES = ("block", "contain")
+
+
+def standing_of(sightings: list[dict] | None, claim_hosts: Iterable[str]) -> str:
+    """Where a row's sightings stand: ``cited`` (a cited located sighting),
+    ``same_host`` (an uncited located sighting on the finding's host),
+    ``elsewhere`` (located sightings on other hosts or host-less evidence
+    only), ``unlocated`` (sightings, none located), ``none`` (checked, no
+    sighting) or ``unchecked`` (not yet checked)."""
+    if sightings is None:
+        return "unchecked"
+    if not sightings:
+        return "none"
+    located = [s for s in sightings if s.get("located")]
+    if not located:
+        return "unlocated"
+    if any(s.get("cited") for s in located):
+        return "cited"
+    hosts = {str(h).lower() for h in claim_hosts if h}
+    if any(str(s.get("host") or "").lower() in hosts for s in located if s.get("host")):
+        return "same_host"
+    return "elsewhere"
+
+
+def _shared_note() -> dict[str, Any]:
+    try:
+        from core import shared_infrastructure as si
+        return {"path": "share/.common/shared_infrastructure.json", "built": si.built(),
+                "missing": si.missing(), "on": si.shared_edge_on()}
+    except Exception:  # noqa: BLE001
+        return {"path": "", "built": "", "missing": True, "on": False}
+
+
+def _search_status(case_dir: str | os.PathLike, value: str) -> str:
+    """What the pivot ledger says about the searches for a value: "n sources
+    searched", "k pending", "b blocked" (core.ioc_pivots), or under the
+    estate count, which fills counts and no targets, "counted on N tables,
+    k with rows": a statement about the tables counted, never about every
+    output (a disk, memory or raw text is not counted). "not counted" when
+    the estate count ran and holds nothing for the value."""
+    try:
+        from core.ioc_pivots import load_pivots
+        pivots = load_pivots(case_dir).get("pivots") or {}
+    except Exception:  # noqa: BLE001
+        return ""
+    v = str(value or "").casefold()
+    hit = next((p for k, p in pivots.items() if v and k.split(":", 1)[-1].casefold() == v), None) or {}
+    targets = list((hit.get("targets") or {}).values())
+    bits = [f"{targets.count('searched')} sources searched"] if targets.count("searched") else []
+    bits += [f"{targets.count(st)} {st}" for st in ("pending", "blocked") if targets.count(st)]
+    counts = hit.get("counts") or {}
+    if counts:
+        rows = sum(1 for c in counts.values() if isinstance(c, dict) and int(c.get("full") or 0))
+        bits.append(f"counted on {len(counts)} table{'s' if len(counts) != 1 else ''}, {rows} with rows")
+    if bits:
+        return ", ".join(bits)
+    return "not counted" if any(p.get("counts") for p in pivots.values()) else "not searched"
+
+
+_SEEN_REFUSED = "seen, refused at record time"
+
+
+def _place_by_sightings(case_dir, actionable: dict, review: dict, affected: dict, context: dict,
+                        refused: list[dict[str, Any]], frame: str, use_for) -> list[dict[str, Any]]:
+    """The sighted catalogue (ATLAS_IOC_SIGHTED_CATALOG): a value stands in
+    the lists where a tool output that read evidence shows it.
+
+    Typed rows: block and contain need a cited or same-host located
+    sighting; a row seen only elsewhere keeps its other uses and puts
+    block or contain to review; a row seen only unlocated goes to review for
+    every use; a checked row no call shows is context; a row recorded
+    before sightings existed stays listed as unchecked. Values named
+    without a typed row (prose, a step, the brief, the threat context) are
+    review when a call shows them (the role as not stated), context when
+    none does, review as unchecked until refresh_sightings checked them.
+    A typed row refused for presence at record time is context until a
+    call shows it, then review (seen, refused at record time). Every row
+    carries its published shared-infrastructure mark. Returns the refused
+    rows that stay not exported (the malformed ones)."""
+    from core.indicators import brief_values, load_named_sightings, named_key, shared_mark, threat_values
+    from core.shared_infrastructure import mark_text
+    named = load_named_sightings(case_dir)
+
+    def marked(i: Ioc) -> None:
+        m = shared_mark(i.category, i.value)
+        if m:
+            i.mark, i.mark_kind = mark_text(m), m["mark"]
+
+    for key in list(actionable):
+        i = actionable[key]
+        marked(i)
+        i.standing = standing_of(i.sightings, i.hosts)
+        for s in i.sightings or []:
+            if s.get("host") and s["host"] not in i.hosts:
+                i.hosts.append(s["host"])
+        if i.standing == "unchecked":
+            i.role_label = _UNCHECKED
+        elif i.standing == "elsewhere":
+            uses = [u if u not in _BLOCKING_USES else "review" for u in i.use]
+            i.use = list(dict.fromkeys(uses))
+            i.role_label = _ELSEWHERE
+        elif i.standing == "unlocated":
+            i.use, i.role_label = ["review"], _UNLOCATED
+            review[key] = actionable.pop(key)
+        elif i.standing == "none":
+            i.use, i.role_label = ["review"], "not seen in this evidence"
+            context[key] = actionable.pop(key)
+    for bucket in (review, affected):
+        for key in list(bucket):
+            i = bucket[key]
+            marked(i)
+            if i.source != "prose":
+                i.standing = standing_of(i.sightings, i.hosts)
+                continue
+            found = named.get(named_key(i.category, i.value))
+            if found is None:
+                i.standing, i.role_label = "unchecked", _UNCHECKED
+                continue
+            i.sightings = list(found)
+            i.standing = standing_of(found, i.hosts)
+            if not found:
+                if bucket is review:
+                    i.role_label = i.role_label or "not seen in this evidence"
+                    context[key] = review.pop(key)
+                continue
+            if bucket is review and i.role_label != _NAMED_NO_ROLE:
+                i.prose_role, i.role, i.side, i.role_label = i.role, THIRD_PARTY, "", _PROSE_NO_ROLE
+    # The brief's and the threat context's values: values, never roles.
+    for origin, values in (("brief", brief_values(case_dir)), ("threat context", threat_values(case_dir))):
+        for kind, value in values:
+            key = (kind, value.lower())
+            for bucket in (actionable, review, affected, context):
+                if key in bucket:
+                    if origin not in bucket[key].named_by:
+                        bucket[key].named_by.append(origin)
+                    break
+            else:
+                found = named.get(named_key(kind, value))
+                i = Ioc(category=kind, value=value, role=THIRD_PARTY, explanation=f"named by the {origin}",
+                        why=[f"named by the {origin}"], side="", use=["review"], source="prose",
+                        role_label=_NAMED_NO_ROLE, named_by=[origin],
+                        sightings=list(found) if found is not None else None)
+                marked(i)
+                i.standing = standing_of(i.sightings, [])
+                (review if found else context)[key] = i
+    for i in context.values():
+        i.search_status = _search_status(case_dir, i.value)
+    # A typed row refused because no call showed it is context until a call
+    # shows it (refresh_sightings re-checks it); then it is review, seen but
+    # refused at record time, its stated role kept as prose_role only. A
+    # malformed one stays not exported.
+    kept: list[dict[str, Any]] = []
+    for r in refused:
+        if r.get("refusal") == "presence":
+            key = (r.get("category") or "", str(r.get("value") or "").lower())
+            found = named.get(named_key(key[0], str(r.get("value") or "")))
+            if found and not any(key in b for b in (actionable, review, affected)):
+                kind, value = key[0], str(r.get("value") or "")
+                side = str(r.get("side") or "")
+                i = Ioc(category=kind, value=value, role=THIRD_PARTY,
+                        explanation=str(r.get("reason") or ""), claim_ids=list(r.get("claim_ids") or []),
+                        hosts=list(r.get("hosts") or []), side="", use=["review"], source="typed",
+                        role_label=_SEEN_REFUSED, sightings=list(found),
+                        prose_role=_typed_role(side, kind, value, False) if side else "")
+                marked(i)
+                i.standing = standing_of(i.sightings, i.hosts)
+                context.pop(key, None)
+                review[key] = i
+                continue
+            if found:
+                continue
+            if key not in context:
+                i = Ioc(category=r.get("category") or "", value=str(r.get("value") or ""), role=THIRD_PARTY,
+                        explanation=str(r.get("reason") or ""), claim_ids=list(r.get("claim_ids") or []),
+                        hosts=list(r.get("hosts") or []), side="", use=["review"], source="typed",
+                        role_label="not seen in this evidence", sightings=[], standing="none")
+                marked(i)
+                i.search_status = _search_status(case_dir, i.value)
+                context[key] = i
+            continue
+        kept.append(r)
+    return kept
+
+
 def build_catalog(case_dir: str | os.PathLike) -> dict[str, Any]:
     """Curated indicators for a case, derived purely from recorded beliefs.
 
@@ -1048,8 +1314,11 @@ def build_catalog(case_dir: str | os.PathLike) -> dict[str, Any]:
     except Exception:  # noqa: BLE001
         assets, lookup = {"values": {}, "hosts": []}, (lambda *_a, **_k: None)
     frame = frame_for(case_dir)
-    own_side = "subject" if frame == "subject" else "victim"
+    from core.indicators import _own_side
+    own_side = _own_side(frame)
     tool_terms = adversary_tool_terms()
+    from core.indicators import sighted_catalog_on
+    sighted = sighted_catalog_on()
 
     actionable: dict[tuple[str, str], Ioc] = {}
     review: dict[tuple[str, str], Ioc] = {}
@@ -1083,9 +1352,18 @@ def build_catalog(case_dir: str | os.PathLike) -> dict[str, Any]:
         conf = _confidence_for(node.get("confidence"))
 
         typed = rows_of(node)
-        typed_values = _typed_value_forms(typed)
+        # A value the analyst typed and the check refused for presence is
+        # still typed: the prose never re-types it from the verbs around it.
+        typed_values = _typed_value_forms(typed + [
+            d for d in node.get("indicators_dropped") or []
+            if isinstance(d, dict) and d.get("refusal") == "presence"])
         for r in typed:
             value, kind, side = str(r["value"]), str(r["type"]), str(r.get("side") or "")
+            if frame == "neutral" and side and side != UNDETERMINED and not _side_stated(r, node):
+                # No owner named: a side stands only on its finding's own
+                # basis (the moment the attacker acted, shown by an output;
+                # or a finding at LIKELY or above after its evaluation).
+                side = UNDETERMINED
             named = any(_has_term(t, value.lower()) for t in tool_terms)
             role = _typed_role(side, kind, value, named)
             why = ["stated by the analyst"] + (["known adversary tooling"] if named else [])
@@ -1097,7 +1375,8 @@ def build_catalog(case_dir: str | os.PathLike) -> dict[str, Any]:
                       hosts=[host] if host else [], side=side,
                       use=use_for(frame, side, kind, value), source="typed",
                       first_seen=str(r.get("first_seen") or ""), last_seen=str(r.get("last_seen") or ""),
-                      compromised=bool(r.get("compromised")), note=str(r.get("note") or "")))
+                      compromised=bool(r.get("compromised")), note=str(r.get("note") or ""),
+                      sightings=(list(r.get("sightings") or []) if "sightings" in r else None)))
 
         # Typed rows refused at record time: listed as not exported, never
         # as an indicator.
@@ -1107,29 +1386,55 @@ def build_catalog(case_dir: str | os.PathLike) -> dict[str, Any]:
                                 "reason": str(d.get("reason") or ""),
                                 "refusal": str(d.get("refusal") or ""),
                                 "suggested": str(d.get("suggested") or ""),
+                                "side": str(d.get("side") or ""),
                                 "claim_ids": [node_id] if node_id else [],
                                 "finding_call_ids": [src] if isinstance(src, int) else [],
                                 "hosts": [host] if host else [],
                                 "confidence": str(node.get("confidence") or "").upper()})
+        if sighted and node.get("kind") == "recommendation":
+            # A step names values; its verbs never make one attacker
+            # infrastructure. Placed by its sightings below.
+            for category, value in _candidates(statement, tool_terms):
+                if _suppressed(category, value) or value.lower() in typed_values:
+                    continue
+                place(Ioc(category=category, value=value, role=THIRD_PARTY, confidence=conf,
+                          explanation="named in a recorded step", why=["named in a recorded step"],
+                          claim_ids=[node_id] if node_id else [], hosts=[host] if host else [],
+                          side="", use=["review"], source="prose", role_label=_NAMED_NO_ROLE))
+            continue
         if not prose_usable:
             continue
         cands = [(c, v) for c, v in _candidates(statement, tool_terms)
                  if not _suppressed(c, v) and v.lower() not in typed_values
                  and _host_of(v) not in typed_values
+                 and not (c == "file" and v.lower() in tool_terms
+                          and any(_carries(t.rsplit("/", 1)[-1], v.lower()) for t in typed_values))
                  and (frame != "subject" or c in ("email", "hash", "account", "ip", "domain"))]
         siblings = [v for _c, v in cands]
         for category, value in cands:
             probe = _host_of(value) if category in ("domain", "email") else value
             own = lookup(assets, probe, category if category in ("ip", "host", "account") else "")
             if own:
-                role = COMPROMISED_HOST if category == "host" and frame != "subject" else (
+                role = COMPROMISED_HOST if category == "host" and frame == "incident" else (
                     SUBJECT_IDENTIFIER if frame == "subject" else AFFECTED_ASSET)
                 place(Ioc(category=category, value=value, role=role, confidence=conf,
-                          explanation="own asset named in the finding", why=["own asset"],
+                          explanation=("system the brief lists, named in the finding" if frame == "neutral"
+                                       else "own asset named in the finding"), why=["own asset"],
                           claim_ids=[node_id] if node_id else [], call_ids=call_ids[:12],
                           hosts=[own.get("host") or host] if (own.get("host") or host) else [],
                           side=own_side, use=["identify"] if frame == "subject" else ["scope"],
                           source="prose"))
+                continue
+            if frame == "neutral":
+                # No owner named, so no side to read verbs for: a value of
+                # the kinds a reader acts on is listed for review, its side
+                # undetermined (the subject frame's kinds: no case file
+                # name or tool word).
+                if category in ("email", "hash", "account", "ip", "domain"):
+                    place(Ioc(category=category, value=value, role=UNDETERMINED, confidence=conf,
+                              explanation="named in the finding", why=["named in the finding"],
+                              claim_ids=[node_id] if node_id else [], call_ids=call_ids[:12],
+                              hosts=[host] if host else [], side=UNDETERMINED, use=["review"], source="prose"))
                 continue
             if frame == "subject":
                 # no attacker side to read verbs for: an account on the device
@@ -1171,6 +1476,16 @@ def build_catalog(case_dir: str | os.PathLike) -> dict[str, Any]:
         target = actionable.get(key) or affected.get(key)
         if target is not None:
             _fold(target, review.pop(key))
+    context: dict[tuple[str, str], Ioc] = {}
+    refused_presence: list[dict[str, Any]] = []
+    if sighted:
+        refused_presence = [r for r in refused if r.get("refusal") == "presence"]
+        refused = _place_by_sightings(case_dir, actionable, review, affected, context, refused, frame, use_for)
+        # A refused value a later call shows is listed: the advisory names
+        # only the ones still in no list but context.
+        refused_presence = [r for r in refused_presence
+                            if not any((r.get("category") or "", str(r.get("value") or "").lower()) in b
+                                       for b in (actionable, review, affected))]
     not_exported = _not_exported(refused, actionable, affected, review)
     iocs = sorted(actionable.values(), key=_sort_key)
     review_rows = sorted(review.values(), key=_sort_key)
@@ -1203,6 +1518,11 @@ def build_catalog(case_dir: str | os.PathLike) -> dict[str, Any]:
         "not_exported": not_exported,
         "not_exported_total": len(not_exported),
         "affected_assets": [i.to_dict() for i in affected_rows],
+        "context": [i.to_dict() for i in sorted(context.values(), key=_sort_key)],
+        "context_total": len(context),
+        "refused_presence": refused_presence,
+        "sighted": sighted,
+        "shared_infrastructure": _shared_note(),
         "tld_list_missing": tld_list_missing(),
     }
 
@@ -1218,6 +1538,18 @@ _ROLE_TITLES = {
     AFFECTED_ASSET: "The owner's own assets named in the findings",
     SUBJECT_IDENTIFIER: "Identifiers of the person under investigation",
     THIRD_PARTY: "Third-party identifiers",
+    UNDETERMINED: "Values seen, side undetermined",
+}
+
+# The printed role labels (ATLAS_IOC_ROLES): what the responder reads in
+# a row's role cell.
+_PRINTED_ROLE = {
+    ATTACKER_INFRA: "attacker infrastructure", ATTACKER_HOST: "attacker infrastructure",
+    ATTACKER_TOOL: "attacker tool or file", ATTACKER_FILE: "attacker tool or file",
+    PATTERN: "attacker tool or file", ATTACKER_ACCOUNT: "attacker account",
+    COMPROMISED_HOST: "victim asset", AFFECTED_ASSET: "victim asset",
+    THIRD_PARTY: "third-party service", SUBJECT_IDENTIFIER: "subject identifier",
+    UNDETERMINED: "undetermined",
 }
 
 _USE_TITLES = {
@@ -1230,9 +1562,23 @@ _USE_TITLES = {
     "review": "Review before use",
 }
 _USE_ORDER = ("block", "contain", "hunt", "request", "identify", "scope")
+def _side_stated(row: dict[str, Any], node: dict[str, Any]) -> bool:
+    """Whether a typed side stands without an owner to side with: the row
+    keeps the moment the attacker acted (attacker_from, kept only when an
+    output shows it), or its finding holds LIKELY or above after its
+    evaluation."""
+    return bool(row.get("attacker_from")) or str(node.get("confidence") or "").upper() in ("CONFIRMED", "LIKELY")
+
+
+def _affected_title(frame: str) -> str:
+    return {"subject": "Subject and third-party identifiers",
+            "neutral": "Systems named in the brief"}.get(frame, "Affected assets")
+
+
 _FRAME_LINES = {
     "incident": "Frame: incident on the owner's systems. Attacker rows are block and hunt items; the owner's own assets are listed under Scope, never as block items.",
     "subject": "Frame: examination of the device of the person under investigation. There is no attacker side to block; the rows are the case's key identifiers, and provider-held resources carry a preservation request.",
+    "neutral": "Frame: neutral. The brief names no system owner: the rows are what the evidence shows, sided only where a finding's own basis states the side; values named without a side are listed for review.",
 }
 
 # The deliverable groups by what a responder searches on — a hostname is a
@@ -1268,10 +1614,11 @@ def grouped(catalog: dict[str, Any]) -> list[tuple[str, list[dict[str, Any]]]]:
         buckets.setdefault(group_for(ioc), []).append(ioc)
     out = [(title, buckets[key]) for key, title in GROUP_ORDER if buckets.get(key)]
     if catalog.get("affected_assets"):
-        out.append(("Subject and third-party identifiers" if catalog.get("frame") == "subject"
-                    else "Affected assets", list(catalog["affected_assets"])))
+        out.append((_affected_title(str(catalog.get("frame") or "")), list(catalog["affected_assets"])))
     if catalog.get("review"):
         out.append(("Review before use", list(catalog["review"])))
+    if catalog.get("context"):
+        out.append(("Named, not seen in this evidence", list(catalog["context"])))
     return out
 
 
@@ -1303,8 +1650,116 @@ def _not_exported_lines(catalog: dict[str, Any]) -> list[str]:
                             ("Why it was refused", "reason"), ("Finding", "claim_ids")]) + [""])
 
 
+def _seen_cell(row: dict[str, Any]) -> str:
+    """Where a row was seen: per sighting the host, the span and the call
+    ("CORP-WS05 2031-03-01 08:12 to 2031-03-09 17:40 (call 412, 37 rows)"),
+    marked when the finding did not cite the call or no host stands behind
+    it."""
+    bits = []
+    for x in row.get("sightings") or []:
+        where = str(x.get("host") or "host unresolved")
+        span = str(x.get("first") or "")[:16]
+        if span and x.get("last") and str(x["last"])[:16] != span:
+            span += f" to {str(x['last'])[:16]}"
+        call = f"call {x.get('call')}" + (f", {x['rows']} row{'s' if x['rows'] != 1 else ''}" if x.get("rows") else "")
+        notes = ([] if x.get("located") else ["location unresolved"]) + ([] if x.get("cited") else ["not cited"])
+        bits.append(" ".join(b for b in (where, span) if b) + f" ({call}"
+                    + ("; " + ", ".join(notes) if notes else "") + ")")
+    return "; ".join(bits)
+
+
+def _role_cell(row: dict[str, Any]) -> str:
+    """The role as stated (or the label for a value without one), with the
+    published shared-infrastructure mark and what it means for a block."""
+    from core.indicators import roles_on
+    if row.get("role_label") in (_NAMED_NO_ROLE, _PROSE_NO_ROLE):
+        role = "not stated" if roles_on() and row.get("role_label") == _PROSE_NO_ROLE else row.get("role_label")
+    elif roles_on() and str(row.get("role") or "") in _PRINTED_ROLE:
+        role = _PRINTED_ROLE[str(row["role"])]
+    else:
+        role = _ROLE_TITLES.get(str(row.get("role") or ""), str(row.get("role") or "")).lower()
+    if not row.get("mark"):
+        return role
+    hint = {"shared_edge": "; block the name, not the address",
+            "vendor_service": "; a tenant's name on the service is the item, never the service"}.get(
+        str(row.get("mark_kind") or ""), "")
+    return f"{row['mark']}, role as stated: {role}{hint}"
+
+
+def _sighted_markdown(catalog: dict[str, Any], case_id: str) -> str:
+    """The sighted catalogue's deliverable (ATLAS_IOC_SIGHTED_CATALOG): what
+    this evidence shows, by use, each row with where it was seen; then what
+    is seen elsewhere or unlocated, what was named without a stated role,
+    what was named but not seen (context, never exported), what is not yet
+    checked, and what was refused as malformed."""
+    frame = catalog.get("frame") or "incident"
+    iocs = list(catalog.get("iocs") or [])
+    review = list(catalog.get("review") or [])
+    affected = list(catalog.get("affected_assets") or [])
+    context = list(catalog.get("context") or [])
+    shared = catalog.get("shared_infrastructure") or {}
+    lines = [f"# Indicators - {case_id}".rstrip(" -"), "",
+             _FRAME_LINES.get(frame, _FRAME_LINES["incident"]),
+             f"Own-asset basis: {catalog.get('own_asset_basis') or 'none'}.",
+             ("Shared-infrastructure lists: missing (restore share/.common/shared_infrastructure.json from "
+              "the repository); shared edges and vendor services are not marked." if shared.get("missing")
+              else f"Shared-infrastructure lists: {shared.get('path')}, built {str(shared.get('built') or '')[:10]}."),
+             "Verify ownership before deploying a block item.", ""]
+    if catalog.get("tld_list_missing"):
+        lines += ["Warning: the top-level domain list is missing, so domain and email rows could not be "
+                  "checked (restore share/.common/tlds.txt from the repository).", ""]
+    seen_here = [r for r in iocs if r.get("standing") in ("cited", "same_host", "elsewhere")]
+    unchecked = [r for r in iocs + review if r.get("standing") == "unchecked"]
+    review_typed = [r for r in iocs + review
+                    if r.get("source") == "typed" and r.get("standing") in ("elsewhere", "unlocated")
+                    and "review" in (r.get("use") or [])]
+    named = [r for r in review if r.get("source") == "prose" and r.get("standing") not in ("unchecked", "")]
+    by_use = {u: sum(1 for r in seen_here if u in (r.get("use") or [])) for u in ("block", "hunt", "scope")}
+    by_brief = sum(1 for r in context if "brief" in (r.get("named_by") or []))
+    lines += [f"{len(seen_here)} indicators seen in this evidence ({by_use['block']} block, {by_use['hunt']} hunt, "
+              f"{by_use['scope']} scope); {len(review_typed)} seen elsewhere or unlocated (review); "
+              f"{len(named)} named in findings without a stated role; {len(context)} named but not seen"
+              + (f" ({by_brief} by the brief)" if by_brief else "") + f"; {len(unchecked)} unchecked.", ""]
+    cols = [("Value", "value"), ("Type", "category"), ("Role", "_role"), ("Seen", "_seen"), ("Finding", "claim_ids")]
+
+    def table(rows):
+        return _table([{**r, "_role": _role_cell(r), "_seen": _seen_cell(r)} for r in rows], cols)
+    titles = {"block": "Block at the perimeter and resolver (attacker infrastructure seen in this evidence, "
+                       "cited or on the finding's host)"}
+    for use in _USE_ORDER:
+        rows = [r for r in seen_here if use in (r.get("use") or [])]
+        if rows:
+            lines += [f"## {titles.get(use, _USE_TITLES[use])}", ""] + table(rows) + [""]
+    if review_typed:
+        lines += ["## Seen elsewhere in this evidence or location unresolved (typed; review before use)", ""]
+        lines += table(review_typed) + [""]
+    third = [r for r in seen_here if r.get("use") == ["review"] and r.get("source") == "typed"
+             and r not in review_typed]
+    if third:
+        lines += ["## Third-party services named in the findings (monitor; never a block item)", ""]
+        lines += table(third) + [""]
+    if affected:
+        lines += [f"## {_affected_title(frame)}", ""]
+        lines += _table(affected, [("Value", "value"), ("Type", "category"), ("Host", "hosts"),
+                                   ("Note", "explanation"), ("Finding", "claim_ids")]) + [""]
+    if named:
+        lines += ["## Named in findings, role not stated (seen; review before use)", ""] + table(named) + [""]
+    if context:
+        lines += ["## Named but not seen in this evidence (context; never exported)", ""]
+        lines += _table([{**r, "_by": ", ".join((r.get("named_by") or []) + list(r.get("claim_ids") or [])),
+                          "_note": r.get("mark") or r.get("explanation") or ""} for r in context],
+                        [("Value", "value"), ("Type", "category"), ("Named by", "_by"), ("Searched", "search_status"),
+                         ("Note", "_note")]) + [""]
+    if unchecked:
+        lines += ["## Sighting unchecked (recorded before this version; checked at report time)", ""]
+        lines += table(unchecked) + [""]
+    return "\n".join(lines + _not_exported_lines(catalog))
+
+
 def render_markdown(catalog: dict[str, Any], *, case_id: str = "") -> str:
     """The deliverable: a list a responder can act on, with provenance."""
+    if catalog.get("sighted"):
+        return _sighted_markdown(catalog, case_id)
     frame = catalog.get("frame") or "incident"
     lines = [f"# Indicators — {case_id}".rstrip(), "",
              _FRAME_LINES.get(frame, _FRAME_LINES["incident"]),
@@ -1355,7 +1810,7 @@ def render_markdown(catalog: dict[str, Any], *, case_id: str = "") -> str:
                       "Stated by the analyst for a party that is neither the attacker nor the owner.", ""]
             lines += _table(third, cols) + [""]
     if affected:
-        lines += [f"## {'Subject and third-party identifiers' if frame == 'subject' else 'Affected assets'}", ""]
+        lines += [f"## {_affected_title(frame)}", ""]
         lines += _table(affected, [("Value", "value"), ("Type", "category"), ("Host", "hosts"),
                                    ("Note", "explanation"), ("Finding", "claim_ids")]) + [""]
     if review:
@@ -1385,11 +1840,17 @@ def render_csv(catalog: dict[str, Any], case_dir: str | os.PathLike | None = Non
         f_id_for = None
     out = io.StringIO()
     w = csv.writer(out)
+    sighted = bool(catalog.get("sighted"))
     w.writerow(["use", "side", "type", "value", "role", "confidence", "host", "first_seen",
-                "last_seen", "source", "finding_ids", "claim_ids", "call_ids"])
+                "last_seen", "source", "finding_ids", "claim_ids", "call_ids"]
+               + (["standing", "sightings", "mark"] if sighted else []))
     for rows in (catalog.get("iocs") or [], catalog.get("affected_assets") or [],
                  catalog.get("review") or []):
         for r in rows:
+            # The sighted catalogue exports only rows a located sighting
+            # stands behind: never context, never an unchecked row.
+            if sighted and r.get("standing") not in ("cited", "same_host", "elsewhere"):
+                continue
             fids = []
             if f_id_for and case_dir is not None:
                 for cid in r.get("claim_ids") or []:
@@ -1403,7 +1864,10 @@ def render_csv(catalog: dict[str, Any], case_dir: str | os.PathLike | None = Non
                         _csv_safe(r.get("value") or ""), r.get("role") or "", r.get("confidence") or "",
                         " ".join(r.get("hosts") or []), r.get("first_seen") or "", r.get("last_seen") or "",
                         r.get("source") or "", " ".join(fids), " ".join(r.get("claim_ids") or []),
-                        " ".join(str(c) for c in (r.get("call_ids") or []))])
+                        " ".join(str(c) for c in (r.get("call_ids") or []))]
+                       + ([r.get("standing") or "",
+                           " ".join(str(x.get("call")) for x in r.get("sightings") or [] if x.get("located")),
+                           r.get("mark") or ""] if sighted else []))
     return out.getvalue()
 
 
@@ -1420,6 +1884,11 @@ def write_indicator_files(case_dir: str | os.PathLike) -> dict[str, Any]:
         for path in (md_path, csv_path):
             assert_output_safe(str(path))
         reports.mkdir(parents=True, exist_ok=True)
+        try:
+            from core.indicators import refresh_sightings
+            refresh_sightings(case_dir, per_turn=None)
+        except Exception:  # noqa: BLE001
+            pass
         catalog = build_catalog(case_dir)
         md_path.write_text(render_markdown(catalog, case_id=case_id), encoding="utf-8")
         csv_path.write_text(render_csv(catalog, case_dir), encoding="utf-8")
@@ -1476,8 +1945,15 @@ def capture_adversary_tools(case_dir: str | os.PathLike,
         now = _dt.datetime.now(_dt.timezone.utc)
         stamp = now.strftime("%Y-%m-%d %H:%M UTC")
 
-        for ioc in list(catalog.get("iocs") or []) + list(catalog.get("review") or []):
-            if ioc.get("role") != ATTACKER_TOOL:
+        rows = list(catalog.get("iocs") or []) + list(catalog.get("review") or [])
+        if catalog.get("sighted"):
+            # Only what this evidence shows teaches the lexicon: located
+            # typed rows and sighted named values (their prose role).
+            rows = [r for r in rows
+                    if (r.get("source") == "typed" and r.get("standing") in ("cited", "same_host", "elsewhere"))
+                    or (r.get("source") == "prose" and r.get("sightings"))]
+        for ioc in rows:
+            if ATTACKER_TOOL not in (ioc.get("role"), ioc.get("prose_role")):
                 continue
             name = str(ioc.get("value") or "").strip().lower()
             base = name.rsplit(".", 1)[0] if "." in name else name

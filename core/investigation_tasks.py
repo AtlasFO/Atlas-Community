@@ -1,4 +1,4 @@
-"""Investigation task queue — case-driven work items (V1, lightweight).
+"""Investigation task queue — case-driven work items (lightweight).
 
 CASE.md is the investigator inbox (append-only requests). This module is
 Atlas's durable task SoT under ``.atlas/investigation_tasks.json``.
@@ -7,6 +7,8 @@ Matching is deterministic: exact normalized-text equality only. When unsure,
 create a new task — never fuzzy-merge.
 """
 from __future__ import annotations
+
+from core.store_lock import STORE_LOCK as _STORE_LOCK, locked as _locked, write_atomic as _write_atomic
 
 import hashlib
 import json
@@ -42,7 +44,7 @@ def normalize_task_status(status: str) -> str:
 _DROPPABLE = frozenset({
     "open", "in_progress", "partial", "reopened", "blocked_missing_evidence",
 })
-# Back-compat name for callers that still import the old constant.
+# Alias for callers that import the old name.
 _WITHDRAWABLE = _DROPPABLE
 
 # Derived revisit tasks are not CASE.md lines, so reconciliation must not treat
@@ -112,7 +114,7 @@ def _migrate_task_statuses(store: dict[str, Any]) -> bool:
     return changed
 
 
-def _normalize_store(store: Any) -> dict[str, Any]:
+def _normalize_store(store: Any, case_dir: Any = None) -> dict[str, Any]:
     """Keep the tasks that are tasks. A junk entry (a string, a null, a dict
     with no text) or an unknown status must not stop the real questions
     from being listed or answered."""
@@ -136,9 +138,13 @@ def _normalize_store(store: Any) -> dict[str, Any]:
         if not isinstance(t.get("related_claim_ids"), list):
             t["related_claim_ids"] = []
         if isinstance(t.get("parts"), list) and t["parts"]:
-            # The status is what the parts say, never what was stored.
+            # The status is what the parts say, never what was stored; a
+            # host-wide question is partial while its hosts in scope have
+            # not reached depth (live from the ledger, nothing stored).
             from core.request_parts import derive_status
             t["status"] = derive_status(t)
+            if case_dir and t["status"] == "answered" and depth_hold(case_dir, t)[0]:
+                t["status"] = "partial"
         clean.append(t)
     store["tasks"] = clean
     return store
@@ -164,7 +170,7 @@ def load_tasks(case_dir: str | os.PathLike) -> dict[str, Any]:
             save_tasks(case_dir, data)
         except OSError:
             pass
-    return _normalize_store(data)
+    return _normalize_store(data, case_dir)
 
 
 def save_tasks(case_dir: str | os.PathLike, store: dict[str, Any]) -> Path:
@@ -173,10 +179,8 @@ def save_tasks(case_dir: str | os.PathLike, store: dict[str, Any]) -> Path:
     store = dict(store)
     store["schema_version"] = SCHEMA_VERSION
     store["updated_at"] = _utcnow()
-    path.write_text(
-        json.dumps(store, indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
+    with _STORE_LOCK:
+        _write_atomic(path, json.dumps(store, indent=2, ensure_ascii=False) + "\n")
     try:
         from core.investigation_orchestrator import mark_state_dirty
         mark_state_dirty(case_dir, reason="investigation_tasks_save")
@@ -208,18 +212,88 @@ def read_case_markdown(case_dir: str | os.PathLike) -> str:
     return ""
 
 
-def write_case_markdown(case_dir: str | os.PathLike, text: str) -> Path:
-    """Replace the case file whole: written beside it and renamed over it,
-    so a run reading the brief at that moment sees the old text or the
-    new, never half of either."""
-    root = Path(case_dir).resolve()
+def case_markdown_version(text: str) -> str:
+    """The version of a brief's text: what an editor saw when it read the
+    brief, and what a save sends back to say which text it changed. Line
+    ends count as the reader sees them (read_text turns CRLF and CR into
+    LF), so text that was written and the same file read back agree."""
+    text = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+class CaseMarkdownConflict(Exception):
+    """The brief changed after the writer read it. Carries the text that is
+    there now and its version, so the writer can show it instead of
+    overwriting it."""
+
+    def __init__(self, current: str):
+        super().__init__("the brief changed since it was read")
+        self.current = current
+        self.version = case_markdown_version(current)
+
+
+def _brief_path(root: Path) -> Path:
     path = root / "CASE.md"
     if not path.is_file() and (root / "CLAUDE.md").is_file():
         path = root / "CLAUDE.md"
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, path)
     return path
+
+
+class _BriefLock:
+    """An exclusive flock on the case's .atlas/brief.lock for one read-check-
+    replace of the brief. Every writer of the brief takes it, in this and in
+    any other process (dashboard, CLI, a run), so two writers cannot both
+    read the same text and the second one's replace drop the first one's
+    change. Not reentrant: hold it once per write."""
+
+    def __init__(self, root: Path):
+        self.path = root / ".atlas" / "brief.lock"
+
+    def __enter__(self):
+        import fcntl
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.fh = open(self.path, "a")
+        fcntl.flock(self.fh.fileno(), fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *exc):
+        self.fh.close()   # closing the descriptor releases the flock
+
+
+def write_case_markdown(case_dir: str | os.PathLike, text: str, *,
+                        base_version: str | None = None) -> Path:
+    """Replace the case file whole: written beside it and renamed over it,
+    so a run reading the brief at that moment sees the old text or the
+    new, never half of either.
+
+    ``base_version`` is the version of the text the writer started from
+    (case_markdown_version). When the brief no longer has that version,
+    nothing is written and CaseMarkdownConflict carries what is there now:
+    a writer that read the brief earlier never overwrites a change made
+    since."""
+    root = Path(case_dir).resolve()
+    with _BriefLock(root):
+        path = _brief_path(root)
+        if base_version is not None:
+            current = read_case_markdown(root)
+            if case_markdown_version(current) != base_version:
+                raise CaseMarkdownConflict(current)
+        _write_atomic(path, text)
+    return path
+
+
+def edit_case_markdown(case_dir: str | os.PathLike, edit) -> tuple[str, str]:
+    """Apply ``edit`` (text -> text) to the brief as one step: read, edit and
+    replace under the brief lock, so an append never loses a line another
+    writer saved in between. Writes nothing when ``edit`` returns its input.
+    Returns (before, after)."""
+    root = Path(case_dir).resolve()
+    with _BriefLock(root):
+        before = read_case_markdown(root)
+        after = edit(before)
+        if after != before:
+            _write_atomic(_brief_path(root), after)
+    return before, after
 
 
 def _strip_noncontent_markdown(markdown: str) -> str:
@@ -472,6 +546,57 @@ def parse_case_requests(markdown: str) -> list[str]:
     return [item["text"] for item in parse_case_request_items(markdown)]
 
 
+# Atlas's own objective marker, the one the run prompt writes
+# ("CASE_QUESTION: ..."): as a heading or a line, emphasis allowed.
+_CASE_QUESTION_RE = re.compile(r"^\s{0,3}(?:#{1,6}\s+)?[*_]*CASE_QUESTION[*_]*\s*:[*_\s]*(.*)$")
+
+
+def depth_hold(case_dir, task: dict[str, Any]) -> tuple[bool, str]:
+    """(held, depth line) of a host-wide question (core.evidence_depth
+    .task_depth): held while a host in its scope has cheap or medium
+    classes undecided. Read live from the ledger; a check that cannot run
+    holds nothing."""
+    try:
+        from core.evidence_depth import task_depth
+        reached, line = task_depth(case_dir, task)
+        return (not reached), line
+    except Exception:  # noqa: BLE001
+        return False, ""
+
+
+def case_question(markdown: str) -> str:
+    """The brief's main question: the text after the first ``CASE_QUESTION:``
+    marker, a heading's line or a paragraph's lines; "" for none."""
+    lines = _strip_noncontent_markdown(markdown or "").splitlines()
+    for i, line in enumerate(lines):
+        m = _CASE_QUESTION_RE.match(line)
+        if not m:
+            continue
+        text = [m.group(1)]
+        if not _HEADING_RE.match(line):
+            for nxt in lines[i + 1:]:
+                if (not nxt.strip() or _HEADING_RE.match(nxt) or _BULLET_RE.match(nxt)
+                        or _THEMATIC_BREAK_RE.match(nxt)):
+                    break
+                text.append(nxt.strip())
+        return _strip_inline_emphasis(" ".join(text)).strip("*_ ")
+    return ""
+
+
+def brief_request_items(markdown: str) -> list[dict[str, Any]]:
+    """What the brief asks, as tracked tasks take it: its requests, led by its
+    main question when it states one that no request repeats. Beside
+    requests the question is one obligation (``whole``: one part, its own
+    text): the requests spell out what it asks, and a split of the summary
+    would ask each of their things again. A brief whose only ask is its
+    main question gets that one task, split like any request."""
+    items = parse_case_request_items(markdown)
+    q = case_question(markdown)
+    if q and fingerprint_text(q) not in {fingerprint_text(i["text"]) for i in items}:
+        items.insert(0, {"text": q, "children": [], "first_line": q, "whole": bool(items)})
+    return items
+
+
 def _next_task_id(store: dict[str, Any]) -> str:
     n = int(store.get("next_id") or 1)
     store["next_id"] = n + 1
@@ -565,6 +690,7 @@ def _disk_access_blocks_missing_evidence(
         return None
 
 
+@_locked
 def repair_tasks_against_access(
     case_dir: str | os.PathLike,
     *,
@@ -721,25 +847,76 @@ def _limitation_refusal(case_dir, part: dict[str, Any], basis: str, reason: str,
         return "a limitation needs a reason of at least 20 characters naming the source and what was done"
     try:
         from core.entities import artifact_tokens
-        named = {t.lower() for t in artifact_tokens(reason)}
+        tokens = {t.lower() for t in artifact_tokens(reason)}
     except Exception:  # noqa: BLE001
-        named = set()
-    named |= {w.lower().strip("'\"`,.;:()") for w in reason.split()
-              if re.match(r"^\$?[A-Za-z][\w.$-]{2,}$", w.strip("'\"`,.;:()")) and w.strip("'\"`,.;:()").upper() == w.strip("'\"`,.;:()")}
+        tokens = set()
+    named = set(tokens)
+    # A word in capitals names a source only when the case knows an
+    # artefact by that name (a hive, a journal): an acronym or a binary's
+    # name written in capitals is a word of the reason, never a source the
+    # cited calls must name.
+    caps = {w.lower().strip("'\"`,.;:()") for w in reason.split()
+            if re.match(r"^\$?[A-Za-z][\w.$-]{2,}$", w.strip("'\"`,.;:()")) and w.strip("'\"`,.;:()").upper() == w.strip("'\"`,.;:()")}
+    # Every capitals word names a source for source_absent (the index is
+    # searched for it, which guards against a false absence); where the
+    # cited calls must name the source (examined, unreadable) only the
+    # ones the case knows as artefacts do.
+    named |= caps
+    if caps and basis in ("examined", "unreadable"):
+        try:
+            from core.artifact_value import known_artifacts
+            known_names = set()
+            for v in known_artifacts(case_dir).values():
+                n = str(v.get("name") or "").lower()
+                known_names |= {n, n.rsplit(".", 1)[0]}
+        except Exception:  # noqa: BLE001
+            known_names = set()
+        named -= (caps - known_names) - tokens
     if basis == "source_absent":
         try:
             from core.artifact_value import known_artifacts
             known = known_artifacts(case_dir)
         except Exception:  # noqa: BLE001
             known = {}
-        for v in known.values():
-            base = str(v.get("name") or "").lower()
-            stem = base.rsplit(".", 1)[0]
-            if base in named or stem in named:
-                where = v.get("lpath") or v.get("path") or v.get("name")
-                return (f"'{where}' is present in this case (see the listing or path it was seen in); "
-                        "a source the case holds cannot be called absent: examine it and limit the "
-                        "part on what the examination gave, or answer it")
+        hits = [v for v in known.values()
+                if str(v.get("name") or "").lower() in named
+                or str(v.get("name") or "").lower().rsplit(".", 1)[0] in named]
+        try:
+            from core.contents_index import find_by_names, index_on
+            scoped = index_on()
+        except Exception:  # noqa: BLE001
+            scoped = False
+        if scoped:
+            # The source is absent on the host the part names: its host
+            # field or hosts list, else the case hosts its reason names. The
+            # index answers below the value threshold too.
+            from core.forensic_citation import host_mentioned, known_case_hosts
+            case_hosts = list(dict.fromkeys(known_case_hosts(case_dir)))
+            hosts = [str(h).strip() for h in [part.get("host"), *(part.get("hosts") or [])] if str(h or "").strip()]
+            # A host label written in capitals is the place, not the source
+            # (an image file is often named after its host).
+            named -= {h.casefold() for h in case_hosts}
+            hits = [v for v in hits if str(v.get("name") or "").lower() in named
+                    or str(v.get("name") or "").lower().rsplit(".", 1)[0] in named]
+            if not hosts:
+                hosts = [h for h in case_hosts if host_mentioned(h, reason)]
+            hits += [{"name": r["name"], "host": r["host"] or "", "lpath": r["path"]}
+                     for r in find_by_names(case_dir, named, hosts=hosts or None)]
+            if hosts:
+                want = {h.casefold() for h in hosts}
+                hits = [v for v in hits if not str(v.get("host") or "") or str(v["host"]).casefold() in want]
+            elif len(case_hosts) >= 2 and hits:
+                holders = sorted({str(v.get("host") or "") for v in hits} - {""})
+                if holders:
+                    return (f"'{hits[0].get('lpath') or hits[0].get('name')}' is present in this case on "
+                            f"{', '.join(holders[:8])}" + (f" and {len(holders) - 8} more" if len(holders) > 8 else "")
+                            + "; say which host the part means (host in the reason or the part) and "
+                            "limit it there, or examine the source")
+        for v in hits:
+            where = v.get("lpath") or v.get("path") or v.get("name")
+            return (f"'{where}' is present in this case (see the listing or path it was seen in); "
+                    "a source the case holds cannot be called absent: examine it and limit the "
+                    "part on what the examination gave, or answer it")
         return None
     if basis == "out_of_scope":
         try:
@@ -758,32 +935,76 @@ def _limitation_refusal(case_dir, part: dict[str, Any], basis: str, reason: str,
         by = log.index().by_call_id or {}
     except Exception:  # noqa: BLE001
         by = {}
-    try:
-        from core.coverage_ledger import reads_content
-    except Exception:  # noqa: BLE001
-        reads_content = lambda name: True  # noqa: E731
+    from core.coverage_ledger import (_OPEN_ATTEMPT_TOOLS, _entry_tool, _failed_attempt, is_probe_tool,
+                                      reads_content, resolved_entry)
     seen_any = False
+    jobs: dict = {}
+    cited: list[str] = []
     for cid in ids:
         ent = by.get(cid) or by.get(str(cid)) or {}
         if not ent:
             continue
         seen_any = True
-        blob = json.dumps(ent, ensure_ascii=False).lower()
-        names_source = not named or any(n in blob for n in named)
-        tool = str(ent.get("mcp_tool") or ent.get("tool") or ent.get("cmd") or "").split(":")[-1]
-        ok = bool(ent.get("success"))
-        if basis == "examined" and ok and reads_content(tool) and names_source:
+        # The cited call as the read rule sees it (core.coverage_ledger): a
+        # background job's start by the job's outcome; a sub-command by its
+        # own program's tool; a call of no analyst tool reads nothing.
+        ent = resolved_entry(case_dir, ent, jobs)
+        if ent is None:
+            cited.append(f"call {cid} starts a background job that has not finished (or Atlas stopped it), "
+                         "so it read nothing yet")
+            continue
+        if named and not any(n in json.dumps(ent, ensure_ascii=False).lower() for n in named):
+            cited.append(f"call {cid} does not name the source")
+            continue
+        tool = _entry_tool(ent)
+        if basis == "examined":
+            if ent.get("success") is True and reads_content(tool):
+                return None
+            cited.append(f"call {cid} " + ("failed" if ent.get("success") is False
+                                           else "names the source without reading its content"))
+            continue
+        if tool and (is_probe_tool(tool) or tool in _OPEN_ATTEMPT_TOOLS) and _failed_attempt(ent):
             return None
-        if basis == "unreadable" and not ok and names_source:
-            return None
+        cited.append(f"call {cid} " + _not_a_failed_read(ent, tool))
     if not seen_any:
         return f"none of the cited call ids {ids} is in this run's trace"
     if basis == "examined":
-        return ("examined needs a successful reader call on the source (a parse, query or read that "
-                "names it); a listing or a stat that merely names the path does not count")
-    return "unreadable needs a failed call on the source among the cited call ids"
+        return ("examined needs a successful read of the source among the cited calls: a parse, query or "
+                "read that names it. A listing or a stat that only names the path does not count, and a "
+                "background job's start counts once the job has finished (job.job_status). Cited: "
+                + "; ".join(cited))
+    return ("unreadable needs a failed read of the source among the cited calls: a call that ran on the "
+            "source and failed with the tool's own error (a filesystem that does not open, a parser that "
+            "cannot read the file). Not a failed read: a call a gate turned away, one with invalid "
+            "arguments, one a stop cut short, a background job still running. Cite the call that failed on "
+            "the source; if none did, read the source first. Cited: " + "; ".join(cited))
 
 
+def _not_a_failed_read(ent: dict, tool: str) -> str:
+    """Why a cited call is no failed read of the source (the read rule,
+    core.coverage_ledger._failed_attempt), in the words of the refusal."""
+    if ent.get("success") is not False:
+        return "succeeded"
+    if ent.get("interrupted"):
+        return "was cut short by a stop"
+    fc = str(ent.get("failure_class") or "")
+    if fc == "gate_refusal":
+        return "was turned away by a gate and never ran on the source"
+    if fc == "analyst_error":
+        return "had invalid arguments"
+    if fc == "expected_nonzero":
+        return "answered (nothing matched); it did not fail"
+    return "is not a read of the source"
+
+
+def part_gate_structural_on() -> bool:
+    """ATLAS_PART_GATE_STRUCTURAL: a part the analyst links a belief
+    to is checked for structure only, never by its words."""
+    from core.envfile import env_flag
+    return env_flag("ATLAS_PART_GATE_STRUCTURAL", True)
+
+
+@_locked
 def update_task(
     case_dir: str | os.PathLike,
     task_id: str,
@@ -823,7 +1044,10 @@ def update_task(
                     "gate": "task_status_contract",
                     "error": refuse,
                 }
-        if status == "answered":
+        from core.deferred_intents import coverage_honesty_on
+        # Coverage honesty: an answer is not refused for evidence nobody
+        # read; the report says what was not read (ATLAS_COVERAGE_HONESTY).
+        if status == "answered" and not coverage_honesty_on():
             try:
                 from core.evidence_access import refuse_diskish_answered
                 refuse_ans = refuse_diskish_answered(
@@ -870,8 +1094,9 @@ def update_task(
                         f"{status!r} needs the belief(s) that answer it: pass "
                         "related_claim_ids=[...] naming current claim, "
                         "conclusion or observation ids (record the finding first, or "
-                        "claim.promote_conclusion the one that states the "
-                        "answer). Nothing given resolves to an active belief."
+                        "record the conclusion with claim.promote_conclusion(basis_ids=...) "
+                        "naming the claims it rests on). Nothing given resolves to an "
+                        "active belief."
                     ),
                     "candidates": offered,
                 }
@@ -906,21 +1131,66 @@ def update_task(
         from core.request_parts import assign, derive_status, limit, open_parts, summary_lines
         nodes = _graph_nodes(case_dir)
         hosts = _known_hosts(case_dir)
-        from core.request_parts import LIMITATION_BASES, STRICT_VALUE_TYPES, _current, part_words
+        from core.request_parts import LIMITATION_BASES, _current, _needs_read_value, part_words
         by_id = {str(p.get("id")): p for p in task_parts}
         by_text = {str(p.get("text") or "").strip().casefold(): p for p in task_parts}
         notes: list[str] = []
+        if part_gate_structural_on() and related_claim_ids and not parts \
+                and status in ("answered", "partial", "blocked_missing_evidence"):
+            # A close naming beliefs for a task of one part names them for
+            # that part: they answer it by the structural test below.
+            sole = [p for p in task_parts if p.get("kind") != "umbrella"]
+            if len(sole) == 1 and len(task_parts) == 1 and sole[0].get("status") == "open":
+                parts = {str(sole[0].get("id")): {"claim_ids": [str(c) for c in related_claim_ids if c]}}
+        # One call, one state: a part refused refuses the whole call, and the
+        # store is put back as it was before the loop, so the refusal prints
+        # the saved state (never the parts applied in memory before the
+        # refusal) and says per part what would have held.
+        import copy as _copy
+        _before = _copy.deepcopy(found)
+        _held: list[str] = []
+        _order = [str(k) for k in (parts or {})]
+
+        def _refused(payload: dict, pid: str) -> dict:
+            found.clear()
+            found.update(_before)
+            if pid in _order:
+                verdicts = ([f"{h} would hold" for h in _held] + [f"{pid} refused"]
+                            + [f"{o} not checked" for o in _order[_order.index(pid) + 1:]])
+                payload["verdicts"] = verdicts
+                payload["error"] = ("; ".join(verdicts) + ". Nothing was recorded: send the call again with every "
+                                    "part, the refused one corrected. " + str(payload.get("error") or ""))
+            elif _held:
+                # No part was refused: the status is. The parts that would
+                # hold are named; the open list follows in the error.
+                payload["verdicts"] = [f"{h} would hold" for h in _held]
+                payload["error"] = (", ".join(_held) + f" would hold; the status {status!r} is refused: "
+                                    + str(payload.get("error") or ""))
+            payload["parts"] = summary_lines(found)
+            return payload
+
         for pid, spec in (parts or {}).items():
             part = by_id.get(str(pid)) or by_text.get(str(pid).strip().casefold()) or next(
                 (p for p in task_parts if str(pid).strip().casefold() in str(p.get("text") or "").casefold()), None)
             if part is None:
-                return {"success": False, "error": f"unknown part {pid!r}; parts: "
-                        + ", ".join(f"{p['id']} {p['text']}" for p in task_parts)}
+                return _refused({"success": False, "error": f"unknown part {pid!r}; parts: "
+                                 + ", ".join(f"{p['id']} {p['text']}" for p in task_parts)}, str(pid))
             if not isinstance(spec, dict):
-                return {"success": False, "error": (
+                return _refused({"success": False, "error": (
                     f"part {pid!r} takes an object, not {type(spec).__name__}; {PARTS_HOW}. "
-                    "A value written here is not evidence")}
+                    "A value written here is not evidence")}, str(pid))
+            given = str(pid)
             pid = str(part.get("id"))
+            flat = sorted(k for k in spec if k in ("part", "part_claim_ids", "limitation_basis",
+                                                   "limitation_reason", "limitation_call_ids"))
+            if flat:
+                # The one-part parameters written inside the parts object: a
+                # shape neither path reads, refused rather than half applied.
+                return _refused({"success": False, "gate": "task_part_args", "error": (
+                    f"part {pid!r} carries {', '.join(flat)}, the one-part parameters: pass them as "
+                    "parameters of the call (part=, limitation_basis=, ...) or write the part as "
+                    '{"claim_ids": [...]} or {"limitation": {"basis": ..., "reason": ..., "call_ids": [...]}}')},
+                    given)
             if "basis" in spec and "limitation" not in spec:
                 # The limitation's fields given flat under the part.
                 spec = {"limitation": {k: spec.get(k) for k in ("basis", "reason", "call_ids")}}
@@ -940,7 +1210,56 @@ def update_task(
             if spec.get("claim_ids"):
                 ids = [str(c) for c in spec["claim_ids"] if c]
                 part["status"] = "open"
+                part.pop("closed_by", None)
                 assign(found, nodes, ids, known_hosts=hosts, explicit={str(pid): ids}, lenient=True)
+                if part.get("status") == "answered":
+                    # The analyst closed this part: the answer leads with it
+                    # (bound_by, a different key, marks a link with no read value).
+                    part["closed_by"] = "analyst"
+                if part.get("status") != "answered" and part_gate_structural_on():
+                    # The gate checks structure only: a linked current belief
+                    # that states something (not a gap; not an absence,
+                    # except for a yes/no part, which an absence answers
+                    # "no"). Whether it is the right belief is judged where
+                    # it can be judged by meaning: the composer's part
+                    # coverage and the reviewer.
+                    from core.answer_synthesis import ABSENCE, GAP, classify_statement
+                    from core.request_parts import _answer
+                    refuse_kinds = (GAP,) if str(part.get("type") or "") == "yes_no" else (GAP, ABSENCE)
+                    stating = [n for n in _current(nodes, ids)
+                               if classify_statement(str(n.get("statement") or "")) not in refuse_kinds]
+                    # An absence answers a yes/no part "no" only over the hosts
+                    # the part asks about (the door's absence scope): a "no"
+                    # on one host never answers a question over the estate.
+                    scope_need = " ".join(str(x or "") for x in (part.get("text"), part.get("host")))
+                    from core.conclusion_door import _case_hosts, absence_scope_missing
+                    from core.forensic_citation import host_mentioned
+                    if not any(host_mentioned(h, scope_need) for h in _case_hosts(case_dir)):
+                        scope_need = str(found.get("text") or "")
+                    unscoped = {n.get("id"): absence_scope_missing(n, scope_need, case_dir) for n in stating
+                                if classify_statement(str(n.get("statement") or "")) == ABSENCE}
+                    unscoped = {k: v for k, v in unscoped.items() if v}
+                    stating = [n for n in stating if n.get("id") not in unscoped]
+                    if unscoped and not stating:
+                        missing = sorted({h for v in unscoped.values() for h in v})
+                        return {"success": False, "gate": "task_part_unsupported",
+                                "error": (f"part {pid} ({part.get('text')!r}) is not answered by {ids}: "
+                                          f"{'its absence covers' if len(unscoped) == 1 else 'their absences cover'} "
+                                          f"fewer hosts than the part asks about (not {', '.join(missing[:8])}). "
+                                          "Link an absence over those hosts too, or limit the part; "
+                                          f"{PARTS_HOW}"),
+                                "parts": summary_lines(found)}
+                    if not stating:
+                        return {"success": False, "gate": "task_part_unsupported",
+                                "error": (f"part {pid} ({part.get('text')!r}) is not answered by {ids}: none of "
+                                          "them is a current belief that states something (a gap"
+                                          + ("" if refuse_kinds == (GAP,) else " or an absence")
+                                          + " is no answer). Link the belief that states the answer, or limit "
+                                          f"the part; {PARTS_HOW}"),
+                                "parts": summary_lines(found)}
+                    _answer(part, stating[0], "")
+                    part["bound_by"] = "analyst"
+                    part["closed_by"] = "analyst"
                 if part.get("status") != "answered":
                     from core.answer_values import VALUE_TYPES, explicit_candidates
                     from core.request_parts import _typed_values
@@ -963,55 +1282,104 @@ def update_task(
                                "type the one meant on its belief with claim.add_indicators(claim_id, "
                                "[{type, value, side}]) and link it again, link a belief whose clause names "
                                "the part beside its value, or limit the part")
-                        return {"success": False, "gate": "task_part_unsupported",
-                                "error": (f"part {pid} ({part.get('text')!r}) is not answered by {ids}: "
-                                          f"{'it states' if len(ids) == 1 else 'they state'} "
-                                          f"{len(stated)} {typ} values ({', '.join(stated[:6])}) and no clause names "
-                                          "the part's words beside one, so which one it asks for is not stated: "
-                                          f"{how}; {PARTS_HOW}"),
-                                "parts": summary_lines(found)}
+                        return _refused({"success": False, "gate": "task_part_unsupported",
+                                         "error": (f"part {pid} ({part.get('text')!r}) is not answered by {ids}: "
+                                                   f"{'it states' if len(ids) == 1 else 'they state'} "
+                                                   f"{len(stated)} {typ} values ({', '.join(stated[:6])}) and no "
+                                                   "clause names the part's words beside one, so which one it asks "
+                                                   f"for is not stated: {how}; {PARTS_HOW}")}, given)
                     if part.get("kind") == "relation":
                         need = "a stated relation naming a term from each side"
-                    elif str(part.get("type")) in STRICT_VALUE_TYPES:
+                    elif _needs_read_value(part):
                         need = (f"a {part.get('type')} value, which a link answers only through "
                                 "a belief that states it")
                     else:
-                        words = ", ".join(sorted(part_words(str(part.get("text") or "")))) or "its words"
-                        need = (f"what the part asks about ({words}) in a statement that is not a gap "
-                                f"or an absence, nor a {part.get('type')} value")
-                    return {"success": False, "gate": "task_part_unsupported",
-                            "error": (f"part {pid} ({part.get('text')!r}) is not answered by {ids}: "
-                                      f"none of them carries {need}. Link the belief that does, limit "
-                                      f"the part, or record the belief that states it first; when that "
-                                      f"belief sharpens one of {ids}, record it with supersedes=<that "
-                                      f"id>, which replaces it instead of adding a variant beside it; "
-                                      f"{PARTS_HOW}"),
-                            "parts": summary_lines(found)}
+                        words = ", ".join(sorted(part_words(str(part.get("text") or ""))))
+                        what = (f"what the part asks about ({words})" if words else
+                                "what the request asks about (the part has no words of its own)")
+                        need = (f"{what} in a statement that is not a gap or an absence, nor a "
+                                f"{part.get('type')} value")
+                    return _refused({"success": False, "gate": "task_part_unsupported",
+                                     "error": (f"part {pid} ({part.get('text')!r}) is not answered by {ids}: "
+                                               f"none of them carries {need}. Link the belief that does, limit "
+                                               f"the part, or record the belief that states it first; when that "
+                                               f"belief sharpens one of {ids}, record it with supersedes=<that "
+                                               f"id>, which replaces it instead of adding a variant beside it; "
+                                               f"{PARTS_HOW}")}, given)
             elif spec.get("limitation"):
                 lim = spec["limitation"] if isinstance(spec["limitation"], dict) else {}
                 refuse = _limitation_refusal(case_dir, part, str(lim.get("basis") or ""),
                                              str(lim.get("reason") or ""), list(lim.get("call_ids") or []))
                 if refuse:
-                    return {"success": False, "gate": "task_part_limitation", "error": refuse,
-                            "parts": summary_lines(found)}
+                    return _refused({"success": False, "gate": "task_part_limitation", "error": refuse}, given)
                 limit(part, str(lim.get("basis")), str(lim.get("reason")), list(lim.get("call_ids") or []))
-        # The linked beliefs answer what they can, by the typed test; a
-        # host answered "not affected" closes its standard parts.
+            _held.append(given)
+        # The linked beliefs answer what they can, by the typed test, when the
+        # call names links or closes the task. A progress note (a status-only
+        # or parts-only call) leaves the stored links alone: they may be
+        # record-time links, and only the analyst's own close closes a part.
+        # A host gate answered "not affected" (an analyst binding, by any
+        # path) closes the host's other standard parts in the same call.
         from core.request_parts import close_unaffected_hosts
-        assign(found, nodes, found.get("related_claim_ids") or [], known_hosts=hosts, lenient=True)
+        if part_gate_structural_on():
+            # Structure only: the beliefs this call names answer what they
+            # carry by value, never by a lexical test, and a stored or
+            # record-time link answers nothing on an update (a part the
+            # analyst means is closed by naming its belief for it).
+            if related_claim_ids:
+                assign(found, nodes, [str(c) for c in related_claim_ids if c], known_hosts=hosts)
+        elif related_claim_ids is not None or status in ("answered", "partial", "blocked_missing_evidence"):
+            assign(found, nodes, found.get("related_claim_ids") or [], known_hosts=hosts, lenient=True)
         close_unaffected_hosts(found, nodes)
+        # The umbrella follows its standard parts as they stand at the end
+        # of this call (the host limits above may have settled the last).
+        from core.request_parts import settle_umbrella
+        settle_umbrella(found)
+        if related_claim_ids is not None:
+            # A part answered by the links this call named is the analyst's own
+            # close. A close over stored links alone stamps nothing. An
+            # umbrella follows its standard parts and is never stamped.
+            named = {str(c) for c in related_claim_ids if c}
+            for p in task_parts:
+                if p.get("status") == "answered" and p.get("claim_ids") and p.get("kind") != "umbrella" \
+                        and {str(c) for c in p["claim_ids"]} <= named:
+                    p["closed_by"] = "analyst"
         derived = derive_status(found, keep_markers=False)
+        held, depth = depth_hold(case_dir, found)
+        if status == "answered" and derived == "answered" and held:
+            # The way out is named: the undecided cheap and medium classes
+            # of the hosts in scope stand in the class block.
+            return _refused({"success": False, "gate": "task_depth_hold",
+                             "error": (f"'answered' is held: the question is host-wide and a host in its scope has "
+                                       f"not reached depth (decided/total: {depth}). Decide the cheap and medium "
+                                       "content classes of those hosts (read one file of each, or leave the label "
+                                       "with an observation; the open-work block names them), then close; the "
+                                       "answer stays partial meanwhile and carries this depth")}, "")
+        if derived == "answered" and held:
+            derived = "partial"
+            notes.append(f"the question is host-wide and stays partial until each host in scope has its cheap "
+                         f"and medium evidence decided ({depth})")
         if status in ("answered", "blocked_missing_evidence") and derived != status:
+            # The open list is the one this call would have produced (the
+            # useful part); the parts printed are the saved ones, and
+            # nothing was recorded (the same restore as the loop's refusals).
             pending = open_parts(found)
-            return {"success": False, "gate": "task_parts_open",
-                    "error": (f"{status!r} needs every part answered or limited; open: "
-                              + "; ".join(f"{p['id']} {p['text']} (needs a value of kind {p['type']})" for p in pending)
-                              + ". Link the belief that answers each open part (it is accepted when it "
-                              "carries what the part asks about, even where no value can be read from "
-                              "it; an ip, mac, email, hash or domain part needs a belief that states "
-                              "the value), limit a part the evidence cannot answer, or record the belief "
-                              f"that states it first; {PARTS_HOW}"),
-                    "parts": summary_lines(found), "candidates": answer_candidates(case_dir, parts=pending)}
+            saved = {str(p.get("id")): p for p in (_before.get("parts") or []) if isinstance(p, dict)}
+            would = [f"{p['id']} would be {p['status']}" + (f": {p['value']}" if p.get("value") else "")
+                     for p in task_parts if p.get("status") in ("answered", "limited")
+                     and (saved.get(str(p.get("id"))) or {}).get("status") != p.get("status")]
+            return _refused({"success": False, "gate": "task_parts_open",
+                             "error": (f"{status!r} needs every part answered or limited; open: "
+                                       + "; ".join(f"{p['id']} {p['text']} (needs a value of kind {p['type']})"
+                                                   for p in pending)
+                                       + (". This call would also set: " + "; ".join(would) if would else "")
+                                       + ". Nothing was recorded. Link the belief that answers each open part "
+                                       "(it is accepted when it carries what the part asks about, even where "
+                                       "no value can be read from it; an ip, mac, email, hash or domain part "
+                                       "needs a belief that states the value), limit a part the evidence "
+                                       "cannot answer, or record the belief that states it first; "
+                                       f"{PARTS_HOW}"),
+                             "candidates": answer_candidates(case_dir, parts=pending)}, "")
         found["status"] = derived
     found["updated_at"] = _utcnow()
     save_tasks(case_dir, store)
@@ -1066,8 +1434,13 @@ def _answer_shape_hint(case_dir, task: dict[str, Any]) -> Optional[str]:
 def _synthesis_hint(case_dir, task: dict[str, Any]) -> Optional[str]:
     """An answer that rests on individual claims only, with no conclusion
     among them, is told how to become one statement. Advisory: the answer
-    stands either way."""
+    stands either way. Not emitted with ATLAS_ANSWER_COMPOSE on: the report
+    composes the answer's wording from the linked beliefs, which is what
+    the hint existed for."""
     if task.get("status") not in ("answered", "partial"):
+        return None
+    from core.answer_synthesis import compose_on
+    if compose_on():
         return None
     ids = [str(c) for c in (task.get("related_claim_ids") or [])]
     if not ids:
@@ -1110,6 +1483,7 @@ def _unrelated_support(case_dir, task_text: str, claim_ids) -> Optional[list[str
     return None if related or not any(c in nodes for c in ids) else ids
 
 
+@_locked
 def repair_unsupported_answers(case_dir: str | os.PathLike) -> list[str]:
     """Reopen tasks marked answered/partial that no current belief supports.
 
@@ -1149,6 +1523,7 @@ def repair_unsupported_answers(case_dir: str | os.PathLike) -> list[str]:
     return reopened
 
 
+@_locked
 def supersede_task(
     case_dir: str | os.PathLike,
     old_task_id: str,
@@ -1178,6 +1553,7 @@ def supersede_task(
     return {"success": True, "task": old, "superseded_by": new_task_id}
 
 
+@_locked
 def add_derived_task(
     case_dir: str | os.PathLike,
     text: str,
@@ -1187,8 +1563,7 @@ def add_derived_task(
     """Create a system-derived revisit task (exact-text dedupe only).
 
     Applies DERIVED_PREFIX here rather than trusting each caller: the prefix is
-    what stops reconcile_case_md from dropping the task, and only
-    core/derived_revisit.py used to set it.
+    what stops reconcile_case_md from dropping the task.
     """
     text = (text or "").strip()
     if not text:
@@ -1208,6 +1583,7 @@ def add_derived_task(
     return {"success": True, "task": task, "created": True}
 
 
+@_locked
 def reopen_tasks_for_claims(
     case_dir: str | os.PathLike,
     claim_ids: list[str],
@@ -1235,6 +1611,7 @@ def reopen_tasks_for_claims(
     return {"reopened": reopened, "skipped": skipped}
 
 
+@_locked
 def restore_tasks_for_claims(
     case_dir: str | os.PathLike,
     claim_ids: list[str],
@@ -1270,6 +1647,7 @@ def restore_tasks_for_claims(
     return {"restored": restored, "skipped": skipped}
 
 
+@_locked
 def carry_links_on_supersede(case_dir: str | os.PathLike, old_id: str,
                              new_id: str) -> list[str]:
     """A task answered by a belief stays answered by the belief that
@@ -1318,12 +1696,12 @@ _LINK_STOPWORDS = frozenset({
 
 
 def link_tokens(text: str) -> set[str]:
-    """Tokenize text for task↔finding / task↔path soft matching."""
+    """Tokenize text for task<->finding / task<->path soft matching."""
     toks = set(re.findall(r"[a-z0-9][a-z0-9._-]{2,}", (text or "").casefold()))
     return {t.strip("._-") for t in toks if t.strip("._-") not in _LINK_STOPWORDS}
 
 
-# Back-compat alias used by earlier call sites during the S4 wave.
+# Alias for call sites that import the private name.
 _link_tokens = link_tokens
 
 
@@ -1341,6 +1719,7 @@ def _task_link_score(task_text: str, statement: str, host: str = "") -> float:
     return weight
 
 
+@_locked
 def link_claim_to_tasks(
     case_dir: str | os.PathLike,
     claim_id: str,
@@ -1353,8 +1732,8 @@ def link_claim_to_tasks(
 
     Matching is token-overlap on task text vs finding statement/host — not a
     fuzzy merge of inbox wording. Sole open inbox task always receives the
-    claim (single-question cases). Does **not** mark tasks answered; bumps
-    ``open`` → ``in_progress`` when a claim lands.
+    claim (single-question cases). Does **not** mark tasks answered and does
+    not touch the parts; bumps ``open`` → ``in_progress`` when a claim lands.
     """
     if not claim_id:
         return {"linked": [], "skipped": True, "reason": "empty_claim_id"}
@@ -1394,7 +1773,6 @@ def link_claim_to_tasks(
 
     linked: list[str] = []
     now = _utcnow()
-    nodes: dict[str, dict] | None = None
     for _sc, t in scored:
         related = list(t.get("related_claim_ids") or [])
         if claim_id not in related:
@@ -1403,15 +1781,10 @@ def link_claim_to_tasks(
             linked.append(str(t.get("id")))
         if t.get("status") == "open":
             t["status"] = "in_progress"
-        if t.get("parts"):
-            from core.request_parts import assign, derive_status
-            if nodes is None:
-                nodes = _graph_nodes(case_dir)
-                if claim_id not in nodes and statement:
-                    nodes[claim_id] = {"id": claim_id, "kind": "claim", "status": "new",
-                                       "statement": statement, "host": host}
-            assign(t, nodes, [claim_id], known_hosts=_known_hosts(case_dir))
-            t["status"] = derive_status(t)
+        # Record-time linking does not touch the parts: only the analyst's
+        # own update closes one. A binding made here by the first belief that
+        # carried a value of the part's kind closed questions with claims
+        # about other things, at any tier, and later closes could not undo it.
         t["updated_at"] = now
 
     if linked and persist:
@@ -1423,6 +1796,7 @@ def link_claim_to_tasks(
     }
 
 
+@_locked
 def reconcile_case_md(
     case_dir: str | os.PathLike,
     *,
@@ -1435,9 +1809,10 @@ def reconcile_case_md(
     """
     root = Path(case_dir).resolve()
     md = read_case_markdown(root)
-    items = parse_case_request_items(md)
+    items = brief_request_items(md)
     requests = [item["text"] for item in items]
     children_of = {item["text"]: list(item.get("children") or []) for item in items}
+    whole = {item["text"] for item in items if item.get("whole")}
     # The request's first physical line is what an earlier reader stored:
     # a task written that way is the same request, cut short.
     first_line_of = {item["text"]: item["first_line"] for item in items
@@ -1516,7 +1891,8 @@ def reconcile_case_md(
     for t in store.get("tasks") or []:
         if not isinstance(t, dict) or t.get("status") == "dropped":
             continue
-        fresh = ensure_parts(t, children_of.get(str(t.get("text") or "")))
+        fresh = ensure_parts(t, children_of.get(str(t.get("text") or "")),
+                             whole=str(t.get("text") or "") in whole)
         if fresh:
             changed = True
         if any(isinstance(p, dict) and p.get("kind") == "umbrella" for p in t.get("parts") or []):
@@ -1525,14 +1901,15 @@ def reconcile_case_md(
             if ensure_standard_parts(t, computer_hosts):
                 changed = True
                 fresh = True
-        if fresh and t.get("related_claim_ids"):
-            # Parts written for a task that already had its beliefs are
-            # answered by them where they can be: a store written before
-            # parts existed keeps the answers its beliefs carry.
+        if fresh and t.get("related_claim_ids") and t.get("status") in ("answered", "partial"):
+            # Parts written for a task the analyst already closed are answered
+            # by its beliefs where they can be: a store written before parts
+            # existed keeps the answers its close carried. An open task's
+            # links are record-time links and close nothing here.
             if nodes is None:
                 nodes = _graph_nodes(root)
             assign(t, nodes, t.get("related_claim_ids") or [], known_hosts=_known_hosts(root),
-                   lenient=t.get("status") in ("answered", "partial"))
+                   lenient=True)
         new_status = derive_status(t)
         if new_status != t.get("status"):
             t["status"] = new_status

@@ -70,7 +70,8 @@ class TestTheAnalystsLink:
         assert p1["status"] == "answered" and p1["value"] == "" and p1["bound_by"] == "analyst"
         assert any("analyst link, no typed value" in line for line in r["parts"])
 
-    def test_a_link_to_a_belief_about_something_else_or_an_absence_is_refused(self, case):
+    def test_a_link_to_a_belief_about_something_else_or_an_absence_is_refused(self, case, monkeypatch):
+        monkeypatch.setenv("ATLAS_PART_GATE_STRUCTURAL", "0")   # the lexical gate's path
         other = _claim(case, "The notebook's shell history shows a network scanner run at logon.")
         absent = _claim(case, "No chat user settings were found in the profile.")
         tid = _task(case)["id"]
@@ -163,7 +164,8 @@ def test_a_one_part_answer_taken_on_a_link_is_itemised_in_the_report():
     assert _part_lines(task, {"C1": "F-004"}, "en") == []
 
 
-def test_a_belief_stating_two_values_of_the_kind_is_refused_with_both_until_one_is_typed(tmp_path):
+def test_a_belief_stating_two_values_of_the_kind_is_refused_with_both_until_one_is_typed(tmp_path, monkeypatch):
+    monkeypatch.setenv("ATLAS_PART_GATE_STRUCTURAL", "0")   # the lexical gate's path
     d = tmp_path / "N"
     (d / ".atlas").mkdir(parents=True)
     (d / "CASE.md").write_text("**Case ID:** N\n\n## Investigation Requests\n- Network — the C2 IP.\n",
@@ -180,7 +182,8 @@ def test_a_belief_stating_two_values_of_the_kind_is_refused_with_both_until_one_
     assert next(p for p in r["task"]["parts"] if p["id"] == "p1")["value"] == "203.0.113.9"
 
 
-def test_a_belief_typing_every_value_it_states_is_not_told_to_type_one(tmp_path):
+def test_a_belief_typing_every_value_it_states_is_not_told_to_type_one(tmp_path, monkeypatch):
+    monkeypatch.setenv("ATLAS_PART_GATE_STRUCTURAL", "0")   # the lexical gate's path
     d = tmp_path / "N"
     (d / ".atlas").mkdir(parents=True)
     (d / "CASE.md").write_text("**Case ID:** N\n\n## Investigation Requests\n- Network — the C2 IP.\n",
@@ -192,3 +195,81 @@ def test_a_belief_typing_every_value_it_states_is_not_told_to_type_one(tmp_path)
                                      {"type": "ip", "value": "203.0.113.9", "side": "attacker"}])
     r = update_task(d, tid, parts={"p1": {"claim_ids": [cid]}})
     assert not r["success"] and "already typed" in r["error"] and "claim.add_indicators" not in r["error"]
+
+
+def _yes_no_case(tmp_path):
+    d = tmp_path / "Y"
+    (d / ".atlas").mkdir(parents=True)
+    (d / "CASE.md").write_text("**Case ID:** Y\n\n## Investigation Requests\n"
+                               "- Is there evidence that the event logs were cleared on CORP-WS01?\n"
+                               "- Which IP address did the attacker connect from?\n", encoding="utf-8")
+    reconcile_case_md(d)
+    return d, [t["id"] for t in load_tasks(d)["tasks"]]
+
+
+def test_the_structural_gate_accepts_a_stating_belief_whatever_its_words(tmp_path):
+    d, (yes_no, how) = _yes_no_case(tmp_path)
+    c = cg.add_claim(d, statement="The Security log of CORP-WS01 was cleared at 2031-01-04 09:12 by jane.doe.",
+                     confidence="LIKELY", host="CORP-WS01")["node_id"]
+    r = update_task(d, yes_no, parts={"p1": {"claim_ids": [c]}})
+    assert r["success"], r
+    p1 = r["task"]["parts"][0]
+    assert p1["status"] == "answered" and p1["closed_by"] == "analyst" and p1["bound_by"] == "analyst"
+    v = cg.add_claim(d, statement="jane.doe logged on over RDP with a phished password.",
+                     confidence="LIKELY", host="CORP-WS01")["node_id"]
+    assert update_task(d, how, parts={"p1": {"claim_ids": [v]}})["success"]     # no address: the reviewer judges
+
+
+def test_a_gap_is_no_answer_and_an_absence_answers_only_yes_no(tmp_path):
+    d, (yes_no, how) = _yes_no_case(tmp_path)
+    gap = cg.add_claim(d, statement="Whether the logs were cleared could not be determined: the log is unreadable.",
+                       confidence="SUSPECTED", host="CORP-WS01")["node_id"]
+    absent = cg.add_claim(d, statement="No log clearing was found on CORP-WS01.",
+                          confidence="LIKELY", host="CORP-WS01")["node_id"]
+    r = update_task(d, yes_no, parts={"p1": {"claim_ids": [gap]}})
+    assert not r["success"] and r["gate"] == "task_part_unsupported"
+    assert update_task(d, yes_no, parts={"p1": {"claim_ids": [absent]}})["success"]
+    r = update_task(d, how, parts={"p1": {"claim_ids": [absent]}})
+    assert not r["success"] and "an absence" in r["error"]
+
+
+def test_under_the_structural_gate_only_the_beliefs_a_call_names_answer_a_part(tmp_path):
+    """A stored or record-time link answers no part on an update; a close of
+    a one-part task naming a belief binds it to that part by structure."""
+    from core.investigation_tasks import link_claim_to_tasks
+    d, (yes_no, how) = _yes_no_case(tmp_path)
+    text = "The Security log of CORP-WS01 was cleared at 2031-01-04 09:12 by jane.doe."
+    c = cg.add_claim(d, statement=text, confidence="LIKELY", host="CORP-WS01")["node_id"]
+    link_claim_to_tasks(d, c, statement=text, host="CORP-WS01")
+    r = update_task(d, yes_no, status="answered")
+    assert not r["success"] and r["gate"] == "task_parts_open"
+    r = update_task(d, yes_no, status="answered", related_claim_ids=[c])
+    assert r["success"], r
+    p1 = r["task"]["parts"][0]
+    assert p1["status"] == "answered" and p1["bound_by"] == "analyst" and p1["claim_ids"] == [c]
+
+
+def _hosts_case(tmp_path):
+    d = tmp_path / "H"
+    (d / ".atlas").mkdir(parents=True)
+    (d / ".atlas" / "evidence_links.json").write_text(json.dumps({"entries": [
+        {"label": "CORP-WS01", "path": "ws01.E01"}, {"label": "CORP-WS02", "path": "ws02.E01"}]}))
+    (d / "CASE.md").write_text(
+        "**Case ID:** H\n\n## Investigation Requests\n"
+        "- Was any host reached over RDP?\n- Was CORP-WS01 reached over RDP?\n", encoding="utf-8")
+    reconcile_case_md(d)
+    return d, [t["id"] for t in load_tasks(d)["tasks"]]
+
+
+def test_an_absence_answers_a_yes_no_part_only_over_the_hosts_it_asks_about(tmp_path, monkeypatch):
+    from core.conclusion_door import _case_hosts
+    d, (estate, one) = _hosts_case(tmp_path)
+    assert _case_hosts(d) == ["CORP-WS01", "CORP-WS02"]
+    ws01 = cg.add_claim(d, statement="No RDP logon was found on CORP-WS01.", confidence="LIKELY",
+                        host="CORP-WS01")["node_id"]
+    r = update_task(d, estate, parts={"p1": {"claim_ids": [ws01]}})
+    assert not r["success"] and "CORP-WS02" in r["error"] and "fewer hosts" in r["error"]
+    assert update_task(d, one, parts={"p1": {"claim_ids": [ws01]}})["success"]
+    both = cg.add_claim(d, statement="No RDP logon was found on CORP-WS01 or CORP-WS02.",
+                        confidence="LIKELY", host="")["node_id"]
+    assert update_task(d, estate, parts={"p1": {"claim_ids": [both]}})["success"]

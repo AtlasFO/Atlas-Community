@@ -178,7 +178,7 @@ def format_blocking_issue(unresolved: list[dict]) -> str:
         f"too-broad EventID set, full-file stream) and retry with a narrower "
         f"strategy: (1) ez.evtxecmd with event_ids and time_start/time_end "
         f"(UTC) around the case window, then table.table_query on its CSV for "
-        f"EID 4624/4625/4723, or (2) misc.chainsaw_hunt. "
+        f"the event ids the scan needed, or (2) misc.chainsaw_hunt. "
         f"A non-truncated success on the same .evtx path (or EvtxECmd/"
         f"Hayabusa/Chainsaw covering that file or its parent directory) "
         f"clears this blocker — not a same-named file under another tree."

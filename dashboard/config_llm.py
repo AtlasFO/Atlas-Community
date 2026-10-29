@@ -19,7 +19,7 @@ import os
 from pathlib import Path
 from typing import Any, Optional
 
-from core import envfile, providers
+from core import envfile, provider_profiles, providers
 from core import llm_setup as ls
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -41,9 +41,9 @@ def presets() -> list[dict]:
     return [
         {"id": p.id, "label": p.label, "description": p.description,
          "base_url": p.base_url, "default_model": p.default_model,
-         "needs_api_key": p.needs_api_key, "default_choice": p.default_choice,
-         "notes": p.notes}
-        for p in ls.PRESETS
+         "needs_api_key": p.needs_api_key,
+         "notes": p.notes, "implicit": p.implicit, "levels": list(p.levels)}
+        for p in ls.presets()
     ]
 
 
@@ -56,16 +56,24 @@ def _provider_summary(name: str) -> dict:
         profile = resolve_api_compat(name, p.model)
         return {"name": name, "base_url": p.base_url, "model": p.model or None,
                 "key_set": bool(p.api_key), "roles": active_roles,
-                "usable": True, "error": None,
+                # A keyless profile (a local server) is ready without a key.
+                "needs_api_key": p.needs_api_key,
+                "usable": True, "error": None, "profile": p.profile,
+                "implicit": provider_profiles.implicit(name) is not None,
                 # How hard its models are asked to think, and what replies
                 # have shown so far.
                 "thinking": providers.thinking_level(name) or "auto",
+                # The auth header and prefix set for this provider itself
+                # (the form's Auth fields), not its profile's defaults.
+                "auth_header": os.environ.get(providers.var(name, "AUTH_HEADER")) or "",
+                "auth_prefix": os.environ.get(providers.var(name, "AUTH_PREFIX")) or "",
                 "reasoning_observed": profile.reasoning_observed,
                 "thinking_control": profile.thinking_control}
     except providers.UnknownProvider as exc:
         return {"name": name, "base_url": None, "model": None,
-                "key_set": False, "roles": active_roles,
-                "usable": False, "error": str(exc)}
+                "key_set": False, "roles": active_roles, "needs_api_key": True,
+                "usable": False, "error": str(exc), "profile": None,
+                "implicit": provider_profiles.implicit(name) is not None}
 
 
 def model_overrides() -> list[dict]:
@@ -91,14 +99,16 @@ def model_overrides() -> list[dict]:
 
 
 def list_providers() -> dict:
-    # llmhub always resolves (its base URL falls back to a hardcoded
-    # default — see core/llmhub.py) so it can't be un-declared like every
-    # other provider. When it isn't actually in use (no key, no roles
-    # assigned) hide it instead — same visible effect as deleting an unused
-    # row, without pretending the always-available default went away.
+    # Profile files edited since the last look apply from here on.
+    provider_profiles.load(reload=True)
+    # An implicit provider (the hub) always resolves (its base URL falls back
+    # to its profile's default) so it can't be un-declared like every other
+    # provider. When it isn't actually in use (no key, no roles assigned)
+    # hide it instead — same visible effect as deleting an unused row,
+    # without pretending the always-available default went away.
     summaries = [_provider_summary(n) for n in providers.names()]
     summaries = [p for p in summaries if not (
-        p["name"] == providers.DEFAULT_NAME and not p["key_set"] and not p["roles"])]
+        p["implicit"] and not p["key_set"] and not p["roles"])]
     return {
         "presets": presets(),
         "providers": summaries,
@@ -116,26 +126,89 @@ def list_providers() -> dict:
 
 def probe(base_url: str, api_key: str, auth_header: str = "",
           auth_prefix: Optional[str] = None, model: str = "",
-          name: str = "") -> dict:
+          name: str = "", preset_id: str = "") -> dict:
     """Test connection: which models the provider lists and, with a model id,
-    what that model can do (answer, call tools, think, take a level).
+    what that model can do (answer, call tools, think, take a level). The
+    test speaks with the provider profile the form shows (``preset_id``):
+    its auth header, headers and request shape.
 
     The capability report is what the role checkboxes and the Thinking
     setting are chosen against. A failed report never fails the connection
     test: the provider is still reachable and still saveable.
     """
     model = (model or "").strip()
+    if not preset_id and name:
+        # A form that shows no preset for a saved provider: its binding is
+        # the profile (as probe_capabilities reads it).
+        try:
+            preset_id = providers.resolve(name).profile
+        except providers.UnknownProvider:
+            pass
+    api_key = _probe_key(name, api_key)
     if not model:
         result = ls.probe(base_url, api_key, auth_header=auth_header,
-                          auth_prefix=auth_prefix)
+                          auth_prefix=auth_prefix, profile_id=preset_id)
         return {"ok": result.ok, "status": result.status,
                 "models": result.models, "error": result.error}
     caps = ls.probe_capabilities(base_url, api_key, model,
                                  auth_header=auth_header, auth_prefix=auth_prefix,
-                                 provider_name=name)
+                                 provider_name=name, profile_id=preset_id)
     return {"ok": caps.ok or caps.reachable, "status": caps.status,
             "models": caps.models, "error": caps.error,
             "capabilities": caps.to_dict()}
+
+
+def _probe_key(name: str, typed: str) -> str:
+    """The key a check speaks with: the one typed in the form, else the one
+    stored for the saved provider ``name`` (an edit that keeps it), else
+    none (a keyless profile, or nothing stored yet). A pasted key's edge
+    whitespace is not part of it."""
+    typed = (typed or "").strip()
+    if typed:
+        return typed
+    try:
+        return providers.resolve(name).api_key if name else ""
+    except providers.UnknownProvider:
+        return ""
+
+
+def _needs_key(preset_id: str, name: str) -> bool:
+    """Whether the profile a save binds to takes a key: the chosen preset,
+    else the saved provider's binding; True when neither is known."""
+    try:
+        if preset_id:
+            return provider_profiles.get(preset_id).needs_api_key
+        return providers.resolve(name).needs_api_key
+    except (provider_profiles.ProfileError, providers.UnknownProvider):
+        return True
+
+
+def _tested_matches(tested: Any, base_url: str, model: str, profile: str) -> bool:
+    """Whether the form's word that Test connection got an answer from the
+    model is about what is being saved: the same base URL, model and
+    profile. A word about other values vouches for nothing."""
+    if not isinstance(tested, dict):
+        return False
+    return (str(tested.get("base_url") or "").strip().rstrip("/") == base_url.rstrip("/")
+            and str(tested.get("model") or "").strip() == model
+            and str(tested.get("profile") or "").strip() == profile)
+
+
+def _listing_refusal(result: dict, base_url: str, model: str) -> str:
+    """Why a GET /models result does not vouch for ``model``, or "" when it
+    does: the provider answered and lists the model, lists nothing, or no
+    model was given."""
+    if not result["ok"]:
+        return (f"provider did not respond correctly at {base_url} "
+                f"({result['error'] or 'unreachable'}).")
+    listed = result.get("models") or []
+    if model and listed and model not in listed:
+        from core.model_context import listed_model
+        if listed_model([{"id": mid} for mid in listed if mid], model) is None:
+            return (f"model {model!r} is not available from this provider "
+                    f"({len(listed)} models listed); pick an id from the "
+                    f"Test connection result.")
+    return ""
 
 
 def save_provider(data: dict[str, Any]) -> dict:
@@ -144,19 +217,25 @@ def save_provider(data: dict[str, Any]) -> dict:
     "keyring"|"env"|"skip", skip_probe (bool)}.
 
     Mirrors cmd_provider_setup's ordering: build the update set, probe
-    unless explicitly skipped (refusing to save on a failed probe, exactly
-    like the CLI wizard), then write .env, then the API key separately.
+    unless explicitly skipped, then write .env, then the API key separately.
+    The probe refuses the save only when GET /models does not vouch for the
+    model and the model does not answer a test question either.
     """
     name = str(data.get("name") or "").strip()
     if err := ls.validate_name(name):
         raise ConfigError(err)
     base_url = str(data.get("base_url") or "").strip()
     roles = tuple(r for r in (data.get("roles") or []) if r in ls.PROVIDER_ROLE_VARS)
-    api_key = str(data.get("api_key") or "")
+    # A pasted key's edge whitespace is not part of it; a key that would
+    # break its .env line (or a request header) is refused before any check
+    # sends it.
+    api_key = str(data.get("api_key") or "").strip()
+    if api_key and (why := envfile.unsafe_value(api_key)):
+        raise ConfigError(f"The API key cannot be saved: {why}. Nothing was written.")
     auth_header = str(data.get("auth_header") or "") or None
     # Omitted or blank AUTH_PREFIX means "use the provider default" (Bearer
     # on Authorization). Do not write AUTH_PREFIX= — an empty assignment
-    # used to strip Bearer and OpenRouter answered 401.
+    # strips Bearer and OpenRouter answers 401.
     raw_prefix = data.get("auth_prefix")
     auth_prefix = None if raw_prefix is None or str(raw_prefix) == "" else str(raw_prefix)
     model = str(data.get("model") or "").strip()
@@ -187,6 +266,11 @@ def save_provider(data: dict[str, Any]) -> dict:
         # Back to auto clears the pinned level the file may hold.
         if thinking == "auto":
             updates[providers.thinking_var(name)] = ""
+        # A form that shows the Auth fields sends them: an emptied field
+        # removes the setting, so the profile's default applies again.
+        for field_name, suffix in (("auth_header", "AUTH_HEADER"), ("auth_prefix", "AUTH_PREFIX")):
+            if field_name in data and not str(data.get(field_name) or ""):
+                updates[providers.var(name, suffix)] = None
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
     updates.update(ls.declared_providers_update(providers.declared(), name))
@@ -197,30 +281,43 @@ def save_provider(data: dict[str, Any]) -> dict:
                                    envfile.read_values(_env_path())))
 
     probe_result = None
-    if api_key and not data.get("skip_probe"):
-        probe_result = probe(base_url, api_key, auth_header or "", auth_prefix)
-        if not probe_result["ok"]:
+    preset_id = str(data.get("preset_id") or "")
+    # The check speaks with the key the saved provider will use: the typed
+    # one, else the stored one; a keyless profile is checked with none.
+    probe_key = _probe_key(name, api_key)
+    if not data.get("skip_probe") and (probe_key or not _needs_key(preset_id, name)):
+        # The listing only (GET /models): a save makes no model call. A
+        # model the listing does not show saves after Test connection got an
+        # answer from it for these same values (the form's ``tested``).
+        probe_result = probe(base_url, probe_key, auth_header or "", auth_prefix,
+                             name=name, preset_id=preset_id)
+        refusal = _listing_refusal(probe_result, base_url, model)
+        if refusal and _tested_matches(data.get("tested"), base_url, model, preset_id):
+            refusal = ""
+        if not refusal and model and probe_result.get("models"):
+            # A match by case alone stores the list's own spelling.
+            from core.model_context import listed_model
+            stored = listed_model([{"id": m} for m in probe_result["models"] if m], model)
+            if stored and stored != model:
+                updates[providers.var(name, "MODEL")] = stored
+        if refusal:
             raise ConfigError(
-                f"provider did not respond correctly at {base_url} "
-                f"({probe_result['error'] or 'unreachable'}) — save aborted, "
-                f"nothing was written. Pass skip_probe to save anyway.")
-        listed = probe_result.get("models") or []
-        if model and listed and model not in listed:
-            from core.model_context import match_model_entry
-            hit = match_model_entry(
-                [{"id": mid} for mid in listed if mid], model)
-            if hit is None:
-                raise ConfigError(
-                    f"model {model!r} is not available from this provider "
-                    f"({len(listed)} models listed). Pick an id from the "
-                    f"Test connection result, or pass skip_probe to save "
-                    f"anyway.")
+                f"{refusal} Save aborted, nothing was written. A vendor whose list is empty, partial or in "
+                f"another format: press Test connection with the model filled in, then Save (a model that "
+                f"answered there is saved). Or tick Save without testing.")
 
     with envfile.lock():
         env_path = _env_path()
-        envfile.set_values(env_path, updates)
+        try:
+            envfile.set_values(env_path, updates)
+        except ValueError as exc:
+            raise ConfigError(str(exc)) from exc
         for key, value in updates.items():
-            os.environ[key] = value  # this process's own env, for immediate effect
+            # This process's own env, for immediate effect; None removed it.
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
         key_result = {"stored": "skip"}
         if api_key:
@@ -275,8 +372,8 @@ def delete_provider(name: str) -> dict:
     name = (name or "").strip()
     if not name:
         raise ConfigError("a provider name is required")
-    if name == providers.DEFAULT_NAME:
-        raise ConfigError("the built-in Telekom LLM Hub provider can't be removed")
+    if provider_profiles.implicit(name) is not None:
+        raise ConfigError(f"{name!r} is built in (its provider profile is implicit) and can't be removed")
     declared = providers.declared()
     if name not in declared:
         raise ConfigError(f"no such provider: {name!r}")
@@ -288,13 +385,35 @@ def delete_provider(name: str) -> dict:
             f"all: {', '.join(losing)}. Assign them to a different provider "
             f"first.")
 
-    updates = ls.role_updates(name, ())
+    updates: dict[str, Optional[str]] = dict(ls.role_updates(name, ()))
     updates.update(ls.undeclare_provider_update(declared, name))
+    # Every variable of the instance goes, its key included: a name added
+    # again later must not find the old URL, model or key. Exact names only:
+    # removing "gw" never touches "gw_b"'s lines.
+    instance_vars = [providers.var(name, s) for s in providers.INSTANCE_SUFFIXES]
+    updates.update({v: None for v in instance_vars})
+    other = providers.colliding_name(name)
 
     with envfile.lock():
         env_path = _env_path()
         envfile.set_values(env_path, updates)
         for key, value in updates.items():
-            os.environ[key] = value
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
-    return {"success": True, "removed": name}
+    result: dict[str, Any] = {"success": True, "removed": name}
+    # The keyring copy of the key, best effort; a key left there is said.
+    from core import secrets
+    key_var = providers.var(name, "API_KEY")
+    if secrets.keyring_has(key_var) and not secrets.keyring_clear(key_var):
+        result["key_left_in_keyring"] = key_var
+    try:
+        from agent.llm import forget_api_compat
+        result["learned_dropped"] = forget_api_compat(name)
+    except Exception as exc:  # noqa: BLE001 - the removal stands; the leftover is said
+        result["learned_left"] = f"{type(exc).__name__}: {exc}"[:200]
+    if other:
+        result["left_unusable"] = other
+    return result

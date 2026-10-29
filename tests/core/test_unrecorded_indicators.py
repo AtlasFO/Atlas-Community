@@ -221,3 +221,118 @@ def test_a_withdrawn_finding_no_longer_rules_on_its_indicator(tmp_path):
     assert unrecorded_evidence_indicators(seen + [ruling], None, min_calls=3) == []
     assert [d["value"] for d in unrecorded_evidence_indicators(seen + [ruling], case, min_calls=3)] \
         == ["203.0.113.9"]
+
+
+def _listing(cid, names, note):
+    import json
+    return _tc(cid, json.dumps({"success": True, "path": "analysis/export", "count": len(names),
+                                "entries": [{"name": n} for n in names], "note": note}))
+
+
+def test_a_result_sets_note_is_never_an_indicator_its_rows_still_are():
+    """Atlas's own guidance in a result's header (a note naming example
+    files) recurs in every listing; it is no evidence. The listed names
+    are."""
+    note = "Open one of these with the matching parser; do not guess guessed_name.csv for a sibling."
+    entries = [_listing(i, ["implant.dll"], note) for i in range(1, 5)]
+    vals = [d["value"].lower() for d in unrecorded_evidence_indicators(entries, None, min_calls=3)]
+    assert "implant.dll" in vals and "guessed_name.csv" not in vals
+
+
+def test_a_small_spill_is_swept_over_its_rows_by_the_same_kinds(tmp_path):
+    """A spill read whole gives the rows' addresses, never the header's,
+    and no kind the byte sweep does not read (a hash stays out)."""
+    import json
+    entries = []
+    for i in range(1, 5):
+        spill = tmp_path / f"s{i}.json"
+        spill.write_text(json.dumps({"success": True, "note": "relay at 198.51.100.77 is an example",
+                                     "entries": [{"dst": "203.0.113.45", "md5": "ab" * 16}]}))
+        entries.append({"type": "tool_call", "call_id": i, "success": True, "cmd": "", "stdout_excerpt": "{",
+                        "stdout_file": str(spill)})
+    vals = [d["value"] for d in unrecorded_evidence_indicators(entries, None, min_calls=3)]
+    assert "203.0.113.45" in vals and "198.51.100.77" not in vals and "ab" * 16 not in vals
+
+
+def _spill_call(tmp_path, cid, lines, *, args):
+    spill = tmp_path / f"call{cid}.stdout"
+    spill.write_text("\n".join(lines) + "\n")
+    return {"type": "tool_call", "call_id": cid, "success": True, "cmd": "<py>:scan_scan_file",
+            "mcp_tool": "scan_scan_file", "args": args, "stdout_excerpt": lines[0],
+            "stdout_file": str(spill)}
+
+
+def test_a_tools_own_trailer_lines_are_not_indicators(tmp_path):
+    # Three outputs of one tool over three inputs end with the same trailer
+    # block (the tool's name and its project links) and start with the same
+    # banner line: those lines sit at the same offset from the end (or the
+    # start) of every output and are the tool's own text, not evidence.
+    banner = "scan-tool 1.2 (c) the project"
+    trailer = ["Thank you for using scan-tool.", "Report rules at https://rules.example.test/issues"]
+    entries = []
+    for i, (name, n) in enumerate((("a.evtx", 3), ("b.evtx", 7), ("c.evtx", 5)), start=1):
+        data = [f"record {k} on 2031-03-10 from {name}" for k in range(n)]
+        entries.append(_spill_call(tmp_path, i, [banner, *data, *trailer], args=f'{{"file": "{name}"}}'))
+    vals = [d["value"] for d in unrecorded_evidence_indicators(entries, None, min_calls=3)]
+    assert "https://rules.example.test/issues" not in vals
+
+
+def test_the_same_record_line_at_different_offsets_is_still_an_indicator(tmp_path):
+    # A C2 URL printed by three passes over three samples sits at a
+    # different offset in each output: a record, demanded as before.
+    hit = "beacon to http://evilc2.example.test/api"
+    entries = []
+    for i, (name, before) in enumerate((("a.bin", 1), ("b.bin", 4), ("c.bin", 2)), start=1):
+        data = [f"string {k} of {name}" for k in range(before)] + [hit] + [f"tail {k} of {name}" for k in range(3 - before % 3)]
+        entries.append(_spill_call(tmp_path, i, data, args=f'{{"file": "{name}"}}'))
+    vals = [d["value"] for d in unrecorded_evidence_indicators(entries, None, min_calls=3)]
+    assert "http://evilc2.example.test/api" in vals
+
+
+def test_own_lines_need_three_outputs_over_two_distinct_requests(tmp_path):
+    # The same request repeated three times tells a banner from data by
+    # nothing: no line is taken as the tool's own.
+    from core.ioc_pivots import own_text_lines
+    lines = ["banner", "record x", "trailer https://rules.example.test/issues"]
+    same = [_spill_call(tmp_path, i, lines, args='{"file": "a.evtx"}') for i in (1, 2, 3)]
+    assert own_text_lines(same) == {}
+    two = [_spill_call(tmp_path, i, lines, args=f'{{"file": "{n}.evtx"}}') for i, n in ((1, "a"), (2, "b"))]
+    assert own_text_lines(two) == {}
+
+
+def test_an_output_that_is_one_line_in_every_call_is_data_not_banner(tmp_path):
+    # Three outputs that are each the same single record line: a block that
+    # covers a whole output tells banner from data by nothing, so the value
+    # stays demanded.
+    entries = [_spill_call(tmp_path, i, ["beacon to http://evilc2.example.test/api"], args=f'{{"file": "{n}.bin"}}')
+               for i, n in ((1, "a"), (2, "b"), (3, "c"))]
+    vals = [d["value"] for d in unrecorded_evidence_indicators(entries, None, min_calls=3)]
+    assert "http://evilc2.example.test/api" in vals
+
+
+def test_a_fixed_layout_summary_value_another_tool_shows_stays_demanded(tmp_path):
+    # A summary tool prints "top remote: <address>" as its last line in every
+    # output: own text by offset, but another tool's rows show the address,
+    # so it is evidence after all.
+    entries = []
+    for i, n in ((1, "a"), (2, "b"), (3, "c")):
+        entries.append(_spill_call(tmp_path, i, ["summary of " + n, f"records {i * 7}", "top remote: 203.0.113.77"],
+                                   args=f'{{"file": "{n}.log"}}'))
+    for i in (4, 5, 6):
+        entries.append({"type": "tool_call", "call_id": i, "success": True, "cmd": "<py>:net_net_flows",
+                        "mcp_tool": "net_net_flows", "stdout_excerpt": f"flow {i}: 10.0.0.5 -> 203.0.113.77:443"})
+    vals = [d["value"] for d in unrecorded_evidence_indicators(entries, None, min_calls=3)]
+    assert "203.0.113.77" in vals
+    # Without the other tool the trailer value is the tool's own text.
+    alone = [d["value"] for d in unrecorded_evidence_indicators(entries[:3], None, min_calls=3)]
+    assert "203.0.113.77" not in alone
+
+
+def test_own_lines_are_the_contiguous_head_and_tail_blocks_only(tmp_path):
+    from core.ioc_pivots import own_text_lines
+    outs = (["banner line", "varies a", "same middle", "varies a2", "trailer line"],
+            ["banner line", "varies b", "same middle", "varies b2", "trailer line"],
+            ["banner line", "varies c", "same middle", "varies c2", "trailer line"])
+    entries = [_spill_call(tmp_path, i, lines, args=f'{{"file": "{i}.x"}}') for i, lines in enumerate(outs, start=1)]
+    own = own_text_lines(entries)
+    assert own[1] == frozenset({"banner line", "trailer line"})      # "same middle" is not at the edge blocks

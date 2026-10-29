@@ -12,6 +12,14 @@ from core.claim_graph import supersede
 from core.execution_log import ExecutionLog
 
 
+@pytest.fixture(autouse=True)
+def _lowering_path(monkeypatch):
+    """These tests pin the citation blocker, the streak and the lowering: the
+    path ATLAS_CITATION_DISCLOSURE off restores. With the switch on, the
+    report-time check discloses instead (tests/tools/test_report_citation_disclosure.py)."""
+    monkeypatch.setenv("ATLAS_CITATION_DISCLOSURE", "0")
+
+
 @pytest.fixture
 def case(tmp_path):
     (tmp_path / ".atlas").mkdir()

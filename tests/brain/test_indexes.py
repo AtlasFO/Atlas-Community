@@ -6,7 +6,7 @@ def test_rebuild_writes_all_indexes(brain):
     make_note(brain, "wiki/tools/vol.md", "Volatility", type="tool",
               tags="volatility", tools="volatility", related='"[[plaso]]"')
     make_note(brain, "wiki/tools/plaso.md", "Plaso", type="tool",
-              tags="plaso, timeline", cases="nitroba")
+              tags="plaso, timeline", cases="case-a")
     summary = indexes.rebuild()
     assert summary["indexed"] == 2
     for name in indexes.INDEX_FILES:
@@ -14,7 +14,7 @@ def test_rebuild_writes_all_indexes(brain):
     tag_index = (brain / "indexes" / "tag-index.md").read_text()
     assert "volatility" in tag_index and "Plaso" in tag_index
     case_index = (brain / "indexes" / "case-index.md").read_text()
-    assert "nitroba" in case_index
+    assert "case-a" in case_index
 
 
 def test_confidential_excluded_by_default(brain):
@@ -86,7 +86,7 @@ def test_rebuild_is_deterministic(brain):
     make_note(brain, "wiki/tools/vol.md", "Volatility", type="tool",
               tags="volatility", related='"[[plaso]]"')
     make_note(brain, "wiki/tools/plaso.md", "Plaso", type="tool",
-              tags="plaso", cases="nitroba")
+              tags="plaso", cases="case-a")
     indexes.rebuild()
     first = {name: (brain / "indexes" / name).read_bytes()
              for name in indexes.INDEX_FILES}

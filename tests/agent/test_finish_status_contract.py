@@ -178,8 +178,9 @@ def test_finish_status_exception_is_not_complete(tmp_path):
         assert a._finish_status("finished") == "incomplete_coverage"
 
 
-def test_unseen_hv_blocks_complete_despite_soft_floor(tmp_path):
+def test_unseen_hv_blocks_complete_despite_soft_floor(tmp_path, monkeypatch):
     """Task soft floor must not yield complete while HV units remain unseen."""
+    monkeypatch.setenv("ATLAS_WORK_ORDER", "0")     # the floors decide off the order
     case = tmp_path / "case"
     (case / ".atlas").mkdir(parents=True)
     a = _agent(case, tool_stats=[{
@@ -223,7 +224,8 @@ def test_unseen_hv_blocks_complete_despite_soft_floor(tmp_path):
         assert a._finish_status("finished") == "incomplete_coverage"
 
 
-def test_unmet_obligations_block_complete(tmp_path):
+def test_unmet_obligations_block_complete(tmp_path, monkeypatch):
+    monkeypatch.setenv("ATLAS_WORK_ORDER", "0")     # the floors decide off the order
     case = tmp_path / "case"
     (case / ".atlas").mkdir(parents=True)
     a = _agent(case, tool_stats=[{

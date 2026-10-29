@@ -25,13 +25,13 @@ def test_snapshot_counts_and_writes(brain):
 
 def test_accuracy_rollup_from_run_summaries(brain):
     run = make_note(brain, "logs/runs/r1.md", "run", type="run",
-                    cases="nitroba", tags="agent-run")
+                    cases="case-a", tags="agent-run")
     text = run.read_text().replace(
         'confidence: "medium"',
         'confidence: "medium"\naccuracy: {precision: 0.9, recall: 0.8, f1: 0.85}')
     run.write_text(text)
     data, _ = stats.snapshot()
-    assert data["accuracy"]["nitroba"]["f1"] == 0.85
+    assert data["accuracy"]["case-a"]["f1"] == 0.85
 
 
 def test_confidential_counted_not_detailed(brain):

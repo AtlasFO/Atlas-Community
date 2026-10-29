@@ -1,0 +1,485 @@
+{
+ "preset": "openrouter",
+ "records": [
+  {
+   "scenario": "oneshot",
+   "requests": [
+    {
+     "method": "POST",
+     "url": "https://openrouter.ai/api/v1/chat/completions",
+     "headers": {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer <key>"
+     },
+     "body": "{\"model\": \"m-generic\", \"messages\": [{\"role\": \"system\", \"content\": \"You are a forensic analyst on case CASE-A.\"}, {\"role\": \"user\", \"content\": \"Summarize: logon of jane.doe on CORP-WS01 at 2031-03-01 10:00.\"}], \"temperature\": 0.2, \"stream\": true, \"stream_options\": {\"include_usage\": true}}"
+    }
+   ]
+  },
+  {
+   "scenario": "analyst_tools",
+   "requests": [
+    {
+     "method": "POST",
+     "url": "https://openrouter.ai/api/v1/chat/completions",
+     "headers": {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer <key>"
+     },
+     "body": "{\"model\": \"m-generic\", \"messages\": [{\"role\": \"system\", \"content\": \"You are a forensic analyst on case CASE-A.\"}, {\"role\": \"user\", \"content\": \"Brief: host CORP-WS01, user jane.doe, window 2031-03-01 to 2031-03-02.\"}, {\"role\": \"assistant\", \"content\": \"\", \"tool_calls\": [{\"id\": \"call_1\", \"type\": \"function\", \"function\": {\"name\": \"list_processes\", \"arguments\": \"{\\\"image\\\": \\\"m.img\\\"}\"}}, {\"id\": \"call_2\", \"type\": \"function\", \"function\": {\"name\": \"read_table\", \"arguments\": \"{\\\"path\\\": \\\"exports/t.csv\\\"}\"}}]}, {\"role\": \"tool\", \"tool_call_id\": \"call_1\", \"content\": \"pid 4 System\"}, {\"role\": \"tool\", \"tool_call_id\": \"call_2\", \"content\": \"row 1: 10.0.0.5 to 203.0.113.7\"}, {\"role\": \"user\", \"content\": \"Record what bears on the case before the next reads.\"}], \"temperature\": 0.2, \"tools\": [{\"type\": \"function\", \"function\": {\"name\": \"list_processes\", \"description\": \"List the processes in a memory image.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"image\": {\"type\": \"string\"}}, \"required\": [\"image\"]}}}, {\"type\": \"function\", \"function\": {\"name\": \"read_table\", \"description\": \"Read rows of a table export.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}}, \"required\": [\"path\"]}}}], \"tool_choice\": \"auto\", \"stream\": true, \"stream_options\": {\"include_usage\": true}}"
+    }
+   ]
+  },
+  {
+   "scenario": "tool_choice_required",
+   "requests": [
+    {
+     "method": "POST",
+     "url": "https://openrouter.ai/api/v1/chat/completions",
+     "headers": {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer <key>"
+     },
+     "body": "{\"model\": \"m-generic\", \"messages\": [{\"role\": \"system\", \"content\": \"You are a forensic analyst on case CASE-A.\"}, {\"role\": \"user\", \"content\": \"Brief: host CORP-WS01, user jane.doe, window 2031-03-01 to 2031-03-02.\"}, {\"role\": \"assistant\", \"content\": \"\", \"tool_calls\": [{\"id\": \"call_1\", \"type\": \"function\", \"function\": {\"name\": \"list_processes\", \"arguments\": \"{\\\"image\\\": \\\"m.img\\\"}\"}}, {\"id\": \"call_2\", \"type\": \"function\", \"function\": {\"name\": \"read_table\", \"arguments\": \"{\\\"path\\\": \\\"exports/t.csv\\\"}\"}}]}, {\"role\": \"tool\", \"tool_call_id\": \"call_1\", \"content\": \"pid 4 System\"}, {\"role\": \"tool\", \"tool_call_id\": \"call_2\", \"content\": \"row 1: 10.0.0.5 to 203.0.113.7\"}, {\"role\": \"user\", \"content\": \"Record what bears on the case before the next reads.\"}], \"temperature\": 0.2, \"tools\": [{\"type\": \"function\", \"function\": {\"name\": \"list_processes\", \"description\": \"List the processes in a memory image.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"image\": {\"type\": \"string\"}}, \"required\": [\"image\"]}}}, {\"type\": \"function\", \"function\": {\"name\": \"read_table\", \"description\": \"Read rows of a table export.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}}, \"required\": [\"path\"]}}}], \"tool_choice\": \"required\", \"stream\": true, \"stream_options\": {\"include_usage\": true}}"
+    }
+   ]
+  },
+  {
+   "scenario": "pin_low",
+   "requests": [
+    {
+     "method": "POST",
+     "url": "https://openrouter.ai/api/v1/chat/completions",
+     "headers": {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer <key>"
+     },
+     "body": "{\"model\": \"m-generic\", \"messages\": [{\"role\": \"system\", \"content\": \"You are a forensic analyst on case CASE-A.\"}, {\"role\": \"user\", \"content\": \"Brief: host CORP-WS01, user jane.doe, window 2031-03-01 to 2031-03-02.\"}, {\"role\": \"assistant\", \"content\": \"\", \"tool_calls\": [{\"id\": \"call_1\", \"type\": \"function\", \"function\": {\"name\": \"list_processes\", \"arguments\": \"{\\\"image\\\": \\\"m.img\\\"}\"}}, {\"id\": \"call_2\", \"type\": \"function\", \"function\": {\"name\": \"read_table\", \"arguments\": \"{\\\"path\\\": \\\"exports/t.csv\\\"}\"}}]}, {\"role\": \"tool\", \"tool_call_id\": \"call_1\", \"content\": \"pid 4 System\"}, {\"role\": \"tool\", \"tool_call_id\": \"call_2\", \"content\": \"row 1: 10.0.0.5 to 203.0.113.7\"}, {\"role\": \"user\", \"content\": \"Record what bears on the case before the next reads.\"}], \"temperature\": 0.2, \"tools\": [{\"type\": \"function\", \"function\": {\"name\": \"list_processes\", \"description\": \"List the processes in a memory image.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"image\": {\"type\": \"string\"}}, \"required\": [\"image\"]}}}, {\"type\": \"function\", \"function\": {\"name\": \"read_table\", \"description\": \"Read rows of a table export.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}}, \"required\": [\"path\"]}}}], \"tool_choice\": \"auto\", \"reasoning\": {\"effort\": \"low\"}, \"stream\": true, \"stream_options\": {\"include_usage\": true}}"
+    }
+   ]
+  },
+  {
+   "scenario": "effort_high",
+   "requests": [
+    {
+     "method": "POST",
+     "url": "https://openrouter.ai/api/v1/chat/completions",
+     "headers": {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer <key>"
+     },
+     "body": "{\"model\": \"m-generic\", \"messages\": [{\"role\": \"system\", \"content\": \"You are a forensic analyst on case CASE-A.\"}, {\"role\": \"user\", \"content\": \"Brief: host CORP-WS01, user jane.doe, window 2031-03-01 to 2031-03-02.\"}, {\"role\": \"assistant\", \"content\": \"\", \"tool_calls\": [{\"id\": \"call_1\", \"type\": \"function\", \"function\": {\"name\": \"list_processes\", \"arguments\": \"{\\\"image\\\": \\\"m.img\\\"}\"}}, {\"id\": \"call_2\", \"type\": \"function\", \"function\": {\"name\": \"read_table\", \"arguments\": \"{\\\"path\\\": \\\"exports/t.csv\\\"}\"}}]}, {\"role\": \"tool\", \"tool_call_id\": \"call_1\", \"content\": \"pid 4 System\"}, {\"role\": \"tool\", \"tool_call_id\": \"call_2\", \"content\": \"row 1: 10.0.0.5 to 203.0.113.7\"}, {\"role\": \"user\", \"content\": \"Record what bears on the case before the next reads.\"}], \"temperature\": 0.2, \"tools\": [{\"type\": \"function\", \"function\": {\"name\": \"list_processes\", \"description\": \"List the processes in a memory image.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"image\": {\"type\": \"string\"}}, \"required\": [\"image\"]}}}, {\"type\": \"function\", \"function\": {\"name\": \"read_table\", \"description\": \"Read rows of a table export.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}}, \"required\": [\"path\"]}}}], \"tool_choice\": \"auto\", \"reasoning\": {\"effort\": \"high\"}, \"stream\": true, \"stream_options\": {\"include_usage\": true}}"
+    }
+   ]
+  },
+  {
+   "scenario": "effort_minimal",
+   "requests": [
+    {
+     "method": "POST",
+     "url": "https://openrouter.ai/api/v1/chat/completions",
+     "headers": {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer <key>"
+     },
+     "body": "{\"model\": \"m-generic\", \"messages\": [{\"role\": \"system\", \"content\": \"You are a forensic analyst on case CASE-A.\"}, {\"role\": \"user\", \"content\": \"Brief: host CORP-WS01, user jane.doe, window 2031-03-01 to 2031-03-02.\"}, {\"role\": \"assistant\", \"content\": \"\", \"tool_calls\": [{\"id\": \"call_1\", \"type\": \"function\", \"function\": {\"name\": \"list_processes\", \"arguments\": \"{\\\"image\\\": \\\"m.img\\\"}\"}}, {\"id\": \"call_2\", \"type\": \"function\", \"function\": {\"name\": \"read_table\", \"arguments\": \"{\\\"path\\\": \\\"exports/t.csv\\\"}\"}}]}, {\"role\": \"tool\", \"tool_call_id\": \"call_1\", \"content\": \"pid 4 System\"}, {\"role\": \"tool\", \"tool_call_id\": \"call_2\", \"content\": \"row 1: 10.0.0.5 to 203.0.113.7\"}, {\"role\": \"user\", \"content\": \"Record what bears on the case before the next reads.\"}], \"temperature\": 0.2, \"reasoning\": {\"effort\": \"minimal\"}, \"stream\": true, \"stream_options\": {\"include_usage\": true}}"
+    }
+   ]
+  },
+  {
+   "scenario": "effort_none",
+   "requests": [
+    {
+     "method": "POST",
+     "url": "https://openrouter.ai/api/v1/chat/completions",
+     "headers": {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer <key>"
+     },
+     "body": "{\"model\": \"m-generic\", \"messages\": [{\"role\": \"system\", \"content\": \"You are a forensic analyst on case CASE-A.\"}, {\"role\": \"user\", \"content\": \"Brief: host CORP-WS01, user jane.doe, window 2031-03-01 to 2031-03-02.\"}, {\"role\": \"assistant\", \"content\": \"\", \"tool_calls\": [{\"id\": \"call_1\", \"type\": \"function\", \"function\": {\"name\": \"list_processes\", \"arguments\": \"{\\\"image\\\": \\\"m.img\\\"}\"}}, {\"id\": \"call_2\", \"type\": \"function\", \"function\": {\"name\": \"read_table\", \"arguments\": \"{\\\"path\\\": \\\"exports/t.csv\\\"}\"}}]}, {\"role\": \"tool\", \"tool_call_id\": \"call_1\", \"content\": \"pid 4 System\"}, {\"role\": \"tool\", \"tool_call_id\": \"call_2\", \"content\": \"row 1: 10.0.0.5 to 203.0.113.7\"}, {\"role\": \"user\", \"content\": \"Record what bears on the case before the next reads.\"}], \"temperature\": 0.2, \"tools\": [{\"type\": \"function\", \"function\": {\"name\": \"list_processes\", \"description\": \"List the processes in a memory image.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"image\": {\"type\": \"string\"}}, \"required\": [\"image\"]}}}, {\"type\": \"function\", \"function\": {\"name\": \"read_table\", \"description\": \"Read rows of a table export.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}}, \"required\": [\"path\"]}}}], \"tool_choice\": \"auto\", \"reasoning\": {\"effort\": \"none\"}, \"stream\": true, \"stream_options\": {\"include_usage\": true}}"
+    }
+   ]
+  },
+  {
+   "scenario": "cap_temp_json",
+   "requests": [
+    {
+     "method": "POST",
+     "url": "https://openrouter.ai/api/v1/chat/completions",
+     "headers": {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer <key>"
+     },
+     "body": "{\"model\": \"m-generic\", \"messages\": [{\"role\": \"system\", \"content\": \"You are a forensic analyst on case CASE-A.\"}, {\"role\": \"user\", \"content\": \"Summarize: logon of jane.doe on CORP-WS01 at 2031-03-01 10:00.\"}], \"max_tokens\": 512, \"response_format\": {\"type\": \"json_object\"}, \"stream\": true, \"stream_options\": {\"include_usage\": true}}"
+    }
+   ]
+  },
+  {
+   "scenario": "stream_off",
+   "requests": [
+    {
+     "method": "POST",
+     "url": "https://openrouter.ai/api/v1/chat/completions",
+     "headers": {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer <key>"
+     },
+     "body": "{\"model\": \"m-generic\", \"messages\": [{\"role\": \"system\", \"content\": \"You are a forensic analyst on case CASE-A.\"}, {\"role\": \"user\", \"content\": \"Brief: host CORP-WS01, user jane.doe, window 2031-03-01 to 2031-03-02.\"}, {\"role\": \"assistant\", \"content\": \"\", \"tool_calls\": [{\"id\": \"call_1\", \"type\": \"function\", \"function\": {\"name\": \"list_processes\", \"arguments\": \"{\\\"image\\\": \\\"m.img\\\"}\"}}, {\"id\": \"call_2\", \"type\": \"function\", \"function\": {\"name\": \"read_table\", \"arguments\": \"{\\\"path\\\": \\\"exports/t.csv\\\"}\"}}]}, {\"role\": \"tool\", \"tool_call_id\": \"call_1\", \"content\": \"pid 4 System\"}, {\"role\": \"tool\", \"tool_call_id\": \"call_2\", \"content\": \"row 1: 10.0.0.5 to 203.0.113.7\"}, {\"role\": \"user\", \"content\": \"Record what bears on the case before the next reads.\"}], \"temperature\": 0.2, \"tools\": [{\"type\": \"function\", \"function\": {\"name\": \"list_processes\", \"description\": \"List the processes in a memory image.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"image\": {\"type\": \"string\"}}, \"required\": [\"image\"]}}}, {\"type\": \"function\", \"function\": {\"name\": \"read_table\", \"description\": \"Read rows of a table export.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}}, \"required\": [\"path\"]}}}], \"tool_choice\": \"auto\"}"
+    }
+   ]
+  },
+  {
+   "scenario": "env_overrides",
+   "requests": [
+    {
+     "method": "POST",
+     "url": "https://openrouter.ai/api/v1/chat/completions",
+     "headers": {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer <key>"
+     },
+     "body": "{\"model\": \"m-generic\", \"messages\": [{\"role\": \"system\", \"content\": \"You are a forensic analyst on case CASE-A.\"}, {\"role\": \"user\", \"content\": \"Summarize: logon of jane.doe on CORP-WS01 at 2031-03-01 10:00.\"}], \"max_completion_tokens\": 256, \"stream\": true, \"stream_options\": {\"include_usage\": true}}"
+    }
+   ]
+  },
+  {
+   "scenario": "model:glm-5.2",
+   "requests": [
+    {
+     "method": "POST",
+     "url": "https://openrouter.ai/api/v1/chat/completions",
+     "headers": {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer <key>"
+     },
+     "body": "{\"model\": \"glm-5.2\", \"messages\": [{\"role\": \"system\", \"content\": \"You are a forensic analyst on case CASE-A.\"}, {\"role\": \"user\", \"content\": \"Brief: host CORP-WS01, user jane.doe, window 2031-03-01 to 2031-03-02.\"}, {\"role\": \"assistant\", \"content\": \"\", \"tool_calls\": [{\"id\": \"call_1\", \"type\": \"function\", \"function\": {\"name\": \"list_processes\", \"arguments\": \"{\\\"image\\\": \\\"m.img\\\"}\"}}, {\"id\": \"call_2\", \"type\": \"function\", \"function\": {\"name\": \"read_table\", \"arguments\": \"{\\\"path\\\": \\\"exports/t.csv\\\"}\"}}]}, {\"role\": \"tool\", \"tool_call_id\": \"call_1\", \"content\": \"pid 4 System\"}, {\"role\": \"tool\", \"tool_call_id\": \"call_2\", \"content\": \"row 1: 10.0.0.5 to 203.0.113.7\"}, {\"role\": \"user\", \"content\": \"Record what bears on the case before the next reads.\"}], \"temperature\": 0.2, \"tools\": [{\"type\": \"function\", \"function\": {\"name\": \"list_processes\", \"description\": \"List the processes in a memory image.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"image\": {\"type\": \"string\"}}, \"required\": [\"image\"]}}}, {\"type\": \"function\", \"function\": {\"name\": \"read_table\", \"description\": \"Read rows of a table export.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}}, \"required\": [\"path\"]}}}], \"tool_choice\": \"auto\", \"stream\": true, \"stream_options\": {\"include_usage\": true}}"
+    }
+   ]
+  },
+  {
+   "scenario": "model:gpt-5.2",
+   "requests": [
+    {
+     "method": "POST",
+     "url": "https://openrouter.ai/api/v1/chat/completions",
+     "headers": {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer <key>"
+     },
+     "body": "{\"model\": \"gpt-5.2\", \"messages\": [{\"role\": \"system\", \"content\": \"You are a forensic analyst on case CASE-A.\"}, {\"role\": \"user\", \"content\": \"Brief: host CORP-WS01, user jane.doe, window 2031-03-01 to 2031-03-02.\"}, {\"role\": \"assistant\", \"content\": \"\", \"tool_calls\": [{\"id\": \"call_1\", \"type\": \"function\", \"function\": {\"name\": \"list_processes\", \"arguments\": \"{\\\"image\\\": \\\"m.img\\\"}\"}}, {\"id\": \"call_2\", \"type\": \"function\", \"function\": {\"name\": \"read_table\", \"arguments\": \"{\\\"path\\\": \\\"exports/t.csv\\\"}\"}}]}, {\"role\": \"tool\", \"tool_call_id\": \"call_1\", \"content\": \"pid 4 System\"}, {\"role\": \"tool\", \"tool_call_id\": \"call_2\", \"content\": \"row 1: 10.0.0.5 to 203.0.113.7\"}, {\"role\": \"user\", \"content\": \"Record what bears on the case before the next reads.\"}], \"tools\": [{\"type\": \"function\", \"function\": {\"name\": \"list_processes\", \"description\": \"List the processes in a memory image.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"image\": {\"type\": \"string\"}}, \"required\": [\"image\"]}}}, {\"type\": \"function\", \"function\": {\"name\": \"read_table\", \"description\": \"Read rows of a table export.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}}, \"required\": [\"path\"]}}}], \"tool_choice\": \"auto\", \"reasoning_effort\": \"none\", \"stream\": true, \"stream_options\": {\"include_usage\": true}}"
+    }
+   ]
+  },
+  {
+   "scenario": "model:claude-x",
+   "requests": [
+    {
+     "method": "POST",
+     "url": "https://openrouter.ai/api/v1/chat/completions",
+     "headers": {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer <key>"
+     },
+     "body": "{\"model\": \"claude-x\", \"messages\": [{\"role\": \"system\", \"content\": [{\"type\": \"text\", \"text\": \"You are a forensic analyst on case CASE-A.\", \"cache_control\": {\"type\": \"ephemeral\"}}]}, {\"role\": \"user\", \"content\": [{\"type\": \"text\", \"text\": \"Brief: host CORP-WS01, user jane.doe, window 2031-03-01 to 2031-03-02.\", \"cache_control\": {\"type\": \"ephemeral\"}}]}, {\"role\": \"assistant\", \"content\": \"\", \"tool_calls\": [{\"id\": \"call_1\", \"type\": \"function\", \"function\": {\"name\": \"list_processes\", \"arguments\": \"{\\\"image\\\": \\\"m.img\\\"}\"}}, {\"id\": \"call_2\", \"type\": \"function\", \"function\": {\"name\": \"read_table\", \"arguments\": \"{\\\"path\\\": \\\"exports/t.csv\\\"}\"}}]}, {\"role\": \"tool\", \"tool_call_id\": \"call_1\", \"content\": \"pid 4 System\"}, {\"role\": \"tool\", \"tool_call_id\": \"call_2\", \"content\": \"row 1: 10.0.0.5 to 203.0.113.7\"}, {\"role\": \"user\", \"content\": \"Record what bears on the case before the next reads.\"}], \"temperature\": 0.2, \"tools\": [{\"type\": \"function\", \"function\": {\"name\": \"list_processes\", \"description\": \"List the processes in a memory image.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"image\": {\"type\": \"string\"}}, \"required\": [\"image\"]}}}, {\"type\": \"function\", \"function\": {\"name\": \"read_table\", \"description\": \"Read rows of a table export.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}}, \"required\": [\"path\"]}}}], \"tool_choice\": \"auto\", \"stream\": true, \"stream_options\": {\"include_usage\": true}}"
+    }
+   ]
+  },
+  {
+   "scenario": "model:anthropic/claude-x",
+   "requests": [
+    {
+     "method": "POST",
+     "url": "https://openrouter.ai/api/v1/chat/completions",
+     "headers": {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer <key>"
+     },
+     "body": "{\"model\": \"anthropic/claude-x\", \"messages\": [{\"role\": \"system\", \"content\": [{\"type\": \"text\", \"text\": \"You are a forensic analyst on case CASE-A.\", \"cache_control\": {\"type\": \"ephemeral\"}}]}, {\"role\": \"user\", \"content\": [{\"type\": \"text\", \"text\": \"Brief: host CORP-WS01, user jane.doe, window 2031-03-01 to 2031-03-02.\", \"cache_control\": {\"type\": \"ephemeral\"}}]}, {\"role\": \"assistant\", \"content\": \"\", \"tool_calls\": [{\"id\": \"call_1\", \"type\": \"function\", \"function\": {\"name\": \"list_processes\", \"arguments\": \"{\\\"image\\\": \\\"m.img\\\"}\"}}, {\"id\": \"call_2\", \"type\": \"function\", \"function\": {\"name\": \"read_table\", \"arguments\": \"{\\\"path\\\": \\\"exports/t.csv\\\"}\"}}]}, {\"role\": \"tool\", \"tool_call_id\": \"call_1\", \"content\": \"pid 4 System\"}, {\"role\": \"tool\", \"tool_call_id\": \"call_2\", \"content\": \"row 1: 10.0.0.5 to 203.0.113.7\"}, {\"role\": \"user\", \"content\": \"Record what bears on the case before the next reads.\"}], \"temperature\": 0.2, \"tools\": [{\"type\": \"function\", \"function\": {\"name\": \"list_processes\", \"description\": \"List the processes in a memory image.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"image\": {\"type\": \"string\"}}, \"required\": [\"image\"]}}}, {\"type\": \"function\", \"function\": {\"name\": \"read_table\", \"description\": \"Read rows of a table export.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}}, \"required\": [\"path\"]}}}], \"tool_choice\": \"auto\", \"stream\": true, \"stream_options\": {\"include_usage\": true}}"
+    }
+   ]
+  },
+  {
+   "scenario": "name_lower",
+   "requests": [
+    {
+     "method": "POST",
+     "url": "https://openrouter.ai/api/v1/chat/completions",
+     "headers": {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer <key>"
+     },
+     "body": "{\"model\": \"m-generic\", \"messages\": [{\"role\": \"system\", \"content\": \"You are a forensic analyst on case CASE-A.\"}, {\"role\": \"user\", \"content\": \"Brief: host CORP-WS01, user jane.doe, window 2031-03-01 to 2031-03-02.\"}, {\"role\": \"assistant\", \"content\": \"\", \"tool_calls\": [{\"id\": \"call_1\", \"type\": \"function\", \"function\": {\"name\": \"list_processes\", \"arguments\": \"{\\\"image\\\": \\\"m.img\\\"}\"}}, {\"id\": \"call_2\", \"type\": \"function\", \"function\": {\"name\": \"read_table\", \"arguments\": \"{\\\"path\\\": \\\"exports/t.csv\\\"}\"}}]}, {\"role\": \"tool\", \"tool_call_id\": \"call_1\", \"content\": \"pid 4 System\"}, {\"role\": \"tool\", \"tool_call_id\": \"call_2\", \"content\": \"row 1: 10.0.0.5 to 203.0.113.7\"}, {\"role\": \"user\", \"content\": \"Record what bears on the case before the next reads.\"}], \"temperature\": 0.2, \"tools\": [{\"type\": \"function\", \"function\": {\"name\": \"list_processes\", \"description\": \"List the processes in a memory image.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"image\": {\"type\": \"string\"}}, \"required\": [\"image\"]}}}, {\"type\": \"function\", \"function\": {\"name\": \"read_table\", \"description\": \"Read rows of a table export.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}}, \"required\": [\"path\"]}}}], \"tool_choice\": \"auto\", \"stream\": true, \"stream_options\": {\"include_usage\": true}}"
+    }
+   ]
+  },
+  {
+   "scenario": "name_mixed",
+   "requests": [
+    {
+     "method": "POST",
+     "url": "https://openrouter.ai/api/v1/chat/completions",
+     "headers": {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer <key>"
+     },
+     "body": "{\"model\": \"m-generic\", \"messages\": [{\"role\": \"system\", \"content\": \"You are a forensic analyst on case CASE-A.\"}, {\"role\": \"user\", \"content\": \"Brief: host CORP-WS01, user jane.doe, window 2031-03-01 to 2031-03-02.\"}, {\"role\": \"assistant\", \"content\": \"\", \"tool_calls\": [{\"id\": \"call_1\", \"type\": \"function\", \"function\": {\"name\": \"list_processes\", \"arguments\": \"{\\\"image\\\": \\\"m.img\\\"}\"}}, {\"id\": \"call_2\", \"type\": \"function\", \"function\": {\"name\": \"read_table\", \"arguments\": \"{\\\"path\\\": \\\"exports/t.csv\\\"}\"}}]}, {\"role\": \"tool\", \"tool_call_id\": \"call_1\", \"content\": \"pid 4 System\"}, {\"role\": \"tool\", \"tool_call_id\": \"call_2\", \"content\": \"row 1: 10.0.0.5 to 203.0.113.7\"}, {\"role\": \"user\", \"content\": \"Record what bears on the case before the next reads.\"}], \"temperature\": 0.2, \"tools\": [{\"type\": \"function\", \"function\": {\"name\": \"list_processes\", \"description\": \"List the processes in a memory image.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"image\": {\"type\": \"string\"}}, \"required\": [\"image\"]}}}, {\"type\": \"function\", \"function\": {\"name\": \"read_table\", \"description\": \"Read rows of a table export.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}}, \"required\": [\"path\"]}}}], \"tool_choice\": \"auto\", \"stream\": true, \"stream_options\": {\"include_usage\": true}}"
+    }
+   ]
+  },
+  {
+   "scenario": "name_mixed_effort",
+   "requests": [
+    {
+     "method": "POST",
+     "url": "https://openrouter.ai/api/v1/chat/completions",
+     "headers": {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer <key>"
+     },
+     "body": "{\"model\": \"m-generic\", \"messages\": [{\"role\": \"system\", \"content\": \"You are a forensic analyst on case CASE-A.\"}, {\"role\": \"user\", \"content\": \"Brief: host CORP-WS01, user jane.doe, window 2031-03-01 to 2031-03-02.\"}, {\"role\": \"assistant\", \"content\": \"\", \"tool_calls\": [{\"id\": \"call_1\", \"type\": \"function\", \"function\": {\"name\": \"list_processes\", \"arguments\": \"{\\\"image\\\": \\\"m.img\\\"}\"}}, {\"id\": \"call_2\", \"type\": \"function\", \"function\": {\"name\": \"read_table\", \"arguments\": \"{\\\"path\\\": \\\"exports/t.csv\\\"}\"}}]}, {\"role\": \"tool\", \"tool_call_id\": \"call_1\", \"content\": \"pid 4 System\"}, {\"role\": \"tool\", \"tool_call_id\": \"call_2\", \"content\": \"row 1: 10.0.0.5 to 203.0.113.7\"}, {\"role\": \"user\", \"content\": \"Record what bears on the case before the next reads.\"}], \"temperature\": 0.2, \"tools\": [{\"type\": \"function\", \"function\": {\"name\": \"list_processes\", \"description\": \"List the processes in a memory image.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"image\": {\"type\": \"string\"}}, \"required\": [\"image\"]}}}, {\"type\": \"function\", \"function\": {\"name\": \"read_table\", \"description\": \"Read rows of a table export.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}}, \"required\": [\"path\"]}}}], \"tool_choice\": \"auto\", \"reasoning_effort\": \"high\", \"stream\": true, \"stream_options\": {\"include_usage\": true}}"
+    }
+   ]
+  },
+  {
+   "scenario": "ladder_cut",
+   "requests": [
+    {
+     "method": "POST",
+     "url": "https://openrouter.ai/api/v1/chat/completions",
+     "headers": {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer <key>"
+     },
+     "body": "{\"model\": \"m-generic\", \"messages\": [{\"role\": \"system\", \"content\": \"You are a forensic analyst on case CASE-A.\"}, {\"role\": \"user\", \"content\": \"Brief: host CORP-WS01, user jane.doe, window 2031-03-01 to 2031-03-02.\"}, {\"role\": \"assistant\", \"content\": \"\", \"tool_calls\": [{\"id\": \"call_1\", \"type\": \"function\", \"function\": {\"name\": \"list_processes\", \"arguments\": \"{\\\"image\\\": \\\"m.img\\\"}\"}}, {\"id\": \"call_2\", \"type\": \"function\", \"function\": {\"name\": \"read_table\", \"arguments\": \"{\\\"path\\\": \\\"exports/t.csv\\\"}\"}}]}, {\"role\": \"tool\", \"tool_call_id\": \"call_1\", \"content\": \"pid 4 System\"}, {\"role\": \"tool\", \"tool_call_id\": \"call_2\", \"content\": \"row 1: 10.0.0.5 to 203.0.113.7\"}, {\"role\": \"user\", \"content\": \"Record what bears on the case before the next reads.\"}], \"temperature\": 0.2, \"tools\": [{\"type\": \"function\", \"function\": {\"name\": \"list_processes\", \"description\": \"List the processes in a memory image.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"image\": {\"type\": \"string\"}}, \"required\": [\"image\"]}}}, {\"type\": \"function\", \"function\": {\"name\": \"read_table\", \"description\": \"Read rows of a table export.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}}, \"required\": [\"path\"]}}}], \"tool_choice\": \"auto\", \"stream\": true, \"stream_options\": {\"include_usage\": true}}"
+    },
+    {
+     "method": "POST",
+     "url": "https://openrouter.ai/api/v1/chat/completions",
+     "headers": {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer <key>"
+     },
+     "body": "{\"model\": \"m-generic\", \"messages\": [{\"role\": \"system\", \"content\": \"You are a forensic analyst on case CASE-A.\"}, {\"role\": \"user\", \"content\": \"Brief: host CORP-WS01, user jane.doe, window 2031-03-01 to 2031-03-02.\"}, {\"role\": \"assistant\", \"content\": \"\", \"tool_calls\": [{\"id\": \"call_1\", \"type\": \"function\", \"function\": {\"name\": \"list_processes\", \"arguments\": \"{\\\"image\\\": \\\"m.img\\\"}\"}}, {\"id\": \"call_2\", \"type\": \"function\", \"function\": {\"name\": \"read_table\", \"arguments\": \"{\\\"path\\\": \\\"exports/t.csv\\\"}\"}}]}, {\"role\": \"tool\", \"tool_call_id\": \"call_1\", \"content\": \"pid 4 System\"}, {\"role\": \"tool\", \"tool_call_id\": \"call_2\", \"content\": \"row 1: 10.0.0.5 to 203.0.113.7\"}, {\"role\": \"user\", \"content\": \"Record what bears on the case before the next reads.\"}], \"max_tokens\": 65536, \"temperature\": 0.2, \"tools\": [{\"type\": \"function\", \"function\": {\"name\": \"list_processes\", \"description\": \"List the processes in a memory image.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"image\": {\"type\": \"string\"}}, \"required\": [\"image\"]}}}, {\"type\": \"function\", \"function\": {\"name\": \"read_table\", \"description\": \"Read rows of a table export.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}}, \"required\": [\"path\"]}}}], \"tool_choice\": \"auto\", \"stream\": true, \"stream_options\": {\"include_usage\": true}}"
+    }
+   ]
+  },
+  {
+   "scenario": "adapt_400",
+   "requests": [
+    {
+     "method": "POST",
+     "url": "https://openrouter.ai/api/v1/chat/completions",
+     "headers": {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer <key>"
+     },
+     "body": "{\"model\": \"m-generic\", \"messages\": [{\"role\": \"system\", \"content\": \"You are a forensic analyst on case CASE-A.\"}, {\"role\": \"user\", \"content\": \"Summarize: logon of jane.doe on CORP-WS01 at 2031-03-01 10:00.\"}], \"temperature\": 0.2, \"stream\": true, \"stream_options\": {\"include_usage\": true}}"
+    },
+    {
+     "method": "POST",
+     "url": "https://openrouter.ai/api/v1/chat/completions",
+     "headers": {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer <key>"
+     },
+     "body": "{\"model\": \"m-generic\", \"messages\": [{\"role\": \"system\", \"content\": \"You are a forensic analyst on case CASE-A.\"}, {\"role\": \"user\", \"content\": \"Summarize: logon of jane.doe on CORP-WS01 at 2031-03-01 10:00.\"}], \"stream\": true, \"stream_options\": {\"include_usage\": true}}"
+    }
+   ]
+  },
+  {
+   "scenario": "adapt_400_level",
+   "requests": [
+    {
+     "method": "POST",
+     "url": "https://openrouter.ai/api/v1/chat/completions",
+     "headers": {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer <key>"
+     },
+     "body": "{\"model\": \"m-generic\", \"messages\": [{\"role\": \"system\", \"content\": \"You are a forensic analyst on case CASE-A.\"}, {\"role\": \"user\", \"content\": \"Brief: host CORP-WS01, user jane.doe, window 2031-03-01 to 2031-03-02.\"}, {\"role\": \"assistant\", \"content\": \"\", \"tool_calls\": [{\"id\": \"call_1\", \"type\": \"function\", \"function\": {\"name\": \"list_processes\", \"arguments\": \"{\\\"image\\\": \\\"m.img\\\"}\"}}, {\"id\": \"call_2\", \"type\": \"function\", \"function\": {\"name\": \"read_table\", \"arguments\": \"{\\\"path\\\": \\\"exports/t.csv\\\"}\"}}]}, {\"role\": \"tool\", \"tool_call_id\": \"call_1\", \"content\": \"pid 4 System\"}, {\"role\": \"tool\", \"tool_call_id\": \"call_2\", \"content\": \"row 1: 10.0.0.5 to 203.0.113.7\"}, {\"role\": \"user\", \"content\": \"Record what bears on the case before the next reads.\"}], \"temperature\": 0.2, \"reasoning\": {\"effort\": \"high\"}, \"stream\": true, \"stream_options\": {\"include_usage\": true}}"
+    },
+    {
+     "method": "POST",
+     "url": "https://openrouter.ai/api/v1/chat/completions",
+     "headers": {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer <key>"
+     },
+     "body": "{\"model\": \"m-generic\", \"messages\": [{\"role\": \"system\", \"content\": \"You are a forensic analyst on case CASE-A.\"}, {\"role\": \"user\", \"content\": \"Brief: host CORP-WS01, user jane.doe, window 2031-03-01 to 2031-03-02.\"}, {\"role\": \"assistant\", \"content\": \"\", \"tool_calls\": [{\"id\": \"call_1\", \"type\": \"function\", \"function\": {\"name\": \"list_processes\", \"arguments\": \"{\\\"image\\\": \\\"m.img\\\"}\"}}, {\"id\": \"call_2\", \"type\": \"function\", \"function\": {\"name\": \"read_table\", \"arguments\": \"{\\\"path\\\": \\\"exports/t.csv\\\"}\"}}]}, {\"role\": \"tool\", \"tool_call_id\": \"call_1\", \"content\": \"pid 4 System\"}, {\"role\": \"tool\", \"tool_call_id\": \"call_2\", \"content\": \"row 1: 10.0.0.5 to 203.0.113.7\"}, {\"role\": \"user\", \"content\": \"Record what bears on the case before the next reads.\"}], \"temperature\": 0.2, \"reasoning\": {\"effort\": \"low\"}, \"stream\": true, \"stream_options\": {\"include_usage\": true}}"
+    }
+   ]
+  },
+  {
+   "scenario": "adapt_400_thinking",
+   "requests": [
+    {
+     "method": "POST",
+     "url": "https://openrouter.ai/api/v1/chat/completions",
+     "headers": {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer <key>"
+     },
+     "body": "{\"model\": \"m-generic\", \"messages\": [{\"role\": \"system\", \"content\": \"You are a forensic analyst on case CASE-A.\"}, {\"role\": \"user\", \"content\": \"Brief: host CORP-WS01, user jane.doe, window 2031-03-01 to 2031-03-02.\"}, {\"role\": \"assistant\", \"content\": \"\", \"tool_calls\": [{\"id\": \"call_1\", \"type\": \"function\", \"function\": {\"name\": \"list_processes\", \"arguments\": \"{\\\"image\\\": \\\"m.img\\\"}\"}}, {\"id\": \"call_2\", \"type\": \"function\", \"function\": {\"name\": \"read_table\", \"arguments\": \"{\\\"path\\\": \\\"exports/t.csv\\\"}\"}}]}, {\"role\": \"tool\", \"tool_call_id\": \"call_1\", \"content\": \"pid 4 System\"}, {\"role\": \"tool\", \"tool_call_id\": \"call_2\", \"content\": \"row 1: 10.0.0.5 to 203.0.113.7\"}, {\"role\": \"user\", \"content\": \"Record what bears on the case before the next reads.\"}], \"temperature\": 0.2, \"reasoning\": {\"effort\": \"high\"}, \"stream\": true, \"stream_options\": {\"include_usage\": true}}"
+    }
+   ],
+   "error": "LLMStatusError"
+  },
+  {
+   "scenario": "test_connection",
+   "requests": [
+    {
+     "method": "GET",
+     "url": "https://openrouter.ai/api/v1/models",
+     "headers": {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer <key>"
+     },
+     "body": null
+    },
+    {
+     "method": "POST",
+     "url": "https://openrouter.ai/api/v1/chat/completions",
+     "headers": {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer <key>"
+     },
+     "body": "{\"model\": \"m-generic\", \"messages\": [{\"role\": \"user\", \"content\": \"Reply with the single word: ok\"}], \"stream\": true, \"stream_options\": {\"include_usage\": true}}"
+    },
+    {
+     "method": "POST",
+     "url": "https://openrouter.ai/api/v1/chat/completions",
+     "headers": {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer <key>"
+     },
+     "body": "{\"model\": \"m-generic\", \"messages\": [{\"role\": \"user\", \"content\": \"List the processes in m.img. Call the tool.\"}], \"tools\": [{\"type\": \"function\", \"function\": {\"name\": \"list_processes\", \"description\": \"List the processes recorded in a memory image.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"image\": {\"type\": \"string\"}}, \"required\": [\"image\"]}}}], \"tool_choice\": \"auto\", \"stream\": true, \"stream_options\": {\"include_usage\": true}}"
+    }
+   ]
+  },
+  {
+   "scenario": "context_probe",
+   "requests": [
+    {
+     "method": "GET",
+     "url": "https://openrouter.ai/api/v1/models",
+     "headers": {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer <key>"
+     },
+     "body": null
+    }
+   ]
+  },
+  {
+   "scenario": "list_models",
+   "requests": [
+    {
+     "method": "GET",
+     "url": "https://openrouter.ai/api/v1/models",
+     "headers": {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer <key>"
+     },
+     "body": null
+    }
+   ]
+  },
+  {
+   "scenario": "doctor_probe",
+   "requests": [
+    {
+     "method": "GET",
+     "url": "https://openrouter.ai/api/v1/models",
+     "headers": {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer <key>"
+     },
+     "body": null
+    }
+   ]
+  },
+  {
+   "scenario": "provider_use",
+   "requests": [
+    {
+     "method": "GET",
+     "url": "https://openrouter.ai/api/v1/models",
+     "headers": {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer <key>"
+     },
+     "body": null
+    }
+   ]
+  },
+  {
+   "scenario": "dashboard_probe",
+   "requests": [
+    {
+     "method": "GET",
+     "url": "https://openrouter.ai/api/v1/models",
+     "headers": {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer <key>"
+     },
+     "body": null
+    }
+   ]
+  },
+  {
+   "scenario": "dashboard_probe_edit",
+   "requests": [
+    {
+     "method": "GET",
+     "url": "https://openrouter.ai/api/v1/models",
+     "headers": {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer <key>"
+     },
+     "body": null
+    }
+   ]
+  },
+  {
+   "scenario": "wizard_probe",
+   "requests": [
+    {
+     "method": "GET",
+     "url": "https://openrouter.ai/api/v1/models",
+     "headers": {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer <key>"
+     },
+     "body": null
+    }
+   ]
+  },
+  {
+   "scenario": "model:z-ai/glm-5.2",
+   "requests": [
+    {
+     "method": "POST",
+     "url": "https://openrouter.ai/api/v1/chat/completions",
+     "headers": {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer <key>"
+     },
+     "body": "{\"model\": \"z-ai/glm-5.2\", \"messages\": [{\"role\": \"system\", \"content\": \"You are a forensic analyst on case CASE-A.\"}, {\"role\": \"user\", \"content\": \"Brief: host CORP-WS01, user jane.doe, window 2031-03-01 to 2031-03-02.\"}, {\"role\": \"assistant\", \"content\": \"\", \"tool_calls\": [{\"id\": \"call_1\", \"type\": \"function\", \"function\": {\"name\": \"list_processes\", \"arguments\": \"{\\\"image\\\": \\\"m.img\\\"}\"}}, {\"id\": \"call_2\", \"type\": \"function\", \"function\": {\"name\": \"read_table\", \"arguments\": \"{\\\"path\\\": \\\"exports/t.csv\\\"}\"}}]}, {\"role\": \"tool\", \"tool_call_id\": \"call_1\", \"content\": \"pid 4 System\"}, {\"role\": \"tool\", \"tool_call_id\": \"call_2\", \"content\": \"row 1: 10.0.0.5 to 203.0.113.7\"}, {\"role\": \"user\", \"content\": \"Record what bears on the case before the next reads.\"}], \"temperature\": 0.2, \"tools\": [{\"type\": \"function\", \"function\": {\"name\": \"list_processes\", \"description\": \"List the processes in a memory image.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"image\": {\"type\": \"string\"}}, \"required\": [\"image\"]}}}, {\"type\": \"function\", \"function\": {\"name\": \"read_table\", \"description\": \"Read rows of a table export.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}}, \"required\": [\"path\"]}}}], \"tool_choice\": \"auto\", \"stream\": true, \"stream_options\": {\"include_usage\": true}}"
+    }
+   ]
+  },
+  {
+   "scenario": "model:qwen/qwen3.8-flash",
+   "requests": [
+    {
+     "method": "POST",
+     "url": "https://openrouter.ai/api/v1/chat/completions",
+     "headers": {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer <key>"
+     },
+     "body": "{\"model\": \"qwen/qwen3.8-flash\", \"messages\": [{\"role\": \"system\", \"content\": \"You are a forensic analyst on case CASE-A.\"}, {\"role\": \"user\", \"content\": \"Brief: host CORP-WS01, user jane.doe, window 2031-03-01 to 2031-03-02.\"}, {\"role\": \"assistant\", \"content\": \"\", \"tool_calls\": [{\"id\": \"call_1\", \"type\": \"function\", \"function\": {\"name\": \"list_processes\", \"arguments\": \"{\\\"image\\\": \\\"m.img\\\"}\"}}, {\"id\": \"call_2\", \"type\": \"function\", \"function\": {\"name\": \"read_table\", \"arguments\": \"{\\\"path\\\": \\\"exports/t.csv\\\"}\"}}]}, {\"role\": \"tool\", \"tool_call_id\": \"call_1\", \"content\": \"pid 4 System\"}, {\"role\": \"tool\", \"tool_call_id\": \"call_2\", \"content\": \"row 1: 10.0.0.5 to 203.0.113.7\"}, {\"role\": \"user\", \"content\": \"Record what bears on the case before the next reads.\"}], \"temperature\": 0.2, \"tools\": [{\"type\": \"function\", \"function\": {\"name\": \"list_processes\", \"description\": \"List the processes in a memory image.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"image\": {\"type\": \"string\"}}, \"required\": [\"image\"]}}}, {\"type\": \"function\", \"function\": {\"name\": \"read_table\", \"description\": \"Read rows of a table export.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}}, \"required\": [\"path\"]}}}], \"tool_choice\": \"auto\", \"stream\": true, \"stream_options\": {\"include_usage\": true}}"
+    }
+   ]
+  }
+ ]
+}

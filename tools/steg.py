@@ -17,6 +17,8 @@ import tempfile
 
 from fastmcp import FastMCP
 
+from tools import media_types as MT
+
 from core import DEFAULT_TIMEOUT, output_safe, run
 from core.candidates import candidates
 from core.paths import assert_output_safe, missing_program_result, tool_program
@@ -116,6 +118,11 @@ EXTRACTORS = (
      "re-run ./install.sh (it builds jphs), or build github.com/h3xx/jphs by hand", True),
 )
 _COVERS = {name: covers for name, _, covers, _, _ in EXTRACTORS}
+# The carriers each extractor reads, as media types (the same facts as the
+# text above, for the tool's declaration); the tool declares their union.
+_CARRIERS = {"steghide": (*MT.JPEG, *MT.BMP, *MT.WAV, *MT.AU), "outguess": (*MT.JPEG, *MT.PNM),
+             "jpseek": MT.JPEG}
+_READS = list(dict.fromkeys(t for name, *_ in EXTRACTORS for t in _CARRIERS[name]))
 
 
 def _available() -> tuple[list[tuple], list[dict]]:
@@ -140,7 +147,7 @@ def steg_status() -> dict:
     }
 
 
-@mcp.tool()
+@mcp.tool(meta={"reads": _READS})
 @output_safe
 def steg_extract(image_path: str | list[str], output_dir: str,
                  passphrase: str | list[str] = "", method: str = "auto") -> dict:
@@ -211,7 +218,7 @@ def steg_extract(image_path: str | list[str], output_dir: str,
             return {**recovered[0], "attempts": last_attempts, "missing": missing,
                     "note": ("identify and hash the output before drawing on it; the "
                              "passphrase used and its source belong in the finding")}
-        return _negative_single(passes[0], last_attempts, missing)
+        return _negative_single(passes[0], last_attempts, missing, carriers[0])
 
     grid = {"carriers": len(carriers), "passphrases": len(passes),
             "extractors": extractors, "cells_tried": cells, "missing": missing}
@@ -224,6 +231,7 @@ def steg_extract(image_path: str | list[str], output_dir: str,
     # the coverage ledger credits only successful calls, and a citation gate
     # refuses a failed one as support, so a negative reported as failure
     # left the carriers it had read unexamined on paper and uncitable.
+    noisy_cells = sum(noise.values())
     return {
         "success": True, "recovered": [], **grid, "noise": noise,
         "negative": (f"nothing recoverable: {len(carriers)} carrier(s) x {len(passes)} "
@@ -233,12 +241,33 @@ def steg_extract(image_path: str | list[str], output_dir: str,
             "this negative covers what the installed extractors read, with these "
             "carriers and passphrases: record it as a disposition "
             "(misc.record_agent_message with disposition=True) naming the counts, not "
-            "as a finding, and widen it only with candidates the evidence offers. It "
-            "does not show that nothing is hidden: data embedded by another tool or "
-            "version (JPHS for Windows 0.5x among them) or by an extractor that is not "
-            "installed (see missing) cannot be read here, so state that limit wherever "
-            "the negative is reported"),
+            "as a finding, and widen it only with candidates the evidence offers. "
+            + (f"{noisy_cells} cell(s) wrote bytes with no recognizable structure: {_noise_causes(noise)}. "
+               if noisy_cells else "")
+            + "State this limit wherever the negative is reported: " + _limits(carriers, extractors)),
     }
+
+
+def _record_cell_answer(res: dict) -> None:
+    """An extractor that ran to its own nonzero exit answered: no payload of
+    its embedder under this passphrase, or a carrier format it does not read
+    (every installed extractor runs on every carrier). Which of the two the
+    exit cannot say, so the cell is neither a read nor a broken tool: its
+    trace entry stays unsuccessful and is classed expected_nonzero, which the
+    run review does not count as a failure and the coverage ledger not as an
+    attempt at the carrier (core.executor gives a search verb's exit 1 the
+    same class). A run cut by a timeout, a stop or a signal stays a tool
+    error. Never raises."""
+    cid = res.get("_atlas_call_id")
+    code = res.get("exit_code")
+    if (res.get("success") is not False or res.get("timed_out") or res.get("interrupted")
+            or not isinstance(code, int) or code <= 0 or not cid):
+        return
+    try:
+        from core.execution_log import log
+        log.annotate_tool_call(int(cid), failure_class="expected_nonzero")
+    except Exception:  # noqa: BLE001 - the label only
+        pass
 
 
 def _extract_one(image_path: str, output_dir: str, passphrase: str,
@@ -267,6 +296,7 @@ def _extract_one(image_path: str, output_dir: str, passphrase: str,
         attempts.append({"method": name, "exit_code": res.get("exit_code"),
                          "output_bytes": size, "payload_kind": kind,
                          "stderr": (res.get("stderr") or "")[:300]})
+        _record_cell_answer(res)
         # A recognised payload from a run that succeeded is a real extraction.
         # Bytes with no structure are what outguess and jpseek write when the
         # passphrase is wrong, and a run that failed extracted nothing whatever
@@ -282,24 +312,56 @@ def _extract_one(image_path: str, output_dir: str, passphrase: str,
     return None, attempts
 
 
-def _negative_single(passphrase: str, attempts: list[dict], missing: list[dict]) -> dict:
+# What a negative says about its own reach. jpseek reads the format of the
+# Linux 0.3 line only; the Windows 0.5x build of the same author writes
+# another (its readme says so), and a 0.5x carrier under the right
+# passphrase gives jpseek the same noise and the same banner as a wrong
+# passphrase. So the format limit is stated where jpseek ran on a JPEG, with
+# the manual route (the format's own program), and the noise sentence names
+# both causes where jpseek wrote noise. Nothing here names a program Atlas
+# does not run, and nothing says a carrier is of that format: that is
+# unmeasured.
+_FORMAT_LIMIT = ("jpseek here reads the Linux 0.3 format only; a carrier written by JPHS for Windows 0.5x "
+                 "is read with that program (jpseek.exe) on a Windows host, with the same passphrases")
+_REACH_LIMIT = ("data hidden by another tool or version, or by an extractor that is not installed (see "
+                "missing), cannot be read here, so a miss does not show that nothing is hidden")
+
+
+def _noise_causes(noise_methods) -> str:
+    """Why an extractor writes structureless bytes: a wrong passphrase, or,
+    for jpseek, a carrier of the format it does not read."""
+    if "jpseek" in set(noise_methods):
+        return "a wrong passphrase, or a carrier jpseek 0.3 does not read (JPHS for Windows 0.5x)"
+    return "what a wrong passphrase yields"
+
+
+def _jpseek_on_jpeg(carriers: list[str], methods) -> bool:
+    """Whether jpseek ran on a JPEG carrier (by content, then by name)."""
+    if "jpseek" not in set(methods):
+        return False
+    return any(MT.matches(_CARRIERS["jpseek"], MT.candidates(c)) for c in carriers)
+
+
+def _limits(carriers: list[str], methods) -> str:
+    return (_FORMAT_LIMIT + "; " if _jpseek_on_jpeg(carriers, methods) else "") + _REACH_LIMIT
+
+
+def _negative_single(passphrase: str, attempts: list[dict], missing: list[dict], carrier: str) -> dict:
     with_pass = f"with passphrase {passphrase!r}" if passphrase else "without a passphrase"
-    produced_noise = any(a["output_bytes"] > 0 for a in attempts)
+    noisy = [a["method"] for a in attempts if a["output_bytes"] > 0]
+    methods = [a["method"] for a in attempts]
     return {
         "success": True, "recovered": [],
         "negative": (f"no installed extractor recovered a recognizable payload {with_pass}"
-                     if produced_noise else
+                     if noisy else
                      f"no installed extractor produced data {with_pass}"),
         "attempts": attempts, "missing": missing,
         "next_step": (
-            ("an extractor wrote bytes with no recognizable structure, which is what a "
-             "wrong passphrase yields — take candidate passphrases from the evidence "
-             "(notes, documents, other credentials), not guesses, and pass them as a "
-             "list to try them all at once; "
-             if produced_noise else
+            (f"an extractor wrote bytes with no recognizable structure: {_noise_causes(noisy)}; take "
+             "candidate passphrases from the evidence (notes, documents, other credentials), not "
+             "guesses, and pass them as a list to try them all at once; "
+             if noisy else
              "try passphrases found in the evidence (notes, documents, other "
              "credentials), not guesses, passed as a list to try them all at once; ")
-            + "data hidden by another tool or version (JPHS for Windows 0.5x among "
-            "them) or by an extractor that is not installed (see missing) cannot be "
-            "read here, so a miss does not show that nothing is hidden"),
+            + _limits([carrier], methods)),
     }

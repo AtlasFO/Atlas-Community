@@ -55,6 +55,17 @@ _STALL_SOFT_MSG = (
     "report yet.\n{ledger_nudge}"
 )
 
+def _stall_soft_msg() -> str:
+    """The soft stall text; with ATLAS_EVIDENCE_FRAMING the switch of
+    approach is a read inside an image or a search of an export."""
+    from core.evidence_framing import framing_lines, framing_on
+    if not framing_on():
+        return _STALL_SOFT_MSG
+    return _STALL_SOFT_MSG.replace(
+        "probe coverage-ledger gaps with table.* on already_processed / case-root tabular",
+        framing_lines()["stall_switch"])
+
+
 _STALL_HARD_MSG = (
     "[stall hard] {streak} turns without agent progress. Change approach "
     "or DAIR phase (Triage→Collect→Analyze). Run coverage.ledger_status "
@@ -72,6 +83,12 @@ _STALL_COVERAGE_REDIRECT_MSG = (
     "never replaces one. Then continue. Unseen examples: {gaps}"
 )
 
+_STALL_WORK_ORDER_REDIRECT_MSG = (
+    "[stall work-order redirect] Belief/exploration stalled and the force-report "
+    "grace elapsed, but the work order still has reads due. Run these next; each "
+    "closes when a call reads its target or fails to:\n{calls}"
+)
+
 _STALL_FORCE_REPORT_MSG = (
     "[stall force-report] Coverage floor met (or wall-clock) and still no "
     "belief progress after wrap-up. Force dair_assess next_phase=Report, "
@@ -86,6 +103,14 @@ _TURN_ADVISORY_MSG = (
     "exports; avoid side-channel EVTX and memory tools when no memory "
     "image exists.\n{ledger_nudge}"
 )
+
+
+def _turn_advisory_msg() -> str:
+    from core.evidence_framing import framing_lines, framing_on
+    if not framing_on():
+        return _TURN_ADVISORY_MSG
+    return ("[turn advisory] This run has reached {turn} turns and is continuing "
+            "(no hard turn abort). " + framing_lines()["turn_advisory"] + "\n{ledger_nudge}")
 
 _BELIEF_STARVATION_HINT = (
     "[belief starvation] Actionable CASE tasks remain and no claim-graph "
@@ -256,8 +281,12 @@ def messages_for_turn(
     report_written: bool,
     case_dir: str | os.PathLike | None = None,
     wall_clock: bool = False,
+    work_order: tuple[bool, list[str]] | None = None,
 ) -> list[dict[str, str]]:
-    """User-role injections for this turn (may be empty)."""
+    """User-role injections for this turn (may be empty). ``work_order``:
+    with the work order on, (settled, due ready calls): the force-report
+    waits for the order instead of the coverage floor, and the redirect
+    names due items."""
     out: list[dict[str, str]] = []
     nudge = _ledger_nudge(case_dir)
     if (TURN_ADVISORY > 0 and turn == TURN_ADVISORY
@@ -265,7 +294,7 @@ def messages_for_turn(
         state.advisory_injected = True
         out.append({
             "role": "user",
-            "content": _TURN_ADVISORY_MSG.format(
+            "content": _turn_advisory_msg().format(
                 turn=turn, ledger_nudge=nudge),
         })
     if report_written:
@@ -280,7 +309,7 @@ def messages_for_turn(
         state.soft_injected = True
         out.append({
             "role": "user",
-            "content": _STALL_SOFT_MSG.format(
+            "content": _stall_soft_msg().format(
                 streak=streak, ledger_nudge=nudge) + starve_hint,
         })
     if streak >= STALL_HARD_TURNS and not state.hard_injected:
@@ -300,16 +329,19 @@ def messages_for_turn(
         ledger_ok = False
         gaps: list[str] = []
         how = ""
-        try:
-            from core.coverage_ledger import (
-                open_unit_paths, open_units_read_hint, ready_for_degraded_exit,
-            )
-            ledger_ok = bool(ready_for_degraded_exit(case_dir))
-            if not ledger_ok:
-                gaps = open_unit_paths(case_dir, limit=6)
-                how = open_units_read_hint(case_dir, limit=6)
-        except Exception:
-            ledger_ok = False
+        if work_order is not None:
+            ledger_ok, gaps = bool(work_order[0]), list(work_order[1])[:6]
+        else:
+            try:
+                from core.coverage_ledger import (
+                    open_unit_paths, open_units_read_hint, ready_for_degraded_exit,
+                )
+                ledger_ok = bool(ready_for_degraded_exit(case_dir))
+                if not ledger_ok:
+                    gaps = open_unit_paths(case_dir, limit=6)
+                    how = open_units_read_hint(case_dir, limit=6)
+            except Exception:
+                ledger_ok = False
         if wall_clock or ledger_ok:
             state.force_report_injected = True
             state.allow_synthesize_escape = True
@@ -322,9 +354,11 @@ def messages_for_turn(
             state.redirect_at_streak = streak
             out.append({
                 "role": "user",
-                "content": _STALL_COVERAGE_REDIRECT_MSG.format(
-                    gaps=", ".join(gaps) if gaps else "(rebuild ledger)",
-                    how=how or "each with a tool that reads its content"),
+                "content": (_STALL_WORK_ORDER_REDIRECT_MSG.format(calls="\n".join(f"- {g}" for g in gaps))
+                            if work_order is not None else
+                            _STALL_COVERAGE_REDIRECT_MSG.format(
+                                gaps=", ".join(gaps) if gaps else "(rebuild ledger)",
+                                how=how or "each with a tool that reads its content")),
             })
     return out
 

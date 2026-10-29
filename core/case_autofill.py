@@ -50,9 +50,10 @@ from core.case_knowledge import (
     section_text,
 )
 from core.entities import extract
+from agent.llm import cut_at_allowance, one_answer_chat
 from core.evidence_profile import build_evidence_profile
 from core.investigation_tasks import _SECTION_HEADINGS as _REQUEST_TITLES
-from core.investigation_tasks import parse_case_requests, unclosed_fence
+from core.investigation_tasks import case_markdown_version, parse_case_requests, unclosed_fence
 
 STANDARD_REQUEST = "What happened on the Host(s)?"
 
@@ -157,6 +158,10 @@ def build_proposal(case_dir: str | Path) -> dict[str, Any]:
         # pasted fenced block kept); "" when CASE.md has no such section
         # or it is empty.
         "prior_knowledge": section_text(current_md),
+        # The version of the brief this proposal was built from: the write
+        # that applies it is refused when the brief changed meanwhile, since
+        # the rewrite of the prior-knowledge section replaces it whole.
+        "version": case_markdown_version(current_md),
     }
 
 
@@ -182,10 +187,11 @@ def ask_llm_to_reformat_prior_knowledge(text: str, client: Any) -> dict[str, Any
     text = (text or "").strip()
     if not text:
         return None
-    resp = client.chat(
+    resp = one_answer_chat(
+        client,
         [{"role": "system", "content": _PRIOR_KNOWLEDGE_SYSTEM_PROMPT},
          {"role": "user", "content": "What you already know:\n" + text}])
-    reply = (resp.content or "").strip()
+    reply = "" if cut_at_allowance(resp) else (resp.content or "").strip()
     m = re.search(r"\{.*\}", reply, re.DOTALL)
     try:
         parsed = json.loads(m.group(0) if m else reply)
@@ -256,10 +262,11 @@ def ask_llm_about_unsure(unsure: list[dict[str, Any]], client: Any) -> list[dict
     if not unsure:
         return []
     lines = [f"- {u['path']} ({u.get('size', '?')} bytes)" for u in unsure]
-    resp = client.chat(
+    resp = one_answer_chat(
+        client,
         [{"role": "system", "content": _AUTOFILL_SYSTEM_PROMPT},
          {"role": "user", "content": "Evidence files:\n" + "\n".join(lines)}])
-    text = (resp.content or "").strip()
+    text = "" if cut_at_allowance(resp) else (resp.content or "").strip()
     m = re.search(r"\[.*\]", text, re.DOTALL)
     try:
         parsed = json.loads(m.group(0) if m else text)

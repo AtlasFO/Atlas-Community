@@ -60,7 +60,7 @@ ROWS = {
         _row("SOFTWARE", "Microsoft\\Windows NT\\CurrentVersion", "CurrentBuild", "7601"),
         _row("SOFTWARE", "Microsoft\\Windows NT\\CurrentVersion", "CurrentVersion", "6.1"),
         _row("SOFTWARE", "Microsoft\\Windows NT\\CurrentVersion", "CSDVersion", "Service Pack 1"),
-        _row("SOFTWARE", "Microsoft\\Windows NT\\CurrentVersion", "InstallDate", "1427034866", vtype="RegDword"),
+        _row("SOFTWARE", "Microsoft\\Windows NT\\CurrentVersion", "InstallDate", "1931952005", vtype="RegDword"),
         _row("SOFTWARE", "Microsoft\\Windows NT\\CurrentVersion", "RegisteredOwner", "Jane Roe"),
         _row("SOFTWARE", "Microsoft\\Windows NT\\CurrentVersion\\ProfileList\\S-1-5-21-1-2-3-1000", "Multiple",
              "KeyName: S-1-5-21-1-2-3-1000", "Timestamp: 2031-01-02 03:04:05", "ProfileImagePath: C:\\Users\\jane", vtype="(plugin)"),
@@ -161,7 +161,7 @@ def test_the_profile_reads_the_current_control_set_and_skips_deleted_rows(tmp_pa
     assert prof["identity"]["computer_name"] == "WS-7A2B"          # not the stale set's name
     assert prof["identity"]["domain"] == "CORP" and prof["identity"]["domain_sid"] == "S-1-5-21-1-2-3"
     assert prof["identity"]["dns_suffix"] == "corp.example.net"
-    assert prof["os"]["product_name"] == "Windows 7 Ultimate" and prof["os"]["install_date"] == "2015-03-22 14:34:26 UTC"
+    assert prof["os"]["product_name"] == "Windows 7 Ultimate" and prof["os"]["install_date"] == "2031-03-22 13:20:05 UTC"
     assert prof["time"]["zone"] == "W. Europe Standard Time" and prof["time"]["active_time_bias"] == "-120"
     assert [a["name"] for a in prof["accounts"]] == ["jane"] and prof["accounts"][0]["rid"] == 1000
     assert prof["profiles"][0]["path"] == "C:\\Users\\jane"
@@ -210,15 +210,24 @@ def test_observations_cite_the_hive_and_the_call_and_carry_the_labels(tmp_path):
     assert all(n.get("kind") != "claim" for n in nodes.values())
 
 
-def test_a_second_run_takes_nothing_new(tmp_path):
+def test_a_second_run_takes_nothing_new_and_marks_what_an_older_run_registered(tmp_path):
+    from core import coverage_ledger as cl
     case = _tree(tmp_path)
     fake, calls = _stub_recmd()
     with patch.object(B, "_run_recmd", fake), patch.object(B, "_rip", lambda hive, plugin: ""), \
             patch("core.execution_log.log", _log(case)):
         first = B.run_baseline(case)
+        led = cl.load_ledger(case)
+        units = [u for u in led["units"].values() if u.get("kind") == "derived"]
+        for u in units:                                  # registered before the mark existed
+            u.pop("atlas_read")
+            u["status"] = "unseen"
+        cl.save_ledger(case, led)
         second = B.run_baseline(case)
     assert first["taken"] and second["taken"] == [] and second["skipped"][0]["why"] == "already profiled"
     assert len(calls) == len(B.HIVES)
+    assert units and all(u.get("atlas_read") for u in cl.load_ledger(case)["units"].values()
+                         if u.get("kind") == "derived")
 
 
 def test_the_prompt_the_report_and_the_status_line_read_the_profile(tmp_path):

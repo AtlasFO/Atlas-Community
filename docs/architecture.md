@@ -118,9 +118,10 @@ flowchart LR
 ## Architectural pattern
 
 Architecturally, Atlas is primarily a **Custom MCP Server**:
-`server.py` exposes ~250 typed forensic tools across 24 namespaces over the Model
-Context Protocol, and the analyst model reaches every tool through that single
-boundary. It
+`server.py` exposes about 390 typed forensic tools across 39 namespaces over the Model
+Context Protocol, and the analyst model reaches its tools through that single
+boundary. The analyst's toolbox lists 387 of them in 38 namespaces: the
+grader's namespace and the tool that clears a case stay hidden from it. It
 is also a **Multi-Agent Framework** — three independently-backed models hold
 distinct roles (the analyst, the DAIR phase director, and the `reason.*`
 adversarial reviewer) and exchange structured directives. It is **not** a
@@ -150,6 +151,7 @@ These are the architectural-tier enforcements in detail.
 | Live endpoint commands avoid shell injection *(experimental layer)* | Live tools use registered host aliases and fixed argv command construction over SSH; the gated `respond.*` write path validates every argv parameter | `core/ssh.py`, `core/ssh_exec.py`, `tools/live.py` |
 | Findings must be traceable | `misc.record_finding` requires `linked_call_id` to point to the producing `_atlas_call_id` | `tools/misc.py`, `tools/_gates/linked_call_id_must_exist.py` |
 | Confirmed claims require review | Confidence, citation, hypothesis, lineage, attribution-grounding, exfil-channel, negative-completeness, and adversarial-review gates block unsupported findings | `tools/_gates/*`, `tools/reasoning.py`, `tools/dair.py` |
+| Findings rest on rows the calls printed | Grounding markers (entities, times, quotations, hashes) count only when a cited call printed them in a row, never from the analyst's own supporting text, a command line or an echoed request. A CONFIRMED finding stands only when a cited call's row shows every checkable entity, minute time and quotation it states; otherwise it is recorded LIKELY. A statement about every row, or an absence, over a result the analyst saw only in part is refused with the count to take first. A malware family name needs a tool output that prints it. A hash bound to files needs a row showing both. A conclusion names the claims it rests on and is never stronger than the weakest of them. The adversarial evaluation reads a cited call whole when it fits, else a witness per value and the richest rows with a count of what it did not show, and a claim over unseen rows is UNCERTAIN. Each refusal names the route: cite the call that prints the value, cite the call that decodes it, or record the finding at SUSPECTED | `tools/_gates/*`, `core/conclusion_door.py`, `tools/reasoning.py` |
 | Audit trail is durable | Tool calls, reason calls, DAIR transitions, self-corrections, curiosity probes, and findings are written to JSON/Markdown trace logs as they happen; the run loop flushes the execution log at session end | `core/execution_log.py`, `agent/`, `dashboard/*` |
 | Text planted in evidence is named as data | Every tool output is scanned for instruction-like text (a line addressed to an analyst, an override of instructions, a dictated verdict, chat-template tokens): the trace entry is stamped `instruction_like_text`, the result the model reads shows it under `_instruction_like_text` with a note that it is evidence content, and `record_finding` warns about a finding that cites such output for another claim (`ATLAS_INSTRUCTION_TEXT_GATE=strict` refuses instead). Nothing is stripped or rewritten: the text is evidence and the citation gates need it verbatim | `core/instruction_text.py`, `core/execution_log.py`, `agent/toolbox.py`, `tools/_gates/instruction_text_grounding.py`, `tests/security/test_prompt_injection.py` |
 | A viewer's chat turn cannot change the case | The dashboard sends the caller's role with each chat message; for a viewer the worker sets `Toolbox.deny`, which refuses every state-changing tool (record, write, update, add, approve, execute, revert, clear, reset, set, start, export, mark, the `respond` namespace, `atlas_finish`, `misc_batch_run`) before the name resolves | `agent/chat_worker.py`, `agent/toolbox.py`, `dashboard/app.py`, `dashboard/chat.py` |
@@ -164,7 +166,7 @@ what to examine next, and an adversary that challenges every conclusion.
 
 | Component | Purpose | Typical output | Trace entry |
 | --- | --- | --- | --- |
-| DAIR phase director | Maintains the investigation phase model: Triage, Collect, Analyze, Scan, and Report. It challenges whether the investigation is ready to move forward, identifies missing work, and returns `priority_tools` for the next batch. | Phase assessment, transition recommendation, verification challenges, investigation focus, priority tools, curiosity budget | `dair_call` |
+| DAIR phase director | Maintains the investigation phase model: Triage, Collect, Analyze, Scan, and Report. It challenges whether the investigation is ready to move forward, identifies missing work, and returns `priority_tools` for the next batch. With the work order on (the default) it reviews the order of owed reads instead of planning batches: it answers with work items, adopted proposals and dismissals that name the call that already read the target ([architecture-investigation.md](architecture-investigation.md#6-coverage-the-work-order-and-the-incident-map)). | Phase assessment, transition recommendation, verification challenges, investigation focus, priority tools, curiosity budget | `dair_call` |
 | `reason.*` adversarial reviewer | Provides analytical review around the evidence. It creates initial plans, generates competing hypotheses for the case question and ambiguous artifacts, evaluates whether findings are supported, performs citation/confidence checks, and synthesizes the final report posture. | Plan, hypothesis, finding evaluation, confidence score, citation check, synthesis, pre-report readiness | `reason_call` |
 
 Tool selection is grounded by `tools/tool_capabilities.py`, a curated capability
@@ -194,8 +196,11 @@ inspected and any finding they ultimately fed.
    but do not enforce.
 2. The analyst selects forensic actions, but execution crosses the typed Atlas MCP
    boundary rather than running SIFT binaries directly.
-3. Middleware records call initiation, enforces recent DAIR guidance, and keeps
-   narration in the trace.
+3. Middleware records call initiation and keeps narration in the trace. The
+   reads the run owes (the work order) are shown to the analyst every turn, and
+   the director's guidance reaches it through them and through a progress line
+   every 20 actions; the DAIR window no longer blocks a forensic tool
+   (`ATLAS_WORK_ORDER=0` restores the earlier behaviour).
 4. Tool wrappers call the safe executor or live SSH runner. Output safety checks
    reject writes to evidence locations before the command runs.
 5. Each successful or failed execution receives a `_atlas_call_id` in the trace.

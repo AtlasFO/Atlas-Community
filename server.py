@@ -52,6 +52,7 @@ from tools.claim_tools import mcp as claim_mcp
 from tools.brain_tools import mcp as brain_mcp
 from tools.archives import mcp as archives_mcp
 from tools.steg import mcp as steg_mcp
+from tools.images import mcp as images_mcp
 from tools.ese import mcp as ese_mcp
 from tools.evt import mcp as evt_mcp
 
@@ -107,13 +108,14 @@ mcp.mount(claim_mcp, namespace="claim")
 mcp.mount(brain_mcp, namespace="brain")
 mcp.mount(archives_mcp, namespace="archive")
 mcp.mount(steg_mcp, namespace="steg")
+mcp.mount(images_mcp, namespace="images")
 mcp.mount(ese_mcp, namespace="ese")
 mcp.mount(evt_mcp, namespace="evt")
 
 
 if __name__ == "__main__":
     # The trace dashboard runs as a separate long-lived process (`atlas-dashboard`).
-    # We no longer autostart a per-case copy here — it caused port collisions and
-    # died whenever MCP restarted. start_execution_log surfaces the standalone
+    # No per-case copy is autostarted here: it causes port collisions and
+    # dies whenever MCP restarts. start_execution_log surfaces the standalone
     # URL via ~/.cache/atlas/dashboard.url instead.
     mcp.run(transport="stdio")

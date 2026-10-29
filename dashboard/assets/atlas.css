@@ -44,6 +44,7 @@
   /* Semantic status colours — defined ONCE for the whole application. */
   --accent: #5b9dff;    /* interactive / open questions */
   --ok: #37c98e;        /* answered / success / live */
+  --on-fill: #0c0f14;   /* text on a solid status or accent fill */
   --warn: #f0b34e;      /* blocked / attention */
   --bad: #f26d6d;       /* conflicts / errors */
   /* Status tints for a background and a border, the pills' own values: a
@@ -85,24 +86,29 @@
 
   --fg-0: #1b2434;
   --fg-1: #4c5567;
-  --fg-2: #626976;      /* 4.5:1 vs bg-1, the darkest light-theme surface it appears on */
+  --fg-2: #5d6471;      /* 4.5:1 vs bg-hl (the hover surface), the darkest light-theme surface it appears on */
 
   --border: #d7dce6;
   --border-strong: #b9c2d4cc;
 
-  --accent: #2f6fe0;
-  --ok: #1f9d6c;
-  --warn: #b9791a;
-  --bad: #d94c4c;
+  /* Every colour in this block that is used as text reaches 4.5:1 against
+     bg-0 to bg-3 and the hover surface bg-hl, also under the tinted pill or
+     button it sits on (tests/dashboard/test_light_theme_contrast.py). */
+  --accent: #1d59c4;
+  --ok: #156a49;
+  --warn: #865713;
+  --bad: #b02525;
   --bad-soft: rgba(217,76,76,.12);   --bad-line: rgba(217,76,76,.3);
   --warn-soft: rgba(185,121,26,.12); --warn-line: rgba(185,121,26,.3);
-  --partial: #7c4fd6;
-  --neutral: #5b6472;
+  --partial: #703ed2;
+  --neutral: #58606e;
 
-  --conf-confirmed: #d94c4c;
-  --conf-likely: #c47a1f;
-  --conf-suspected: #ab8f00;
-  --conf-unconfirmed: #78808f;
+  --conf-confirmed: #b02525;
+  --conf-likely: #865415;
+  --conf-suspected: #756200;
+  --conf-unconfirmed: #585e6a;
+  /* Text on a solid status or accent fill. */
+  --on-fill: #ffffff;
 
   /* Softer, cooler-grey shadows for the light surface — the dark theme's
      near-black shadow tint would read as a harsh smudge here. */
@@ -224,6 +230,14 @@ a:hover { text-decoration: underline; }
   background: var(--bg-2); border: 1px solid var(--border-strong);
   box-shadow: var(--shadow-md);
   color: var(--fg-0); font-size: 12.5px; text-align: left;
+  /* The chip keeps its own label on one line; the card inside it lists case
+     names and each run's activity, free text of any length, which must fold
+     (overflow-wrap) inside the card instead of running past the screen. */
+  white-space: normal;
+  /* Folding text gives the card a one-word min-content, which would shrink
+     it to min-width under the narrow chip: it sizes to its content again,
+     clamped by min-width and max-width above. */
+  width: max-content;
   /* visibility, not display: the card keeps its box so the fade can run,
      and stays unreachable by pointer and screen reader while hidden. */
   opacity: 0; visibility: hidden; transform: translateY(-3px);
@@ -256,6 +270,8 @@ a:hover { text-decoration: underline; }
   font-weight: 600; overflow-wrap: anywhere;
 }
 .activity-pop .ap-here {
+  /* A pill: it moves to the next line whole, never splits inside. */
+  white-space: nowrap;
   margin-left: 6px; padding: 0 6px; border-radius: 999px;
   background: var(--bg-3); border: 1px solid var(--border);
   font-size: 10px; font-weight: 600; color: var(--fg-2);
@@ -281,7 +297,7 @@ a:hover { text-decoration: underline; }
 .shell-btn:hover { background: var(--bg-hl); text-decoration: none; }
 .shell-btn:active { transform: translateY(1px); }
 .shell-btn.primary {
-  background: var(--accent); border-color: var(--accent); color: #0c0f14;
+  background: var(--accent); border-color: var(--accent); color: var(--on-fill);
   font-weight: 600; box-shadow: var(--shadow-accent);
 }
 .shell-btn.primary:hover { filter: brightness(1.1); box-shadow: var(--shadow-accent-hover); }
@@ -369,7 +385,7 @@ a:hover { text-decoration: underline; }
 .atlas-shell nav.shell-nav a .nav-badge {
   display: inline-block; min-width: 16px; text-align: center;
   margin-left: 5px; padding: 0 4px; border-radius: 8px;
-  background: var(--accent); color: #0c0f14;
+  background: var(--accent); color: var(--on-fill);
   font-size: 10px; font-weight: 700; line-height: 15px;
 }
 
@@ -489,6 +505,9 @@ a:hover { text-decoration: underline; }
 .pill.conf-likely      { background: rgba(240,160,78,.15);  color: var(--conf-likely); }
 .pill.conf-suspected   { background: rgba(240,210,78,.15);  color: var(--conf-suspected); }
 .pill.conf-unconfirmed { background: rgba(138,147,166,.15); color: var(--conf-unconfirmed); }
+.shell-case-notice { margin: 6px 0 0; padding: 6px 10px; border: 1px solid var(--bad-line);
+  border-radius: 6px; background: var(--bad-soft); color: var(--bad); font-size: 13px; }
+.shell-case-notice[hidden] { display: none; }
 
 /* Progress bar (question buckets) */
 .progressbar {
@@ -573,7 +592,7 @@ button.btn:disabled { opacity: .45; cursor: default; }
   position: fixed; right: 20px; bottom: 20px; z-index: 90;
   display: inline-flex; align-items: center; gap: 8px;
   padding: 10px 16px; border-radius: 999px; cursor: pointer;
-  background: var(--accent); color: #0c0f14;
+  background: var(--accent); color: var(--on-fill);
   border: 1px solid var(--accent); font: inherit; font-size: 13px;
   font-weight: 650; box-shadow: var(--shadow-md), var(--shadow-accent);
   transition: transform .15s var(--ease), box-shadow .15s var(--ease),
@@ -669,7 +688,7 @@ button.btn:disabled { opacity: .45; cursor: default; }
   flex: 1; resize: none; max-height: 120px;
 }
 .atlas-chat .chat-send {
-  align-self: flex-end; background: var(--accent); color: #0c0f14; border: none;
+  align-self: flex-end; background: var(--accent); color: var(--on-fill); border: none;
   border-radius: var(--radius-sm); padding: 7px 15px; font-weight: 650;
   cursor: pointer; font-size: 13px;
 }

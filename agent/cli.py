@@ -183,17 +183,32 @@ def _stop_tool_children() -> None:
         pass
 
 
+# Set once this process has received SIGTERM: the dashboard's Stop, or a stop
+# an operator sent. The interrupt the signal raises is then recorded as a
+# requested stop, not as a Ctrl+C at the terminal (_interrupt_reason).
+_STOP_REQUESTED = False
+
+
+def _interrupt_reason() -> str:
+    """The stopped_reason an interrupt is recorded with: "stop_requested"
+    after SIGTERM, "keyboard_interrupt" for a Ctrl+C."""
+    return "stop_requested" if _STOP_REQUESTED else "keyboard_interrupt"
+
+
 def _route_sigterm() -> None:
     """Route SIGTERM through KeyboardInterrupt. The dashboard's Stop sends
     SIGTERM (then SIGKILL after its grace period,
     dashboard.run_manager.STOP_GRACE_SECONDS); Python's default for it kills
     the process with no exit record and no report. Raised as an interrupt,
     the stop reaches the code that records it: the session's finally, or
-    the evidence stage's settle (_IntakeStatus) before any session exists."""
+    the evidence stage's settle (_IntakeStatus) before any session exists,
+    and both record it as a requested stop."""
     try:
         import signal as _signal
 
         def _on_sigterm(_signum, _frame):
+            global _STOP_REQUESTED
+            _STOP_REQUESTED = True
             _stop_tool_children()
             raise KeyboardInterrupt
         _signal.signal(_signal.SIGTERM, _on_sigterm)
@@ -201,25 +216,26 @@ def _route_sigterm() -> None:
         pass    # not the main thread / unsupported platform: keep the default
 
 
-def _make_agent(args, case_dir: Path | None, command: str = "run"):
-    from core.paths import ensure_venv_on_path
-    ensure_venv_on_path()
-    from agent.llm import LLMHubClient, LLMError
-    from agent.toolbox import Toolbox
-    from agent.loop import Agent
-    from agent.tui import UI
-    from core import providers
+def _analyst_client(args, *, log=None, warn=None):
+    """The analyst's model client, checked: a known provider, a model id that
+    is not a role or user name, an API key, and a model the provider's
+    catalogue serves (GET /models; a network failure passes, a miss does
+    not). Exits with the reason when one fails.
 
-    if case_dir:
-        # Tool modules and the execution log resolve the case from the
-        # working directory.
-        os.chdir(case_dir)
-    ui = UI(quiet=getattr(args, "quiet", False),
-            skin=getattr(args, "skin", None))
+    It writes nothing and leaves the working directory alone, so a run calls
+    it before any step that changes the case (the clear of a fresh start
+    among them) and hands the client on to _make_agent, which then sends no
+    second probe. ``log`` and ``warn`` receive the probe's lines; stderr by
+    default, ``log`` silent under --quiet / --json."""
+    from agent.llm import LLMHubClient, LLMError
+    from core import providers
+    quiet = getattr(args, "quiet", False) or getattr(args, "json", False)
+    log = log or (lambda m: None if quiet else print(f"atlas: {m}", file=sys.stderr))
+    warn = warn or (lambda m: print(f"atlas: {m}", file=sys.stderr))
     # ATLAS_AGENT_PROVIDER names the analyst backend; empty is "not configured",
     # not a silent fall-through to the LLM hub.
     client = LLMHubClient(provider=providers.role_name("ATLAS_AGENT_PROVIDER"),
-                          model=args.model
+                          model=getattr(args, "model", None)
                           or os.environ.get("ATLAS_AGENT_MODEL") or "")
     # A misconfigured provider is a config error, not a traceback.
     try:
@@ -239,9 +255,8 @@ def _make_agent(args, case_dir: Path | None, command: str = "run"):
             f"not a model id. Set ATLAS_PROVIDER_*_MODEL / LLMHUB_MODEL to a "
             f"catalogue id (e.g. openai/gpt-4o-mini, GLM-5.2)."
         )
-    if not client.api_key:
-        key_var = ("LLMHUB_API_KEY" if provider.name == providers.DEFAULT_NAME
-                   else providers.var(provider.name, "API_KEY"))
+    if client.key_missing:
+        key_var = providers.var(provider.name, "API_KEY")
         sys.exit(f"atlas: no API key for provider {provider.name!r}. Set "
                  f"{key_var} (env, .env, or `bin/atlas-secret set {key_var}`).")
     # Short GET /models probe — adapt context window + char budget to the
@@ -249,16 +264,45 @@ def _make_agent(args, case_dir: Path | None, command: str = "run"):
     # fail-open; a catalogue miss (wrong model id) is a config error.
     try:
         from core.model_context import probe_and_apply
-        result = probe_and_apply(provider, model, log=ui.info, warn=ui.warn)
+        result = probe_and_apply(provider, model, log=log, warn=warn)
         if getattr(result, "source", "") == "unknown_model":
             sys.exit(f"atlas: {result.error}")
     except Exception as _probe_exc:
-        ui.warn(f"model context probe skipped: {_probe_exc}")
+        warn(f"model context probe skipped: {_probe_exc}")
+    return client
+
+
+def _make_agent(args, case_dir: Path | None, command: str = "run", client=None):
+    """The investigator for one session. ``client`` is the analyst client a
+    caller already checked (_analyst_client); without one it is checked
+    here."""
+    from core.paths import ensure_venv_on_path
+    ensure_venv_on_path()
+    from agent.toolbox import Toolbox
+    from agent.loop import Agent
+    from agent.tui import UI
+
+    if case_dir:
+        # Tool modules and the execution log resolve the case from the
+        # working directory.
+        os.chdir(case_dir)
+    ui = UI(quiet=getattr(args, "quiet", False),
+            skin=getattr(args, "skin", None))
+    if client is None:
+        client = _analyst_client(args, log=ui.info, warn=ui.warn)
+    provider, model = client.provider, client.model
+    # The run reads the provider profiles once, at its start; a process it
+    # starts is told when it reads files edited after that.
+    from core import provider_profiles
+    provider_profiles.pin_for_children()
     # A tool list this model has already shown it cannot answer with a
     # function call is not sent again: the toolbox packs under what was
     # learned, and the rest loads on demand.
     from agent import toolbox as _toolbox_mod
     _toolbox_mod.set_learned_tool_ceiling(client.learned_max_tools())
+    # The provider's own tool budget (its profile's max_tools) applies to an
+    # analysis run; a chat keeps the common cap and its switching list.
+    _toolbox_mod.set_declared_tool_cap(_tool_budget_for(command, provider, model))
     ui.info("starting MCP server in-process (tool discovery)…")
     loaded = None
     if case_dir:
@@ -281,6 +325,11 @@ def _make_agent(args, case_dir: Path | None, command: str = "run"):
                 f"{max_openai_tools()}) left these suggested namespaces out "
                 f"of the opening list: {', '.join(left_out)}; they load on "
                 f"demand")
+    # When the budget holds every namespace, an analysis run lists them all
+    # from the first turn and the list never changes (a provider caches the
+    # tools ahead of everything else).
+    toolbox.allow_stable(command)
+    print(f"atlas: tool list: {toolbox.list_mode()}", file=sys.stderr)
     if getattr(args, "all_tools", False):
         from agent.toolbox import MAX_OPENAI_TOOLS
         budget = toolbox.load_with_budget(toolbox.namespaces)
@@ -298,39 +347,151 @@ def _make_agent(args, case_dir: Path | None, command: str = "run"):
               loaded=len(toolbox.loaded))
     # chat is always interactive; run gains it via --interactive.
     interactive = getattr(args, "interactive", False) or command == "chat"
-    agent = Agent(client, toolbox, case_dir,
-                  quiet=getattr(args, "quiet", False), ui=ui, command=command,
-                  interactive=interactive)
     # Every model request of this process, and of the learner it spawns,
-    # is recorded under this case, run and user; the run id is the
-    # transcript's stamp, so a ledger run names its transcript.
-    transcript = getattr(agent, "transcript_path", None)
-    _configure_usage(case_dir, command,
-                     Path(transcript).stem.rsplit("_", 1)[-1] if transcript else "")
-    return agent
+    # is recorded under this case, run and user; the transcript is named
+    # after that run id, so a ledger run names its transcript.
+    run_id = _agent_run(case_dir, command)
+    return Agent(client, toolbox, case_dir,
+                 quiet=getattr(args, "quiet", False), ui=ui, command=command,
+                 interactive=interactive, stamp=run_id)
 
 
-def _configure_usage(case_dir: Path | None, command: str, run_id: str = "") -> None:
+def _tool_budget_for(command: str, provider, model: str) -> int | None:
+    """The tool schemas the provider's profile says one request may carry
+    for ``model``, for an analysis run (agent.toolbox.STABLE_COMMANDS); None
+    for any other session, a profile that says nothing, or no profile."""
+    from agent.toolbox import STABLE_COMMANDS
+    if command not in STABLE_COMMANDS:
+        return None
+    try:
+        from core import provider_profiles
+        pid = getattr(provider, "profile", "") or ""
+        return provider_profiles.get(pid).for_model(model).max_tools if pid else None
+    except Exception:  # noqa: BLE001 - no usable profile, no declaration
+        return None
+
+
+def _stable_tool_list(agent) -> bool:
+    """Whether the agent's toolbox lists every tool for the whole run."""
+    fn = getattr(getattr(agent, "toolbox", None), "stable", None)
+    try:
+        return callable(fn) and fn() is True
+    except Exception:  # noqa: BLE001 - a stand-in toolbox is no stable list
+        return False
+
+
+def _agent_run(case_dir: Path | None, command: str) -> str:
+    """Configure the usage ledger for an agent and return the run id its
+    transcript is named after (the history import keys a run on that stamp).
+    The id this process configured for this command in this case, as a rerun
+    does before its agent starts, is kept unless a transcript already carries
+    it; an id inherited from a parent process never is. Else a fresh one."""
+    from core import usage_ledger
+    from core.paths import detect_case_id
+    own = usage_ledger.own_context()
+    case_id = (detect_case_id(case_dir) or case_dir.name) if case_dir else ""
+    run_id = own.get("run_id", "") if (own.get("case_id"), own.get("command")) == (case_id, command) else ""
+    if run_id and case_dir and any((case_dir / "analysis").glob(f"*_transcript_{run_id}.jsonl")):
+        run_id = ""
+    return _configure_usage(case_dir, command, run_id, keep=False)
+
+
+def _configure_usage(case_dir: Path | None, command: str, run_id: str = "", *,
+                     keep: bool = True) -> str:
     """The usage ledger's context for this process: the brief's case id, one
-    run id per command (a command that configured first keeps its id when
-    the agent starts later in the same case), the command and the user."""
+    run id per command (with ``keep``, a context of the same case already in
+    place keeps its id), the command and the user. Returns the run id."""
     import getpass
     from datetime import datetime, timezone
     from core import usage_ledger
     from core.paths import detect_case_id
     case_id = (detect_case_id(case_dir) or case_dir.name) if case_dir else ""
     current = usage_ledger.current()
-    if current.get("case_id") == case_id and current.get("run_id"):
+    if keep and current.get("case_id") == case_id and current.get("run_id"):
         run_id = current["run_id"]
     try:
         user = getpass.getuser()
     except Exception:  # noqa: BLE001 - a uid without a name records none
         user = ""
-    usage_ledger.configure(
+    return usage_ledger.configure(
         case_id=case_id,
         run_id=run_id or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"),
         command=command,
-        started_by=os.environ.get("ATLAS_RUN_USER") or user)
+        started_by=os.environ.get("ATLAS_RUN_USER") or user)["run_id"]
+
+
+def _add_run_args(parser: argparse.ArgumentParser) -> None:
+    """The flags `atlas run` and `atlas interactive` share, from one place so
+    the two cannot drift: interactive is a run the agent may pause in.
+    --quiet, --json and --interactive are run's alone: a dialogue is neither
+    quiet nor read by a machine."""
+    parser.add_argument("--case", help="case directory (default: cwd if it "
+                                       "looks like a case)")
+    parser.add_argument("--question", "-q",
+                        help="optional override of CASE.md investigation "
+                             "requests for this run")
+    parser.add_argument("--model", help="override the analyst provider's model")
+    parser.add_argument("--case-id", help="override the case ID (from CASE.md) "
+                                          "used for the trace filename + anchor "
+                                          "of a fresh run (a resumed run keeps "
+                                          "its trace's)")
+    parser.add_argument("--output-dir", help="write analysis/exports/reports to "
+                                            "this dir instead of inside the case "
+                                            "(evidence stays read-only in place)")
+    parser.add_argument("--remote", metavar="HOST",
+                        help="run all forensic tools on an external SIFT VM "
+                             "(host key in ~/cases/.common/live_hosts.json); "
+                             "the CLI/agent/LLM stay local — see docs/cli.md")
+    parser.add_argument("--remote-mode", choices=["resident", "copy"],
+                        default="resident",
+                        help="evidence on the VM already (resident) or rsynced "
+                             "up from the client, outputs synced back after "
+                             "the run (copy); default resident")
+    parser.add_argument("--remote-workspace", metavar="DIR",
+                        help="remote workspace base dir for --remote-mode copy "
+                             "(default ~/atlas-workspace on the VM)")
+    parser.add_argument("--all-tools", action="store_true",
+                        help="load tool namespaces up front until the schema "
+                             "budget is full (it follows the model's context "
+                             "window; ATLAS_AGENT_MAX_OPENAI_TOOLS or the "
+                             "provider profile's max_tools can change it); "
+                             "the rest still load on demand")
+    parser.add_argument(
+        "--fresh", action="store_true",
+        help="start fresh: move reports/ and the trace to .atlas/run_history/, "
+             "delete analysis/ and exports/, reset ledger statuses and the "
+             "session (claims/tasks under .atlas/ kept). Implied when a "
+             "prior run ended (finished, stopped or failed) or left its "
+             "trace in analysis/, unless --resume is set.",
+    )
+    parser.add_argument(
+        "--resume", action="store_true",
+        help="continue appending to the existing execution trace and DAIR "
+             "phase stack (the default only when no prior run ended or left "
+             "its trace).",
+    )
+    parser.add_argument(
+        "--skip-sudo-check", action="store_true",
+        help="skip passwordless-sudo preflight (tests/CI only; privileged "
+             "tools will still fail with sudo_auth at runtime). "
+             "Also: ATLAS_SKIP_SUDO_CHECK=1.",
+    )
+    _add_skin_arg(parser)
+    parser.add_argument("--no-brain", action="store_true",
+                        help="disable Brain injection and post-run learning "
+                             "for this investigation")
+    parser.add_argument("--no-capture-brain", action="store_true",
+                        help="skip legacy review-bullet capture even when "
+                             "ATLAS_CAPTURE_BRAIN is set (background learn "
+                             "still runs unless --no-brain)")
+    parser.add_argument("--capture-brain", action="store_true",
+                        help="also stage legacy review/self-correction "
+                             "candidates (background investigation learn "
+                             "already runs by default after a finished run)")
+    parser.add_argument(
+        "--language", "-L", choices=("en", "de"), default=None,
+        help="report language (en|de); persisted in .atlas/case_config.json",
+    )
 
 
 def _add_skin_arg(parser: argparse.ArgumentParser) -> None:
@@ -348,8 +509,8 @@ def _add_skin_arg(parser: argparse.ArgumentParser) -> None:
 def cmd_skin(args) -> None:
     """List or persist the LIVE dashboard animation skin."""
     from agent.tui import (
-        LIVE_SKINS, DEFAULT_LIVE_SKIN, resolve_live_skin, save_ui_prefs,
-        ui_prefs_path, UI,
+        LIVE_SKINS, DEFAULT_LIVE_SKIN, load_ui_prefs, resolve_live_skin,
+        save_ui_prefs, ui_prefs_path, UI,
     )
     name = (getattr(args, "name", None) or "").strip().lower() or None
     if name:
@@ -360,10 +521,23 @@ def cmd_skin(args) -> None:
         print(f"LIVE skin → {name}")
         print(f"saved in {path}")
         print(f"one-shot override: atlas run --skin {name} …")
+        # The environment outranks the saved choice (resolve_live_skin), so
+        # a save under a differing ATLAS_LIVE_SKIN changes no run.
+        env = (os.environ.get("ATLAS_LIVE_SKIN") or "").strip().lower()
+        if env in LIVE_SKINS and env != name:
+            print(f"note: ATLAS_LIVE_SKIN={env} is set and outranks the saved "
+                  f"skin; runs keep using {env} until it is unset")
     else:
         current = resolve_live_skin()
+        # The default a run falls back to without --skin / ATLAS_LIVE_SKIN:
+        # the saved choice when there is one, else the built-in skin.
+        saved = (load_ui_prefs().get("live_skin") or "").strip().lower()
+        if saved in LIVE_SKINS:
+            default_line = f"saved default: {saved}"
+        else:
+            default_line = f"built-in default: {DEFAULT_LIVE_SKIN}"
         print("LIVE dashboard skins")
-        print(f"(active: {current}; default: {DEFAULT_LIVE_SKIN})\n")
+        print(f"(active: {current}; {default_line})\n")
         for key, desc in LIVE_SKINS.items():
             mark = "*" if key == current else " "
             print(f" {mark} {key:10}  {desc}")
@@ -392,10 +566,9 @@ def _resolve_case_question(args, case_dir: Path) -> str:
     """Resolve investigation objectives: CLI -q override, else CASE.md tasks,
     else the standard objective.
 
-    Never returns empty. A case with no stated question used to be refused,
-    which turned "here is a disk, look at it" into an error the operator had
-    to work around; the fallback asks the question that case is actually
-    asking. `question_was_defaulted()` says whether it happened, so a run can
+    Never returns empty. A case with no stated question ("here is a disk,
+    look at it") gets the question that case is actually asking instead of
+    an error. `question_was_defaulted()` says whether it happened, so a run can
     say so rather than pretend an objective was given.
     """
     q = (getattr(args, "question", None) or "").strip()
@@ -406,8 +579,8 @@ def _resolve_case_question(args, case_dir: Path) -> str:
     if derived:
         return derived
     # Last resort: parse CASE.md without requiring a prior Plane A persist
-    from core.investigation_tasks import parse_case_requests, read_case_markdown
-    reqs = parse_case_requests(read_case_markdown(case_dir))
+    from core.investigation_tasks import brief_request_items, read_case_markdown
+    reqs = [i["text"] for i in brief_request_items(read_case_markdown(case_dir))]
     if reqs:
         if len(reqs) == 1:
             return reqs[0]
@@ -458,9 +631,28 @@ def _check_brief_fences(args, case_dir: Path, *, refuse: bool) -> None:
 
 
 def _run_investigation(args, case_dir: Path, command: str = "run",
-                       lock_fd: int | None = None):
+                       lock_fd: int | None = None, client=None):
     """Shared body of `run` and `train`: build the agent, run the full
-    investigation, and return the finished Agent (stats populated)."""
+    investigation, and return the finished Agent (stats populated). A
+    requested stop (the dashboard's Stop or a kill -TERM, routed through the
+    interrupt and recorded as stop_requested by the stage it reached) is an
+    ending, not a fault: it leaves in one line on stderr, never a traceback,
+    with exit code 2 (the documented code of a run stopped before it
+    finished, so a shell's `atlas run && next` does not carry on); a Ctrl+C
+    keeps its interrupt."""
+    try:
+        return _run_investigation_body(args, case_dir, command, lock_fd=lock_fd, client=client)
+    except KeyboardInterrupt:
+        if not _STOP_REQUESTED:
+            raise
+        reports = Path(case_dir) / "reports"
+        written = reports.is_dir() and any(p.is_file() for p in reports.iterdir())
+        print("Run stopped on request" + ("; report written" if written else ""), file=sys.stderr)
+        sys.exit(2)
+
+
+def _run_investigation_body(args, case_dir: Path, command: str = "run",
+                            lock_fd: int | None = None, client=None):
     from agent.prompts import build_system_prompt, initial_user_message
 
     if getattr(args, "json", False):
@@ -507,11 +699,16 @@ def _run_investigation(args, case_dir: Path, command: str = "run",
     # uses, and run() records each call in the trace or refuses to go on,
     # so the trace is opened here, at the path the analyst is told to use;
     # the analyst's start_execution_log then resumes this file.
-    _trace_path = _open_trace_before_plane_a(case_dir)
+    # One case id for the whole run: the trace Plane A records into is the
+    # one the analyst is told to continue (_run_case_id).
+    run_case_id = _run_case_id(args, case_dir)
+    _trace_path = _open_trace_before_plane_a(case_dir, case_id=run_case_id)
     from core.incremental import plane_a_scan
     _route_sigterm()        # a Stop during the evidence stage is recorded as one
     intake = _IntakeStatus(case_dir)
-    try:
+    # The record is settled by whatever ends the process before the session
+    # takes it over (_IntakeStatus); a session's own record always stands.
+    with intake:
         plane = plane_a_scan(
             case_dir,
             persist=True,
@@ -519,101 +716,100 @@ def _run_investigation(args, case_dir: Path, command: str = "run",
             write_journal=True,
             no_agent=True,
             progress=intake.progress,
+            stage=intake.stage,
         )
-    except BaseException as e:
-        intake.settle(e)
-        raise
-    if not plane.get("success"):
-        intake.settle(error=f"Plane A failed: {plane.get('error')}")
-        sys.exit(f"atlas: Plane A failed: {plane.get('error')}")
+        if not plane.get("success"):
+            intake.settle(error=f"Plane A failed: {plane.get('error')}")
+            sys.exit(f"atlas: Plane A failed: {plane.get('error')}")
 
-    # What the analyst already knows earns the first precautions before the
-    # first tool runs — recorded as prior knowledge, never as findings.
-    try:
-        from core.ir_playbook import seed_from_intake
-        seeded = seed_from_intake(case_dir)
-        if seeded.get("seeded"):
-            print(f"atlas: {len(seeded['seeded'])} precaution(s) from the case intake "
-                  f"({', '.join(seeded['classes']) or 'general'}) recorded for the "
-                  f"Response view", file=sys.stderr)
-    except Exception as exc:  # noqa: BLE001 — a precaution must not stop a run
-        print(f"atlas: intake precautions not seeded: {exc!r}", file=sys.stderr)
+        # What the analyst already knows earns the first precautions before the
+        # first tool runs — recorded as prior knowledge, never as findings.
+        try:
+            from core.ir_playbook import seed_from_intake
+            seeded = seed_from_intake(case_dir)
+            if seeded.get("seeded"):
+                print(f"atlas: {len(seeded['seeded'])} precaution(s) from the case intake "
+                      f"({', '.join(seeded['classes']) or 'general'}) recorded for the "
+                      f"Response view", file=sys.stderr)
+        except Exception as exc:  # noqa: BLE001 — a precaution must not stop a run
+            print(f"atlas: intake precautions not seeded: {exc!r}", file=sys.stderr)
 
-    # Every agent session must re-inventory evidence before parsers
-    # (hard gate in middleware). Plane A may leave a prior stamp if
-    # evidence did not change — clear so the latch fires again.
-    try:
-        from core.evidence_inventory_gate import clear_inventory_stamp
-        clear_inventory_stamp(case_dir)
-    except Exception:
-        pass
+        # Every agent session must re-inventory evidence before parsers
+        # (hard gate in middleware). Plane A may leave a prior stamp if
+        # evidence did not change — clear so the latch fires again.
+        try:
+            from core.evidence_inventory_gate import clear_inventory_stamp
+            clear_inventory_stamp(case_dir)
+        except Exception:
+            pass
 
-    question = _resolve_case_question(args, case_dir)
-    if question_was_defaulted(args, case_dir):
-        print(f"atlas: no objective in CASE.md and no --question — "
-              f"investigating the standard objective: {question!r}",
-              file=sys.stderr)
-    # The report gate reads this record to know which question the run was
-    # given instead of finding it in the model's own words.
-    try:
-        from core.run_state import record_objective
-        record_objective(case_dir, text=question, source=_objective_source(args, case_dir),
-                         trace_path=_trace_path or "")
-    except Exception as exc:  # noqa: BLE001 - the gate falls back to the marker
-        print(f"atlas: run objective not recorded: {exc!r}", file=sys.stderr)
+        question = _resolve_case_question(args, case_dir)
+        if question_was_defaulted(args, case_dir):
+            print(f"atlas: no objective in CASE.md and no --question — "
+                  f"investigating the standard objective: {question!r}",
+                  file=sys.stderr)
+        # The report gate reads this record to know which question the run was
+        # given instead of finding it in the model's own words.
+        try:
+            from core.run_state import record_objective
+            record_objective(case_dir, text=question, source=_objective_source(args, case_dir),
+                             trace_path=_trace_path or "")
+        except Exception as exc:  # noqa: BLE001 - the gate falls back to the marker
+            print(f"atlas: run objective not recorded: {exc!r}", file=sys.stderr)
 
-    remote_cfg = _configure_remote(args, case_dir)
-    agent = _make_agent(args, case_dir, command=command)
-    system = build_system_prompt(case_dir, interactive=agent.interactive)
-    user = initial_user_message(
-        question,
-        agent.toolbox.namespace_summary(),
-        case_id=getattr(args, "case_id", "") or plane.get("case_id") or "",
-        case_dir=case_dir,
-    )
+        remote_cfg = _configure_remote(args, case_dir)
+        agent = _make_agent(args, case_dir, command=command, client=client)
+        system = build_system_prompt(case_dir, interactive=agent.interactive,
+                                     stable_tools=_stable_tool_list(agent))
+        user = initial_user_message(
+            question,
+            agent.toolbox.namespace_summary(),
+            case_id=run_case_id,
+            case_dir=case_dir,
+        )
 
-    # Positive-identifier gate: block the case's real grading file(s) by
-    # realpath however they are later referenced (symlink, relative, mount).
-    # Runs in the analyst's own process, so the in-process MCP server, executor
-    # and jobs runner all consult the same registry.
-    from core import paths as _paths
-    from core.brain.answer_key import has_ground_truth
-    _paths.register_answer_keys(real_case)
-    if using_mirror:
-        _paths.register_answer_keys(case_dir)  # key reachable via evidence link
-    # Filesystem belt for the graded `train` context specifically: move the
-    # key out of the analyst's tree for the analyst phase, restore it in the
-    # finally below (before the reviewer/grader read it in cmd_train). Scoped
-    # to train — an --output-dir run already works in a mirror that
-    # omits the key, and interactive run/chat sessions leave the file in place
-    # (the realpath gate still guards it). Self-heal a prior crash-interrupted
-    # stash for this case first.
-    stashed: list[dict] = []
-    if command == "train" and not using_mirror and has_ground_truth(real_case):
-        _paths.recover_stashed_answer_keys(real_case)
-        stashed = _paths.stash_answer_keys(real_case)
-        if stashed:
-            agent.ui.info(f"answer-key guard: {len(stashed)} grading file(s) "
-                          "moved out of the analyst tree for this run")
+        # Positive-identifier gate: block the case's real grading file(s) by
+        # realpath however they are later referenced (symlink, relative, mount).
+        # Runs in the analyst's own process, so the in-process MCP server, executor
+        # and jobs runner all consult the same registry.
+        from core import paths as _paths
+        from core.brain.answer_key import has_ground_truth
+        _paths.register_answer_keys(real_case)
+        if using_mirror:
+            _paths.register_answer_keys(case_dir)  # key reachable via evidence link
+        # Filesystem belt for the graded `train` context specifically: move the
+        # key out of the analyst's tree for the analyst phase, restore it in the
+        # finally below (before the reviewer/grader read it in cmd_train). Scoped
+        # to train — an --output-dir run already works in a mirror that
+        # omits the key, and interactive run/chat sessions leave the file in place
+        # (the realpath gate still guards it). Self-heal a prior crash-interrupted
+        # stash for this case first.
+        stashed: list[dict] = []
+        if command == "train" and not using_mirror and has_ground_truth(real_case):
+            _paths.recover_stashed_answer_keys(real_case)
+            stashed = _paths.stash_answer_keys(real_case)
+            if stashed:
+                agent.ui.info(f"answer-key guard: {len(stashed)} grading file(s) "
+                              "moved out of the analyst tree for this run")
 
-    if remote_cfg is not None:
-        _remote_sync_up(remote_cfg, agent.ui)
-
-    def _settle() -> None:
-        run_lock.release(_run_lock_fd)
         if remote_cfg is not None:
-            _remote_sync_down(remote_cfg, agent.ui)
-        else:
-            # Local runs only: remote mounts live on the VM, not under this
-            # case dir. Unmount anything the run left mounted so it neither
-            # leaks across runs nor trips a later clear_case_run.
-            _teardown_local_mounts(case_dir, agent.ui)
-        # Restore the answer key so the reviewer/grader (and the next run) see
-        # it. Guaranteed on the normal path, on LLMError (sys.exit runs the
-        # finally), and on any other exception.
-        _paths.restore_answer_keys(stashed)
+            _remote_sync_up(remote_cfg, agent.ui)
 
-    return _run_agent_session(args, case_dir, agent, system, user, cleanup=_settle)
+        def _settle() -> None:
+            run_lock.release(_run_lock_fd)
+            if remote_cfg is not None:
+                _remote_sync_down(remote_cfg, agent.ui)
+            else:
+                # Local runs only: remote mounts live on the VM, not under this
+                # case dir. Unmount anything the run left mounted so it neither
+                # leaks across runs nor trips a later clear_case_run.
+                _teardown_local_mounts(case_dir, agent.ui)
+            # Restore the answer key so the reviewer/grader (and the next run) see
+            # it. Guaranteed on the normal path, on LLMError (sys.exit runs the
+            # finally), and on any other exception.
+            _paths.restore_answer_keys(stashed)
+
+        return _run_agent_session(args, case_dir, agent, system, user, cleanup=_settle)
 
 
 def _run_agent_session(args, case_dir: Path, agent, system: str, user: str, *,
@@ -638,27 +834,20 @@ def _run_agent_session(args, case_dir: Path, agent, system: str, user: str, *,
     try:
         agent.run(system, user)
     except LLMError as e:
-        # Persisted below, in finally — previously this branch went
-        # straight to sys.exit(1) without ever writing run_status.json, so
-        # a run that died here (a token/context-limit rejection from the
-        # LLM API is the common real-world case — LLMError covers any
-        # provider failure) left the file frozen on its last
-        # _persist_live_status() snapshot, "stopped_reason": "running",
-        # forever. A dashboard operator with no SSH access saw nothing at
-        # all: not "finished", not an error, just a run that silently
-        # stopped updating.
+        # Persisted in the finally below. A provider failure (LLMError covers
+        # any, e.g. a context-limit rejection) must still write
+        # run_status.json, or the file stays at its last live snapshot
+        # ("running") and the dashboard shows a run that silently stopped.
         llm_error = e
     except KeyboardInterrupt:
-        # Persist interrupted status in finally — previously
-        # _persist_run_status ran only after a normal return, so Ctrl+C
-        # left .atlas/run_status.json as "starting" or missing.
+        # Persisted in the finally below, so Ctrl+C does not leave
+        # .atlas/run_status.json at "starting" or missing.
         interrupted = True
     finally:
         # Anything else propagating out of agent.run() (an unexpected bug,
-        # not LLMError/KeyboardInterrupt) hits this finally too — same
-        # silent-run_status.json-staleness problem, and the fix is the same
-        # write, keyed off whichever exception is actually in flight rather
-        # than a broad `except Exception` that would swallow the traceback.
+        # not LLMError/KeyboardInterrupt) hits this finally too and gets the
+        # same write, keyed off whichever exception is in flight rather than
+        # a broad `except Exception` that would swallow the traceback.
         _exc_type, _exc_val, _ = sys.exc_info()
         _arm_exit_signals()
         _stop_tool_children()
@@ -668,7 +857,7 @@ def _run_agent_session(args, case_dir: Path, agent, system: str, user: str, *,
             stats = dict(getattr(agent, "stats", None) or {})
             if interrupted:
                 stats["finish_status"] = "interrupted"
-                stats["stopped_reason"] = "keyboard_interrupt"
+                stats["stopped_reason"] = _interrupt_reason()
             elif llm_error is not None:
                 stats["finish_status"] = "error"
                 stats["stopped_reason"] = "llm_error"
@@ -678,17 +867,16 @@ def _run_agent_session(args, case_dir: Path, agent, system: str, user: str, *,
                 stats["stopped_reason"] = "crashed"
                 stats["error"] = f"{_exc_type.__name__}: {_exc_val}"
             # A stop is still an end: every abnormal branch owes the report
-            # the findings support (the dashboard Stop button lands here too,
-            # and a provider failure or a crash used to exit with none at
-            # all). No model call on this path: whatever ended the run may be
+            # the findings support (the dashboard Stop button lands here too).
+            # No model call on this path: whatever ended the run may be
             # the provider itself, and an exit path must not wait on it.
             try:
                 agent.stats = stats
             except Exception:  # noqa: BLE001 - a half-dead agent still reports
                 pass
-            _ensure_report_on_exit(case_dir, agent, allow_llm=False)
+            _reports_at_exit(case_dir, agent, stats, interrupted)
             stats = dict(getattr(agent, "stats", None) or stats)
-            # I8: live snapshot from Agent.run should already carry turns /
+            # The live snapshot from Agent.run should already carry turns /
             # duration_seconds; keep non-null fallbacks for early interrupts.
             if stats.get("turns") is None:
                 stats["turns"] = 0
@@ -710,6 +898,53 @@ def _run_agent_session(args, case_dir: Path, agent, system: str, user: str, *,
     _persist_run_status(case_dir, agent.stats)
     _notify_run_finished(case_dir, agent.stats)
     return agent
+
+
+def _reports_at_exit(case_dir: Path, agent, stats: dict, interrupted: bool) -> None:
+    """The abnormal branches' report. A graceful stop writes the
+    deterministic report first, so a kill that follows the stop's grace
+    period still finds one; the composed answers then replace it through
+    the same atomic exit-report write."""
+    if interrupted:
+        _record_stop_pending(case_dir, stats)
+    _ensure_report_on_exit(case_dir, agent, allow_llm=False)
+    if interrupted:
+        _compose_at_stop(case_dir, stats)
+        _ensure_report_on_exit(case_dir, agent, allow_llm=False)
+
+
+def _record_stop_pending(case_dir: Path, stats: dict) -> None:
+    """The stop record before the composition: the first report says its
+    answers are projections until the composed one replaces it."""
+    try:
+        from core.investigation_exit import record_stop
+        record_stop(case_dir, str(stats.get("stopped_reason") or "stopped"), None)
+    except Exception as e:  # noqa: BLE001
+        print(f"atlas: could not record the stop ({e})", file=sys.stderr)
+
+
+def _compose_at_stop(case_dir: Path, stats: dict) -> None:
+    """A graceful stop (the Stop button, a TERM) still answers the
+    questions: the composer runs for each after the first report is
+    written and before it is rewritten, as
+    the close-out would, with its own per-call deadlines and breaker; the
+    stop and the items still due are recorded for the report, and when the
+    composer cannot be reached the report says its answers are
+    projections. A provider failure or a crash takes the other branches
+    and makes no call."""
+    composed: dict = {}
+    try:
+        _persist_run_status(case_dir, dict(stats, activity="composing the answers before the report"))
+        from core.report_assemble import compose_at_stop
+        composed = compose_at_stop(case_dir)
+    except BaseException as e:  # noqa: BLE001 - a second stop or a dead provider leaves the projections
+        print(f"atlas: the answers were not composed at the stop ({type(e).__name__})", file=sys.stderr)
+        composed = {"reached": False}
+    try:
+        from core.investigation_exit import record_stop
+        record_stop(case_dir, str(stats.get("stopped_reason") or "stopped"), composed)
+    except Exception as e:  # noqa: BLE001
+        print(f"atlas: could not record the stop ({e})", file=sys.stderr)
 
 
 def _ensure_report_on_exit(case_dir: Path, agent, *,
@@ -777,9 +1012,9 @@ def _persist_run_status(case_dir: Path, stats: dict) -> None:
     """Persist the run's completion classification to .atlas/run_status.json.
 
     finish_status (complete / incomplete_coverage / exited_degraded_incomplete)
-    previously reached only the TUI banner; status, dashboard and rerun
-    consumers had no durable record of whether the last run was truthful-
-    complete. Best-effort — never fails the run.
+    is stored so status, dashboard and rerun consumers have a durable record
+    of whether the last run was truthfully complete. Best-effort — never
+    fails the run.
     """
     try:
         import json as _json
@@ -812,6 +1047,17 @@ def _persist_run_status(case_dir: Path, stats: dict) -> None:
             "updated_at": datetime.now(timezone.utc).strftime(
                 "%Y-%m-%dT%H:%M:%SZ"),
         })
+        # The last report assembly's answer counts (composed, cached,
+        # fallback with reasons, when), written beside the report by
+        # core.report_assemble, so the dashboard and the audit see them
+        # without the trace.
+        try:
+            from core.report_projection import projection_dir
+            answers = _json.loads((projection_dir(case_dir) / "answers.json").read_text(encoding="utf-8"))
+            if isinstance(answers, dict):
+                existing["answers"] = answers
+        except (OSError, ValueError, ImportError):
+            pass
         p.parent.mkdir(parents=True, exist_ok=True)
         tmp = p.with_suffix(".json.tmp")
         tmp.write_text(
@@ -827,9 +1073,16 @@ class _IntakeStatus:
     session writes one. The dashboard reads .atlas/run_status.json for
     whether a run is alive (its pid) and what it is doing (``activity``), and
     the first fingerprinting of a large case takes many minutes. ``progress``
-    is the scan's listener (core.evidence_catalog.scan_evidence); ``settle``
+    is the scan's listener (core.evidence_catalog.scan_evidence), ``stage``
+    hears the later steps (core.incremental.plane_a_scan); ``settle``
     records why the run ended, or puts the previous record back when no
-    session followed, unless a session has written its own record since."""
+    session followed, unless a session has written its own record since.
+
+    Held as a context manager from the intake until the session has started:
+    whatever ends the process in between (a configuration error, a failed
+    prompt build, an interrupt) settles the record with that reason, so the
+    case never keeps a "running" record for a dead process. A normal exit
+    from the block leaves the record to the session that follows."""
 
     def __init__(self, case_dir: Path):
         self.path = Path(case_dir) / ".atlas" / "run_status.json"
@@ -839,6 +1092,7 @@ class _IntakeStatus:
             self.prior = None
         self.written = ""
         self.said_at = 0.0
+        self.settled = False
         self._write("Intake: listing the evidence")
 
     def _write(self, activity: str, **ending) -> None:
@@ -871,7 +1125,34 @@ class _IntakeStatus:
             self.said_at = now
             print(f"atlas: {line}", file=sys.stderr)
 
+    def stage(self, text: str) -> None:
+        """A later intake step (the mount plan, a volume the contents
+        index lists, the baseline) says what runs now: the record changes
+        with each, the terminal hears at most one line in 30 s."""
+        line = f"Intake: {text}"
+        self._write(line)
+        now = time.monotonic()
+        if now - self.said_at >= 30:
+            self.said_at = now
+            print(f"atlas: {line}", file=sys.stderr)
+
+    def __enter__(self) -> "_IntakeStatus":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        if exc is not None and not self.settled:
+            if isinstance(exc, SystemExit):
+                code = exc.code
+                if code in (None, 0):
+                    self.settle()
+                else:
+                    self.settle(exc, error=code if isinstance(code, str) else f"exit {code}")
+            else:
+                self.settle(exc)
+        return False
+
     def settle(self, exc: BaseException | None = None, error: str = "") -> None:
+        self.settled = True
         try:
             current = self.path.read_text(encoding="utf-8")
         except OSError:
@@ -882,7 +1163,7 @@ class _IntakeStatus:
             self._put(self.prior)
             return
         interrupted = isinstance(exc, KeyboardInterrupt)
-        self._write("Intake", stopped_reason="keyboard_interrupt" if interrupted else "crashed",
+        self._write("Intake", stopped_reason=_interrupt_reason() if interrupted else "crashed",
                     finish_status="interrupted" if interrupted else "error",
                     duration_seconds=0.0,
                     error=error or f"{type(exc).__name__}: {exc}")
@@ -890,10 +1171,17 @@ class _IntakeStatus:
 
 def _teardown_local_mounts(case_dir: Path, ui) -> None:
     """Unmount forensic mounts a run left under the case dir (ewfmount/ntfs/
-    loop at <case>/mnt/...). Best-effort: failures are warned, never raised."""
+    loop at <case>/mnt/..., raw views). A background job outlives the run;
+    the mounts it reads stay until a later teardown. Best-effort: failures
+    are warned, never raised."""
     from core import mounts
     try:
-        result = mounts.unmount_all_under(str(case_dir))
+        from core.raw_views import held_by_running_jobs
+        held = held_by_running_jobs(case_dir)
+    except Exception:  # noqa: BLE001 - nothing spared
+        held = set()
+    try:
+        result = mounts.unmount_all_under(str(case_dir), spare=held)
     except Exception as e:  # teardown must never mask the run's own outcome
         ui.warn(f"teardown: mount cleanup failed: {e}")
         return
@@ -984,12 +1272,7 @@ def _prepare_run_isolation(args, case_dir: Path) -> None:
     if _refuse:
         sys.exit(f"atlas: {_refuse}")
     result = clear_case_run(str(case_dir), clear_memory=False)
-    if result.get("success") is False:
-        sys.exit(f"atlas: {result.get('error')}")
-    # Whatever the clear could not remove, the run would start on top of;
-    # say so now rather than report a run as fresh that is not.
-    if result.get("errors"):
-        sys.exit("atlas: case clear failed: " + "; ".join(result["errors"]))
+    _exit_on_clear_failure(result)
     # Drop the prior finish classification so a crash mid-run does not keep
     # looking "terminal" — isolation is process-scoped until the next finish.
     isolation = (
@@ -1020,8 +1303,29 @@ def _prepare_run_isolation(args, case_dir: Path) -> None:
                   "run (pass --resume to continue the old trace)")
     print(f"atlas: cleared process state for a fresh run ({reason}; "
           f"{result.get('cleared_count', 0)} items removed). "
-          "Claims/tasks under .atlas/ are retained.",
+          f"{_archive_note(result)}Claims/tasks under .atlas/ are retained.",
           file=sys.stderr)
+
+
+def _exit_on_clear_failure(result: dict) -> None:
+    """Stop the start when the clear refused or left something behind: a run
+    would start on top of what the clear could not remove, so it is said now
+    rather than a run reported as fresh that is not. A refusal names its
+    reason in ``error`` (a gate) or ``errors`` (the case-root, mount and
+    archive checks)."""
+    errors = list(result.get("errors") or [])
+    if result.get("success") is False and not errors:
+        sys.exit(f"atlas: {result.get('error') or 'the case clear was refused'}")
+    if errors:
+        sys.exit("atlas: case clear failed: " + "; ".join(errors))
+
+
+def _archive_note(result: dict) -> str:
+    """What a clear kept and what it deleted, for the start message."""
+    archive = result.get("archive") or ""
+    kept = (f"The previous reports and trace were moved to {archive}; "
+            if archive else "")
+    return kept + "analysis/ and exports/ were deleted. "
 
 
 def _needs_root(case_dir) -> bool:
@@ -1107,8 +1411,8 @@ def _stamp_run_start() -> None:
 
 def cmd_run(args) -> None:
     _stamp_run_start()
-    # Legacy capture (review-bullet mining) remains opt-in via --capture-brain
-    # or ATLAS_CAPTURE_BRAIN. Background investigation *learning* now runs by
+    # Review-bullet capture is opt-in via --capture-brain or
+    # ATLAS_CAPTURE_BRAIN. Background investigation *learning* runs by
     # default after a finished run — that is the primary Brain growth path.
     if getattr(args, "no_capture_brain", False):
         args.capture_brain = False
@@ -1128,14 +1432,18 @@ def cmd_run(args) -> None:
 def _run_locked(args, case_dir: Path, lock_fd: int) -> None:
     _require_sudo_preflight(args, case_dir)
     _check_brief_fences(args, case_dir, refuse=True)
-    _apply_report_language(args, case_dir)
+    # The model configuration is checked before the first write to the case:
+    # a provider, model or key the run cannot use must not cost the case its
+    # previous outputs, which the isolation below clears.
+    client = _analyst_client(args)
     # With --output-dir the isolation clears the mirror, never the real case;
     # _run_investigation resolves the same mirror again (the call is idempotent).
     effective_dir = case_dir
     if getattr(args, "output_dir", None):
         effective_dir = _prepare_output_dir(case_dir, args.output_dir)
     _prepare_run_isolation(args, effective_dir)
-    agent = _run_investigation(args, case_dir, lock_fd=lock_fd)
+    _apply_report_language(args, case_dir)
+    agent = _run_investigation(args, case_dir, lock_fd=lock_fd, client=client)
 
     from core.investigation_exit import ended_through_a_completion_path
     finish_status = str(agent.stats.get("finish_status") or "")
@@ -1148,7 +1456,7 @@ def _run_locked(args, case_dir: Path, lock_fd: int) -> None:
     finished = ended_through_a_completion_path(finish_status)
     complete = finish_status == "complete"
     captured = None
-    # Optional legacy staging (review bullets / self-corrections). Same
+    # Optional staging (review bullets / self-corrections). Same
     # complete-gate as primary learn — hollow runs must not seed the brain.
     if getattr(args, "capture_brain", False):
         if not complete:
@@ -1185,7 +1493,7 @@ def _run_locked(args, case_dir: Path, lock_fd: int) -> None:
                     agent.ui.info(
                         f"brain: background learn started "
                         f"(pid {spawned.get('pid')}); "
-                        f"review later at Dashboard → Brain Review")
+                        f"review later at Dashboard → Brain → Inbox")
                 elif spawned.get("reason") and spawned.get("reason") != "disabled":
                     agent.ui.warn(
                         f"brain learn not spawned: {spawned.get('reason')}")
@@ -1222,9 +1530,8 @@ def _build_reviewer_client(args, analyst_model: str = "", ui=None):
         resolved_model = client.model
     except (providers.UnknownProvider, LLMError) as e:
         sys.exit(f"atlas: {e}")
-    if not client.api_key:
-        key_var = ("LLMHUB_API_KEY" if provider.name == providers.DEFAULT_NAME
-                   else providers.var(provider.name, "API_KEY"))
+    if client.key_missing:
+        key_var = providers.var(provider.name, "API_KEY")
         sys.exit(f"atlas: no API key for provider {provider.name!r}. Set "
                  f"{key_var} (env, .env, or `bin/atlas-secret set {key_var}`).")
     if ui is not None and analyst_model and resolved_model == analyst_model:
@@ -1232,6 +1539,16 @@ def _build_reviewer_client(args, analyst_model: str = "", ui=None):
                 "ATLAS_REVIEW_MODEL for a distinct reviewer; the review still "
                 "runs with a fresh, independent context")
     return client
+
+
+def _reviewer_or_none(args, ui):
+    """The reviewer client for a live review, or None with a warning when the
+    configuration cannot give one: the stall verdict stands without it."""
+    try:
+        return _build_reviewer_client(args, ui=ui)
+    except SystemExit as e:
+        ui.warn(f"{e.code} — the stall report is written without the unstick steps")
+        return None
 
 
 def _case_of_trace(trace: Path) -> Path | None:
@@ -1271,12 +1588,17 @@ def cmd_review(args) -> None:
         trace = Path(args.trace).expanduser()
     else:
         if named is None:
-            # The session beacon names only the run started last.
+            # The session beacon names only the run started last, and a run
+            # that has since finished can still hold it while another case's
+            # run is live: the one live run is the one to review.
             from core.run_state import live_runs
             live = live_runs()
             if len(live) > 1:
                 sys.exit(f"atlas: {len(live)} runs are live on this host ({', '.join(live)}): "
                          "name the one to review with --case DIR.")
+            if len(live) == 1:
+                named = Path(live[0])
+                print(f"atlas: reviewing the live run of {named}", file=sys.stderr)
         trace, warn = resolve_review_trace(named or Path.cwd(),
                                            case_explicit=named is not None)
         if warn:
@@ -1297,9 +1619,9 @@ def cmd_review(args) -> None:
     # before the reviewer spends minutes on it, not after.
     print(f"atlas: reviewing trace: {trace}", file=sys.stderr)
     _configure_usage(case_dir, "review")
-    client = _build_reviewer_client(args, ui=ui)
     question = getattr(args, "question", "") or ""
     if not args.live:
+        client = _build_reviewer_client(args, ui=ui)
         try:
             _case_id, entries = load_trace_from_disk(Path(trace))
             graded = Reviewer(client, case_dir, ui).review(
@@ -1319,9 +1641,12 @@ def cmd_review(args) -> None:
         if graded["needs_work"]:
             sys.exit(3)
         return
+    # The stall check is free and decides the exit code; the reviewer model
+    # is built and asked only for a run the check calls stalled.
     try:
-        review = Reviewer(client, case_dir, ui).review_live(
-            trace_path=trace, question=question)
+        review = Reviewer(None, case_dir, ui).review_live(
+            trace_path=trace, question=question,
+            client_factory=lambda: _reviewer_or_none(args, ui))
     except LLMError as e:
         sys.exit(f"atlas: live reviewer failed: {e}")
     if review.get("error"):
@@ -1369,7 +1694,11 @@ def _train_locked(args, case_dir: Path, lock_fd: int) -> None:
     # Before clear — do not wipe the case if sudoers is missing.
     _require_sudo_preflight(args, case_dir)
     _check_brief_fences(args, case_dir, refuse=True)
-    _apply_report_language(args, case_dir)
+    # Both model clients are checked before the first write to the case: a
+    # configuration the run or its review cannot use must not cost the case
+    # its previous outputs, which the clear below removes.
+    client = _analyst_client(args)
+    _build_reviewer_client(args, analyst_model=client.model)
 
     # An objective always resolves now (the standard one when the case names
     # none), so there is nothing to fail fast on here — the notice is printed
@@ -1393,20 +1722,19 @@ def _train_locked(args, case_dir: Path, lock_fd: int) -> None:
             sys.exit(f"atlas: {_refuse}")
         result = clear_case_run(str(effective_dir),
                                 clear_memory=effective_dir == case_dir)
+        _exit_on_clear_failure(result)
         cleared = result.get("cleared_count", 0)
         print(f"atlas: cleared case for a fresh run "
-              f"({cleared} items removed; --no-clear to keep prior state)",
+              f"({cleared} items removed; --no-clear to keep prior state). "
+              f"{_archive_note(result).strip()}",
               file=sys.stderr)
         if result.get("memory_skipped_reason"):
             print(f"atlas: assistant memory preserved "
                   f"({result['memory_skipped_reason']})", file=sys.stderr)
-        if result.get("success") is False:
-            sys.exit(f"atlas: {result.get('error')}")
-        if result.get("errors"):
-            sys.exit("atlas: case clear failed: "
-                     + "; ".join(result["errors"]))
 
-    agent = _run_investigation(args, case_dir, command="train", lock_fd=lock_fd)
+    _apply_report_language(args, case_dir)
+    agent = _run_investigation(args, case_dir, command="train", lock_fd=lock_fd,
+                               client=client)
 
     from agent.llm import LLMError
     from agent.review import CrossCaseTraceError, Reviewer
@@ -1524,15 +1852,41 @@ def _train_locked(args, case_dir: Path, lock_fd: int) -> None:
         sys.exit(4)
 
 
-def _open_trace_before_plane_a(case_dir: Path, *, save_session: bool = True) -> str | None:
+def _run_case_id(args, case_dir: Path) -> str:
+    """The case id a run's trace is named after and the analyst is told to
+    use: --case-id for a fresh run, else the brief's (core.paths
+    .detect_case_id). A resumed run (run --resume, train --no-clear) keeps
+    the id of the trace it resumes:
+    --case-id does not rename a run in progress, whose document every reader
+    finds by the brief's id (core.execution_log.case_trace_document)."""
+    from core.paths import detect_case_id
+    case_dir = Path(case_dir)
+    brief_id = detect_case_id(case_dir) or case_dir.name
+    wanted = (getattr(args, "case_id", "") or "").strip()
+    if not wanted or wanted == brief_id:
+        return brief_id
+    if getattr(args, "resume", False) or getattr(args, "no_clear", False):
+        from core.execution_log import case_trace_document
+        doc = case_trace_document(case_dir)
+        if doc:
+            kept = os.path.basename(doc)[:-len("_trace.json")]
+            print(f"atlas: --case-id {wanted} does not rename a run in progress; "
+                  f"resuming the trace of {kept}", file=sys.stderr)
+            return kept
+    return wanted
+
+
+def _open_trace_before_plane_a(case_dir: Path, *, save_session: bool = True,
+                               case_id: str = "") -> str | None:
     """Configure the execution log at analysis/<case_id>_trace.json so the
     pre-run stage can record its tool calls (the mounts it makes). Returns
     the path, or None when the log could not be opened — the run goes on
-    and Plane A then reports the calls it could not record."""
+    and Plane A then reports the calls it could not record. ``case_id`` is
+    the run's (_run_case_id); the brief's id by default."""
     from core.execution_log import log
     from core.paths import detect_case_id
     case_dir = Path(case_dir)
-    case_id = detect_case_id(case_dir) or case_dir.name
+    case_id = case_id or detect_case_id(case_dir) or case_dir.name
     analysis = case_dir / "analysis"
     path = analysis / f"{case_id}_trace.json"
     try:
@@ -1581,14 +1935,20 @@ def cmd_models(args) -> None:
     from agent.llm import LLMHubClient, LLMError
     from core import providers
     name = getattr(args, "provider", "") or ""
+    if not name:
+        # The provider a run would use: the analyst's, never an implicit one.
+        name = providers.role_name("ATLAS_AGENT_PROVIDER")
+        if not name:
+            sys.exit("atlas models: pass --provider NAME "
+                     "(no ATLAS_AGENT_PROVIDER is set)")
+        print(f"atlas: provider: {name} (ATLAS_AGENT_PROVIDER)", file=sys.stderr)
     try:
         client = LLMHubClient(provider=name)
         provider = client.provider
     except providers.UnknownProvider as e:
         sys.exit(f"atlas: {e}")
-    if not client.api_key:
-        key_var = ("LLMHUB_API_KEY" if provider.name == providers.DEFAULT_NAME
-                   else providers.var(provider.name, "API_KEY"))
+    if client.key_missing:
+        key_var = providers.var(provider.name, "API_KEY")
         sys.exit(f"atlas: no API key configured for provider "
                  f"{provider.name!r} ({key_var}).")
     try:
@@ -1691,8 +2051,6 @@ def cmd_rerun(args) -> None:
     # starts; they belong to this rerun in the usage ledger.
     _configure_usage(case, "rerun")
 
-    _apply_report_language(args, case)
-
     if getattr(args, "diff", None):
         from core.run_journal import diff_runs
         spec = args.diff.strip()
@@ -1726,12 +2084,32 @@ def cmd_rerun(args) -> None:
     if correct_id and not analyst_q:
         sys.exit("atlas rerun: --correct-context requires -q / --question "
                  "with the replacement context text")
+    if withdraw_id or correct_id:
+        # An id that names no entry is refused before the evidence is
+        # fingerprinted and before anything is written: the trace, the report
+        # migration and the run record below are not touched by a typo.
+        from core.analyst_context import check_feedback_args
+        try:
+            check_feedback_args(case, withdraw_id=withdraw_id, correct_id=correct_id,
+                                text=analyst_q)
+        except (ValueError, KeyError) as e:
+            print(f"atlas rerun: {e.args[0] if e.args else e}", file=sys.stderr)
+            sys.exit(2)
+
+    # The report language is written once the arguments are known to be
+    # good, after the read-only branches (--diff, --list-runs) and never for
+    # a dry run, which writes nothing.
+    if not getattr(args, "dry_run", False):
+        _apply_report_language(args, case)
 
     persist = not args.dry_run
     if persist:
         # The pre-run pass may open disk images; those calls are recorded in
         # the trace the analyst then continues, the same as for `atlas run`.
-        _open_trace_before_plane_a(Path(case))
+        # The session beacon names the run started last (`atlas review`
+        # without --trace reads it): a rerun that starts no session must not
+        # take it over, so it is saved when Plane B's session opens the log.
+        _open_trace_before_plane_a(Path(case), save_session=False)
 
     # First persist rerun: migrate flat reports → initial_report/ before Plane A
     # so the baseline fingerprint reflects pre-rerun investigation state.
@@ -1772,6 +2150,7 @@ def cmd_rerun(args) -> None:
             withdraw_context_id=withdraw_id,
             correct_context_id=correct_id,
             progress=intake.progress if intake else None,
+            stage=intake.stage if intake else None,
         )
     except BaseException as e:
         if intake:
@@ -1843,8 +2222,12 @@ def cmd_rerun(args) -> None:
     # finding under review, a fact added to or taken out of the brief.
     work = result.get("work") or {}
     if work.get("pending"):
-        _require_sudo_preflight(args, Path(case))
-        gen = _run_plane_b(args, Path(case), result, report_fmt)
+        # The intake record stands for this session; whatever ends the
+        # process before the session takes it over settles it (_IntakeStatus).
+        import contextlib
+        with intake or contextlib.nullcontext():
+            _require_sudo_preflight(args, Path(case))
+            gen = _run_plane_b(args, Path(case), result, report_fmt)
         _finalize_report_snapshots(
             case, result, regen_result=gen,
             trigger="investigate", fp_before=fp_before,
@@ -1944,7 +2327,8 @@ def _run_plane_b(
     print("\nPlane B: starting the investigator"
           + (f" ({'; '.join(reasons)})" if reasons else "") + "…", flush=True)
     agent = _make_agent(args, case_dir, command="rerun")
-    system = build_system_prompt(case_dir, interactive=False)
+    system = build_system_prompt(case_dir, interactive=False,
+                                 stable_tools=_stable_tool_list(agent))
     _rerun_question = rerun_objective(case_dir, work)
     try:
         from core.execution_log import log as _log
@@ -2009,11 +2393,15 @@ def cmd_timeline(args) -> None:
     if case is None:
         sys.exit("atlas timeline: pass --case DIR or run from a case directory")
     source = "master" if getattr(args, "from_master", False) else "claims"
-    result = build_timeline(case, source=source)
+    # --limit bounds what is read from a master timeline and what is printed;
+    # 0 means every row.
+    limit = getattr(args, "limit", 200)
+    limit = None if limit is not None and limit <= 0 else (limit or 200)
+    result = build_timeline(case, source=source, limit=limit)
     if args.json:
         print(json.dumps(result, indent=2, default=str))
     else:
-        print(format_timeline(result, limit=int(getattr(args, "limit", 200) or 200)))
+        print(format_timeline(result, limit=limit or 0))
     if not result.get("success"):
         sys.exit(2)
 
@@ -2107,7 +2495,7 @@ def cmd_case_autofill(args) -> None:
             _ = client.provider
         except Exception as e:
             sys.exit(f"atlas autofill: {e}")
-        if not client.api_key:
+        if client.key_missing:
             sys.exit("atlas autofill: no API key for the configured analyst "
                      "provider — needed to classify unrecognized evidence "
                      "files and to shape 'What you already know'.")
@@ -2176,10 +2564,17 @@ def cmd_case_autofill(args) -> None:
     except ValueError as e:
         sys.exit(f"atlas autofill: {e}")
 
-    case_md_path = case / "CASE.md"
-    tmp = case_md_path.with_suffix(".md.tmp")
-    tmp.write_text(new_md, encoding="utf-8")
-    os.replace(tmp, case_md_path)
+    # The proposal (and the model's rewrite of the prior-knowledge section,
+    # which replaces that section whole) was made from the brief as it was
+    # when this command read it, minutes ago. The shared writer refuses the
+    # write when the brief changed since, so a fact or question saved
+    # meanwhile is never dropped.
+    from core.investigation_tasks import CaseMarkdownConflict, write_case_markdown
+    try:
+        case_md_path = write_case_markdown(case, new_md, base_version=proposal["version"])
+    except CaseMarkdownConflict:
+        sys.exit("atlas autofill: CASE.md changed while the rewrite was prepared; "
+                 "nothing was written. Run atlas autofill again.")
     print(f"atlas autofill: updated {case_md_path}")
 
 
@@ -2212,7 +2607,7 @@ def _doctor_probe(providers) -> None:
     transport error means it was never reached. The URL is printed so a
     wrong-host DNS answer is visible rather than inferred.
     """
-    import httpx
+    from core import llmhub
     print("Probe (network, GET /models):")
     probe_names = providers.assigned()
     if not probe_names:
@@ -2226,7 +2621,8 @@ def _doctor_probe(providers) -> None:
             continue
         url = provider.models_url()
         try:
-            resp = httpx.get(url, headers=provider.headers(), timeout=20.0)
+            resp, entries = llmhub.get_models(provider.base_url, provider.headers(),
+                                              paging=provider.models_paging, timeout=20.0)
         except Exception as e:
             # DNS, TLS, connect timeout, proxy — never reached the service.
             print(f"  {name:15}: UNREACHABLE — {type(e).__name__}: {e}  {url}")
@@ -2234,8 +2630,7 @@ def _doctor_probe(providers) -> None:
         detail = ""
         if resp.status_code < 400:
             try:
-                body = resp.json()
-                entries = body.get("data") if isinstance(body, dict) else body
+                resp.json()
                 n = len(entries) if isinstance(entries, list) else 0
                 detail = f"  models={n}"
                 # Surface context_length for the configured model when present.
@@ -2259,15 +2654,56 @@ def _doctor_probe(providers) -> None:
         print(f"  {name:15}: HTTP {resp.status_code}{detail}  {url}")
 
 
+def _doctor_profiles(provider_profiles) -> None:
+    """Where the provider profiles come from and the ones that cannot be used."""
+    catalog = provider_profiles.load()
+    own = sorted(p.id for p in catalog.profiles.values() if p.source != "shipped")
+    state = ", ".join(own) if own else ("none" if catalog.user_dir.is_dir() else "folder absent")
+    print(f"Provider profiles: {len(catalog.profiles)} usable ({catalog.shipped_dir}); "
+          f"user folder {catalog.user_dir}: {state}")
+    for pid, error in sorted(catalog.errors.items()):
+        print(f"  UNUSABLE {pid}: {error}")
+    for why in catalog.ignored.values():
+        print(f"  IGNORED {why}")
+
+
+def _doctor_binding(name: str, provider, provider_profiles, providers) -> str:
+    """Which profile a provider binds to and by which rule; a provider on the
+    fallback at a host a profile names is told how to bind it (never by host
+    on its own)."""
+    from urllib.parse import urlsplit
+    try:
+        profile, rule = provider_profiles.bind(name, provider.base_url)
+    except provider_profiles.ProfileError:
+        return ""
+    line = (f"  profile={provider.profile} ({rule}; {profile.source}: {', '.join(profile.files)})"
+            f"  url {providers.url_source(name)}")
+    host = urlsplit(provider.base_url).hostname
+    match = [p.id for p in provider_profiles.menu()
+             if rule.startswith("fallback") and p.base_url and urlsplit(p.base_url).hostname == host]
+    if match:
+        line += (f"\n  {'':15}  NOTE: {host} is the host of profile {match[0]!r}; set "
+                 f"{providers.var(name, 'PRESET')}={match[0]} to use it")
+    return line
+
+
 def cmd_doctor(args) -> None:
-    from core import llmhub, providers
+    from core import provider_profiles, providers
 
     def flag(v):  # never print secrets
         return "set" if v else "NOT SET"
 
-    print(f"LLM Hub base URL : {llmhub.base_url()}")
-    print(f"LLM Hub API key  : {flag(llmhub.api_key())}")
-    print(f"LLM Hub model    : {llmhub.model()}")
+    # Implicit providers (the hub): selectable without registering.
+    for name in provider_profiles.implicit_ids():
+        try:
+            implicit = providers.resolve(name)
+        except providers.UnknownProvider as e:
+            print(f"{name} : UNUSABLE — {e}")
+            continue
+        print(f"{name} base URL : {implicit.base_url}  ({providers.url_source(name)})")
+        print(f"{name} API key  : {flag(implicit.api_key) if implicit.needs_api_key or implicit.api_key else 'not needed'}")
+        print(f"{name} model    : {implicit.model}")
+    _doctor_profiles(provider_profiles)
     analyst = providers.role_name("ATLAS_AGENT_PROVIDER")
     print(f"Analyst provider : {analyst or '(not configured)'}")
     print(f"Analyst model    : "
@@ -2299,8 +2735,9 @@ def cmd_doctor(args) -> None:
                 auth = (f"  auth={provider.auth_header}: "
                         f"{provider.auth_prefix!r}+key")
             print(f"  {name:15}: {provider.base_url}  "
-                  f"key={flag(provider.api_key)}  "
-                  f"model={provider.model or '(NOT SET)'}{auth}")
+                  f"key={flag(provider.api_key) if provider.needs_api_key or provider.api_key else 'not needed (sends no auth header)'}  "
+                  f"model={provider.model or '(NOT SET)'}{auth}"
+                  f"{_doctor_binding(name, provider, provider_profiles, providers)}")
         for label, env_vars in (("analyst", ("ATLAS_AGENT_PROVIDER",)),
                                 ("reviewer", ("ATLAS_REVIEW_PROVIDER",)),
                                 ("report", ("ATLAS_REPORT_PROVIDER",
@@ -2309,18 +2746,26 @@ def cmd_doctor(args) -> None:
     for entry in providers.malformed():
         print(f"NOTE: ATLAS_PROVIDERS entry {entry!r} is not a usable provider "
               f"name and was ignored.")
+    for name, level, allowed in _untaken_levels(providers):
+        print(f"NOTE: {name} is pinned to thinking level {level!r}, which its provider profile "
+              f"does not list ({', '.join(allowed)}); it is sent as written. Choose one of those "
+              "in Settings or with `atlas provider setup`.")
+    orphans = _orphan_instance_vars(providers, provider_profiles)
+    if orphans:
+        print("NOTE: .env holds variables of no declared provider (left by a removal; one may "
+              f"hold a key): {', '.join(orphans)}. Delete them.")
 
     if getattr(args, "probe", False):
         _doctor_probe(providers)
 
     if os.environ.get("ANTHROPIC_API_KEY"):
-        print("NOTE: ANTHROPIC_API_KEY is set but unused — Anthropic backends "
-              "were removed. Configure a provider with `atlas provider setup` "
-              "(see docs/llm.md).")
+        print("NOTE: ANTHROPIC_API_KEY is set but Atlas does not read it: an Anthropic "
+              "provider takes its key from its own variable. Configure one with "
+              "`atlas provider setup` (see docs/llm.md).")
     if (os.environ.get("REASON_BACKEND") or "").strip() == "claude" or (
             os.environ.get("DAIR_BACKEND") or "").strip() == "claude":
         print("NOTE: REASON_BACKEND/DAIR_BACKEND=claude is no longer supported. "
-              "Use llmhub or openai-compat.")
+              "Configure a provider, Anthropic included, with `atlas provider setup`.")
 
     from agent.tui import resolve_live_skin
     print(f"LIVE skin        : {resolve_live_skin()}  "
@@ -2485,7 +2930,7 @@ def cmd_provider_list(args) -> None:
             continue
         roles = [r for r, n in active.items() if n == name]
         print(f"{name:15} {provider.base_url}")
-        print(f"{'':15} key={'set' if provider.api_key else 'NOT SET'}  "
+        print(f"{'':15} key={'set' if provider.api_key else 'NOT SET' if provider.needs_api_key else 'not needed'}  "
               f"model={provider.model or '(NOT SET)'}  "
               f"roles={','.join(roles) if roles else '-'}")
         from agent.llm import resolve_api_compat
@@ -2505,12 +2950,18 @@ def cmd_provider_test(args) -> None:
     except providers.UnknownProvider as e:
         sys.exit(f"atlas: {e}")
     model = getattr(args, "model", "") or provider.model
+    # Before any request: the profile it speaks with (an unusable one has
+    # already stopped resolve() with the reason).
+    from core import provider_profiles
+    bound = provider_profiles.get(provider.profile)
+    print(f"{provider.name}: {provider.base_url} ({providers.url_source(provider.name)})  "
+          f"model={model or '(NOT SET)'}  profile={provider.profile} ({bound.source}: "
+          f"{', '.join(bound.files)})  dialect={provider.api}")
     caps = ls.probe_capabilities(
         provider.base_url, provider.api_key, model,
         auth_header=provider.auth_header, auth_prefix=provider.auth_prefix,
         provider_name=provider.name)
     yes_no = lambda v: "unknown" if v is None else ("yes" if v else "no")  # noqa: E731
-    print(f"{provider.name}: {provider.base_url}  model={model or '(NOT SET)'}")
     print(f"  models listed : {yes_no(caps.reachable)}"
           + (f" ({len(caps.models)})" if caps.models else ""))
     print(f"  answered      : {yes_no(caps.answered)}")
@@ -2536,6 +2987,76 @@ def cmd_provider_test(args) -> None:
         sys.exit(1)
 
 
+def _profile_copy(text: str, schema_uri: str) -> str:
+    """A shipped profile's text for the user folder: the #:schema line points
+    at the shipped schema (none lies beside the copy), and an implicit
+    profile's [env] table and implicit line, which a user file may not set,
+    are left out with the comments that explain them."""
+    out: list[str] = []
+    in_env = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("[") and not stripped.startswith("#"):
+            in_env = stripped == "[env]"
+            if in_env:
+                while out and out[-1].lstrip().startswith("#"):
+                    out.pop()
+                continue
+        if in_env:
+            continue
+        if stripped.startswith("implicit") and stripped.split("=", 1)[0].strip() == "implicit":
+            while out and out[-1].lstrip().startswith("#"):
+                out.pop()
+            continue
+        out.append(line)
+    if out and out[0].startswith("#:schema"):
+        out[0] = f"#:schema {schema_uri}"
+    head = ("# Your copy of a shipped profile. Delete every line you do not change: those, and\n"
+            "# later fixes to them, then come from the shipped file. Keep schema and id.")
+    out.insert(1 if out and out[0].startswith("#:schema") else 0, head)
+    return "\n".join(out).rstrip("\n") + "\n"
+
+
+def cmd_provider_profile_init(args) -> None:
+    """Copy a shipped provider profile, with its comments, into the folder of
+    your own profiles, ready to edit."""
+    from core import provider_profiles as pp
+    pid = (args.id or "").strip().casefold()
+    shipped = sorted(p.stem for p in pp.SHIPPED_DIR.glob("*.toml"))
+    if pid not in shipped:
+        sys.exit(f"atlas: no shipped provider profile {args.id!r}; shipped: {', '.join(shipped)}.")
+    if pid == pp.FALLBACK:
+        sys.exit(f"atlas: the {pp.FALLBACK} profile cannot be changed by a file. For a gateway that "
+                 "needs another auth header, use the Auth fields (Settings, or `atlas provider "
+                 "setup`), or write a profile with a new id (docs/llm.md, Provider profiles).")
+    folder = pp.user_dir()
+    dest = folder / f"{pid}.toml"
+    text = _profile_copy((pp.SHIPPED_DIR / f"{pid}.toml").read_text(encoding="utf-8"),
+                         (pp.SHIPPED_DIR / "schema.json").resolve().as_uri())
+    folder.mkdir(parents=True, exist_ok=True)
+    try:
+        with open(dest, "w" if args.force else "x", encoding="utf-8") as fh:
+            fh.write(text)
+    except FileExistsError:
+        sys.exit(f"atlas: {dest} exists; edit it, or pass --force to replace it with the shipped text.")
+    catalog = pp.load(reload=True)
+    print(f"Wrote {dest}.")
+    if pid in catalog.errors:
+        print(f"WARNING: it does not load: {catalog.errors[pid]}")
+    print("Delete the lines you do not change; `atlas doctor` shows whether your profiles load.")
+
+
+def cmd_provider_profile_path(args) -> None:
+    """Where Atlas reads provider profiles from."""
+    from core import provider_profiles as pp
+    folder = pp.user_dir()
+    source = pp.DIR_ENV if os.environ.get(pp.DIR_ENV) else "default"
+    state = "exists" if folder.is_dir() else "not created yet"
+    print(f"Your profiles    : {folder}  ({source}; {state})")
+    print(f"Shipped profiles : {pp.SHIPPED_DIR}")
+    print(f"Schema           : {pp.SHIPPED_DIR / 'schema.json'}")
+
+
 def cmd_provider_use(args) -> None:
     """Point one or all model surfaces at a registered provider, by editing .env.
 
@@ -2545,21 +3066,21 @@ def cmd_provider_use(args) -> None:
     before the config is touched.
     """
     from agent.prompts import REPO_ROOT
-    from core import envfile, providers
+    from core import envfile, provider_profiles, providers
+    from core import llm_setup as ls
     name = args.name
     try:
         provider = providers.resolve(name)
     except providers.UnknownProvider as e:
         sys.exit(f"atlas: {e}")
 
-    is_default = provider.name == providers.DEFAULT_NAME
-    model_var = ("LLMHUB_MODEL" if is_default
-                 else providers.var(provider.name, "MODEL"))
-    key_var = ("LLMHUB_API_KEY" if is_default
-               else providers.var(provider.name, "API_KEY"))
+    model_var = providers.var(provider.name, "MODEL")
+    key_var = providers.var(provider.name, "API_KEY")
 
     updates: dict[str, str] = {}
     model = (args.model or "").strip()
+    if model and (err := ls.field_error("model", model)):
+        sys.exit(f"atlas: {err} Nothing was changed.")
     if model:
         updates[model_var] = model
     else:
@@ -2568,20 +3089,23 @@ def cmd_provider_use(args) -> None:
             sys.exit(f"atlas: provider {name!r} has no model configured. Pass "
                      f"--model ID, or set {model_var}. A named provider never "
                      f"inherits LLMHUB_MODEL — see core/providers.py.")
-    if not provider.api_key:
+    if provider.key_missing:
         sys.exit(f"atlas: provider {name!r} has no API key. Set {key_var} — "
                  f"`bin/atlas-secret set {key_var}`, or `--env` on hosts with "
                  f"no keyring.")
 
-    roles = (list(PROVIDER_ROLE_VARS) if args.role == "all" else [args.role])
+    from core.llm_setup import ROLES_CHOSEN_ON_PURPOSE
+    roles = ([r for r in PROVIDER_ROLE_VARS if r not in ROLES_CHOSEN_ON_PURPOSE]
+             if args.role == "all" else [args.role])
     for role in roles:
         updates[PROVIDER_ROLE_VARS[role]] = name
 
     if not args.no_probe:
-        import httpx
+        from core import llmhub
         url = provider.models_url()  # the model id plays no part in this URL
         try:
-            resp = httpx.get(url, headers=provider.headers(), timeout=20.0)
+            resp, entries = llmhub.get_models(provider.base_url, provider.headers(),
+                                              paging=provider.models_paging, timeout=20.0)
         except Exception as e:
             sys.exit(f"atlas: {name!r} is not reachable from this host — "
                      f"{type(e).__name__}: {e}\n  {url}\n"
@@ -2593,15 +3117,17 @@ def cmd_provider_use(args) -> None:
                      f"  {resp.text[:300]}\n"
                      f"Nothing was changed. A 401/403 means the key is not "
                      f"accepted; --no-probe skips this check.")
-        available = []
-        try:
-            available = [m.get("id") for m in (resp.json().get("data") or [])]
-        except ValueError:
-            pass
-        if available and model not in available:
-            sys.exit(f"atlas: {model!r} is not in {name!r}'s catalogue "
-                     f"({len(available)} models). Nothing was changed.\n"
-                     f"  Pick one with: atlas models --provider {name}")
+        available = [m for m in entries or [] if isinstance(m, dict) and m.get("id")]
+        if available:
+            # The one alias rule the dashboard and the context probe use.
+            from core.model_context import listed_model
+            stored = listed_model(available, model)
+            if stored is None:
+                sys.exit(f"atlas: {model!r} is not in {name!r}'s catalogue "
+                         f"({len(available)} models). Nothing was changed.\n"
+                         f"  Pick one with: atlas models --provider {name}")
+            if stored != model and model_var in updates:
+                updates[model_var] = stored      # the catalogue's own spelling
 
     env_path = envfile.resolve(REPO_ROOT)
     print(f"{'Would write' if args.dry_run else 'Writing'} to {env_path}:")
@@ -2613,11 +3139,59 @@ def cmd_provider_use(args) -> None:
     if not env_path.is_file():
         sys.exit(f"atlas: no .env at {env_path} — create it first "
                  f"(cp .env.example .env).")
-    envfile.set_values(env_path, updates)
+    try:
+        envfile.set_values(env_path, updates)
+    except ValueError as e:
+        sys.exit(f"atlas: {e}")
     print(f"Done. Verify with: bin/atlas doctor")
-    print(f"Roll back with:   bin/atlas provider use "
-          f"{providers.DEFAULT_NAME}"
-          + ("" if args.role == "all" else f" --role {args.role}"))
+    fallback = next(iter(provider_profiles.implicit_ids()), "")
+    if fallback and fallback != name:
+        print(f"Roll back with:   bin/atlas provider use {fallback}"
+              + ("" if args.role == "all" else f" --role {args.role}"))
+
+
+def _untaken_levels(providers) -> list[tuple[str, str, tuple[str, ...]]]:
+    """(name, pinned level, levels its profile takes) for each usable
+    provider pinned to a level its bound profile does not list for its
+    model: a setting written before the save checked it."""
+    from core import provider_profiles
+    out = []
+    for name in providers.names():
+        level = providers.thinking_level(name)
+        if not level:
+            continue
+        try:
+            provider = providers.resolve(name)
+            allowed = providers.selectable_levels(provider_profiles.get(provider.profile), provider.model)
+        except (providers.UnknownProvider, provider_profiles.ProfileError):
+            continue   # an unusable provider is reported with its reason above
+        if level not in allowed:
+            out.append((name, level, allowed))
+    return out
+
+
+def _orphan_instance_vars(providers, provider_profiles) -> list[str]:
+    """Names (never values) of ATLAS_PROVIDER_<STEM>_<SUFFIX> variables in the
+    env file whose stem no declared provider has: what a provider removal
+    before every instance variable was deleted with it left behind. A name
+    that splits more than one way is an orphan only when no split names a
+    declared provider."""
+    from agent.prompts import REPO_ROOT
+    from core import envfile
+    path = envfile.resolve(REPO_ROOT)
+    if not path.is_file():
+        return []
+    stems = {provider_profiles.instance_stem(n) for n in providers.declared()}
+    out = []
+    for key in envfile.read_values(path):
+        if not key.startswith("ATLAS_PROVIDER_"):
+            continue
+        rest = key[len("ATLAS_PROVIDER_"):]
+        splits = [rest[:-len(s) - 1] for s in providers.INSTANCE_SUFFIXES
+                  if rest.endswith("_" + s) and len(rest) > len(s) + 1]
+        if splits and not any(stem in stems for stem in splits):
+            out.append(key)
+    return sorted(out)
 
 
 def _ask(prompt: str, default: str = "") -> str:
@@ -2658,23 +3232,23 @@ def cmd_provider_setup(args) -> None:
     and prints; it computes nothing itself beyond argv parsing.
     """
     from agent.prompts import REPO_ROOT
-    from core import envfile, providers
+    from core import envfile, provider_profiles, providers
     from core import llm_setup as ls
 
     print("Atlas LLM provider setup")
     print("=========================")
     print()
     print("Which backend are you connecting to?")
-    for i, p in enumerate(ls.PRESETS, 1):
-        star = "  (default)" if p.default_choice else ""
-        print(f"  {i}. {p.label}{star}")
+    menu = ls.presets()
+    for i, p in enumerate(menu, 1):
+        print(f"  {i}. {p.label}")
         print(f"     {p.description}")
     print()
     chosen = None
     while chosen is None:
-        raw = _ask(f"Choice [1-{len(ls.PRESETS)}]", "")
-        if raw.isdigit() and 1 <= int(raw) <= len(ls.PRESETS):
-            chosen = ls.PRESETS[int(raw) - 1]
+        raw = _ask(f"Choice [1-{len(menu)}]", "")
+        if raw.isdigit() and 1 <= int(raw) <= len(menu):
+            chosen = menu[int(raw) - 1]
         else:
             print("  Please enter a number from the list (no default).")
     print()
@@ -2682,8 +3256,8 @@ def cmd_provider_setup(args) -> None:
         print(f"  {chosen.notes}")
         print()
 
-    if chosen.id == "llmhub":
-        name = providers.DEFAULT_NAME
+    if chosen.implicit:
+        name = chosen.id
     else:
         name = ""
         while True:
@@ -2704,15 +3278,34 @@ def cmd_provider_setup(args) -> None:
             f"atlas: model {model!r} looks like a dashboard role or username, "
             f"not a catalogue id. Nothing was written.")
 
+    # Only Other takes the key's header from here: every other profile
+    # brings its own. Blank keeps Authorization: Bearer <key>.
+    auth_header, auth_prefix = "", None
+    if chosen.id == provider_profiles.FALLBACK:
+        header = _ask("Auth header, the header the key goes in", "Authorization")
+        default_word = "Bearer" if header.lower() == "authorization" else "-"
+        word = _ask("Auth prefix, the word before the key ('-' for none)", default_word)
+        prefix = "" if word == "-" else word + " "
+        if header.lower() == "authorization" and not prefix:
+            print("  NOTE: a bare key in Authorization needs a provider profile file "
+                  "(docs/llm.md, Provider profiles); Bearer is kept.")
+        elif header.lower() != "authorization" or prefix != "Bearer ":
+            auth_header, auth_prefix = header, prefix or None
+
     api_key = ""
     if chosen.needs_api_key:
         api_key = _ask_secret("API key")
     elif _ask_yn("This preset usually needs no API key — set one anyway?",
                 default_yes=False):
         api_key = _ask_secret("API key")
+    # Checked before anything is written: the key goes into .env or the
+    # keyring as one line, which a control or line-break character breaks.
+    if api_key and (why := envfile.unsafe_value(api_key)):
+        sys.exit(f"atlas: the API key cannot be saved: {why}. Nothing was written.")
 
     if _ask_yn("Test this connection now (GET /models)?", default_yes=True):
-        result = ls.probe(base_url, api_key)
+        result = ls.probe(base_url, api_key, auth_header=auth_header,
+                          auth_prefix=auth_prefix, profile_id=chosen.id)
         if result.ok:
             print(f"  OK — HTTP {result.status}, {len(result.models)} "
                   f"models at {result.url}")
@@ -2728,18 +3321,21 @@ def cmd_provider_setup(args) -> None:
     print()
     print("Which roles should use this provider? (analyst = investigation "
           "driver, reviewer = adversarial review, report = final synthesis, "
-          "reason = reason.* tools, dair = phase director)")
-    if _ask_yn("All of them (recommended for a single-backend setup)?",
+          "reason = reason.* tools, dair = phase director, vision = picture "
+          "descriptions, only for a model that takes images)")
+    if _ask_yn("All of them but vision (recommended for a single-backend setup)?",
               default_yes=True):
-        roles = tuple(ls.PROVIDER_ROLE_VARS)
+        roles = tuple(r for r in ls.PROVIDER_ROLE_VARS if r not in ls.ROLES_CHOSEN_ON_PURPOSE)
     else:
         roles = tuple(r for r in ls.PROVIDER_ROLE_VARS
                       if _ask_yn(f"  {r}?", default_yes=False))
 
-    thinking = _ask("Thinking level for this provider (auto/low/medium/high; "
+    levels = ls.levels_for(chosen.id, model, name)
+    thinking = _ask(f"Thinking level for this provider ({'/'.join(levels)}; "
                     "auto lets Atlas learn one from a starved reply)", "auto")
-    if thinking.strip().lower() not in providers.THINKING_VALUES:
-        sys.exit(f"atlas: {thinking!r} is not a thinking level. Nothing was written.")
+    if thinking.strip().lower() not in levels:
+        sys.exit(f"atlas: {thinking!r} is not a thinking level {chosen.label} takes "
+                 f"({', '.join(levels)}). Nothing was written.")
 
     key_var = ls.key_env_var(name)
     store_in_keyring = False
@@ -2753,7 +3349,8 @@ def cmd_provider_setup(args) -> None:
     try:
         choice = ls.SetupChoice(preset_id=chosen.id, name=name,
                                 base_url=base_url, model=model, roles=roles,
-                                thinking=thinking.strip().lower())
+                                thinking=thinking.strip().lower(),
+                                auth_header=auth_header, auth_prefix=auth_prefix)
         updates = ls.register_provider_updates(choice)
     except ValueError as e:
         sys.exit(f"atlas: {e}")
@@ -2773,7 +3370,10 @@ def cmd_provider_setup(args) -> None:
         dest = "the OS keyring" if store_in_keyring else str(env_path)
         print(f"  {key_var}=<hidden> → {dest}")
 
-    envfile.set_values(env_path, updates)
+    try:
+        envfile.set_values(env_path, updates)
+    except ValueError as e:
+        sys.exit(f"atlas: {e}")
 
     if api_key:
         wrote_to_keyring = False
@@ -2876,34 +3476,20 @@ def cmd_report(args) -> None:
                 sys.exit(f"atlas: {r.get('error')}")
             print(f"atlas: wrote {r['path']} ({r['techniques']} techniques)")
         else:
-            r = write_iocs(case_id, findings, out_dir, fmt="all")
+            r = write_iocs(case_id, findings, out_dir, fmt="all", case_dir=str(case_dir))
             print(f"atlas: wrote {r['stix_path']} and {r['csv_path']} "
                   f"({r['ioc_count']} IOCs)")
         return
-    candidates = []
-    # Prefer immutable snapshot layout (reports/latest → rerun_* / initial_report)
-    try:
-        from core.report_snapshots import resolve_latest_report_dir
-        latest_dir = resolve_latest_report_dir(case_dir)
-        if latest_dir.is_dir():
-            candidates += [
-                p for p in latest_dir.rglob("*.md")
-                if p.is_file() and p.name != "diff_report.md"
-            ]
-    except Exception:
-        pass
-    for sub in ("reports", "analysis"):
-        d = case_dir / sub
-        if d.is_dir():
-            # Flat layout + nested snapshots (skip diff_report at root)
-            for p in d.rglob("*.md"):
-                if not p.is_file():
-                    continue
-                if p.name == "diff_report.md":
-                    continue
-                if p not in candidates:
-                    candidates.append(p)
-    report = max(candidates, key=lambda p: p.stat().st_mtime, default=None)
+    # The report the Report view shows (one rule: core.report_snapshots
+    # .default_report) — never a review, a note or a host section written
+    # after it.
+    from core.report_snapshots import default_report
+    report = default_report(case_dir)
+    if report is None:
+        # Cases from versions that wrote the report into analysis/.
+        legacy = sorted((case_dir / "analysis").glob("*_report.md"),
+                        key=lambda p: p.stat().st_mtime)
+        report = legacy[-1] if legacy else None
     if report is None:
         sys.exit(f"atlas: no report (*.md) found under {case_dir}/reports/ "
                  "or analysis/ — run an investigation first.")
@@ -2955,6 +3541,8 @@ def cmd_write_report(args) -> None:
     from core.report_exit import write_exit_report
     res = write_exit_report(case_dir, "manual", allow_llm=not args.no_llm,
                             force=args.force)
+    if res.get("refreshed"):
+        return  # the stale projected report was projected again in place (said on stderr)
     if not res.get("written"):
         sys.exit("atlas: this case already has an official report — "
                  "pass --force to write the assembled one anyway.")
@@ -3178,8 +3766,10 @@ Lifecycle of `atlas run` / `atlas train`:
   3. Findings   each is tiered by confidence (CONFIRMED / LIKELY / SUSPECTED)
                 and must cite the tool output behind it; the `reason.*` reviewer
                 tries to refute weak ones and flags over-claims.
-  4. Coverage   a gate checks evidence/tool coverage before the report, so the
-                run doesn't stop with obvious stones unturned.
+  4. Coverage   every content class of the evidence ends read, partly read or
+                left with a checked reason. A run that reaches its end with a
+                class still undecided stops unfinished (exit code 2; a resume
+                continues), and the report states the depth reached per host.
   5. Report     the final report lands in the case's reports/ directory.
 
 `run` is the workhorse. `train` adds an INDEPENDENT reviewer that grades a clean
@@ -3193,15 +3783,24 @@ in-flight run is stuck."""),
   chat            conversational session — you drive the tools
   train           clean run + independent graded review
   review --live   is my running investigation stuck?
-  report          render the newest final report (terminal, --format html/pdf)
+  report          render the case's main report (terminal, --format md/html/pdf,
+                  navigator, stix)
+  write-report    write the report a stopped run still owes
+  rerun           continue the investigation from what changed
   status          one-screen investigation health (conflicts, stale, dirty)
   explain         explain a claim / conflict / report section
   timeline        case timeline from claims+journal (or master_timeline.tsv)
   journal         list / show / diff investigation journal runs
   verify-trace    check an execution trace's hash chain
-  models          list models your LLM Hub key can use
-  doctor          show which backend/model each role resolved to
-  rerun           continue the investigation from what changed
+  intel ...       supply indicators and threat reports to a case
+  autofill        AI autofill for CASE.md's Evidence Links table
+  provider ...    register, test and switch LLM providers (setup wizard)
+  models          list the model ids a provider serves
+  doctor          show the resolved providers, models and role bindings
+  skin            pick the LIVE panel's animation
+  share ...       SMB share for case evidence (mount from Windows)
+  addon ...       list or scaffold addons
+  publish         scrubbed public snapshot of the repo
   serve           run the MCP server on stdio (for MCP clients)
   brain ...       manage the durable second brain (see `atlas guide brain`)
 
@@ -3254,10 +3853,13 @@ Running Atlas for a team on one Ubuntu VM over SSH:
 Provisioning steps + maintainer runbook: docs/multi-user.md."""),
 
     "setup": ("First-run setup", """
-Atlas drives five model roles — the analyst, the adversarial `reason.*`
+Atlas drives five text roles — the analyst, the adversarial `reason.*`
 reviewer, the `dair.*` phase director, the run reviewer and the report
-writer — and each is pointed at a provider: any OpenAI-compatible endpoint
-(the Telekom LLM Hub, OpenAI, a local vLLM/Ollama server, another gateway).
+writer — plus an optional vision role (its model must take images), and
+each is pointed at a provider: any OpenAI-compatible endpoint
+(the Telekom LLM Hub, OpenAI, a local vLLM/Ollama server, another gateway)
+or Anthropic's own Messages API. What Atlas knows about each provider type
+is one profile file; `atlas provider profile init <id>` copies one to edit.
 Nothing is pre-selected; an unset role is off, not silently the hub.
 
 First run:
@@ -3311,7 +3913,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="atlas",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        description=_wrap(f"Atlas — {TAGLINE}, running on any "
+        description=_wrap(f"Atlas — {TAGLINE}. Runs on any "
                     f"OpenAI-compatible model backend."),
         epilog=(
             "new here?  run `atlas guide`  — how Atlas works, start to finish\n"
@@ -3378,73 +3980,17 @@ def build_parser() -> argparse.ArgumentParser:
             "atlas run --json > result.json         "
             "# scripting: stats on stdout",
         ) + "\nexit codes: 0 finished, 1 LLM/config error, 2 stopped "
-            "unfinished")
-    p_run.add_argument("--case", help="case directory (default: cwd if it "
-                                      "looks like a case)")
-    p_run.add_argument("--question", "-q",
-                       help="optional override of CASE.md investigation "
-                            "requests for this run")
-    p_run.add_argument("--model", help="override LLMHUB_MODEL for the analyst")
-    p_run.add_argument("--case-id", help="override the case ID (from CASE.md) "
-                                         "used for the trace filename + anchor")
-    p_run.add_argument("--output-dir", help="write analysis/exports/reports to "
-                                           "this dir instead of inside the case "
-                                           "(evidence stays read-only in place)")
-    p_run.add_argument("--remote", metavar="HOST",
-                       help="run all forensic tools on an external SIFT VM "
-                            "(host key in ~/cases/.common/live_hosts.json); "
-                            "the CLI/agent/LLM stay local — see docs/cli.md")
-    p_run.add_argument("--remote-mode", choices=["resident", "copy"],
-                       default="resident",
-                       help="evidence on the VM already (resident) or rsynced "
-                            "up from the client, outputs synced back after "
-                            "the run (copy); default resident")
-    p_run.add_argument("--remote-workspace", metavar="DIR",
-                       help="remote workspace base dir for --remote-mode copy "
-                            "(default ~/atlas-workspace on the VM)")
-    p_run.add_argument("--all-tools", action="store_true",
-                       help="expose every namespace up front (large context)")
-    p_run.add_argument(
-        "--fresh", action="store_true",
-        help="wipe analysis/exports/reports + ledger statuses + session "
-             "before starting (claims/tasks under .atlas/ kept). Implied when "
-             "the prior run already finished unless --resume is set.",
-    )
-    p_run.add_argument(
-        "--resume", action="store_true",
-        help="continue appending to the existing execution trace and DAIR "
-             "phase stack (default only when no finished prior run exists).",
-    )
-    p_run.add_argument(
-        "--skip-sudo-check", action="store_true",
-        help="skip passwordless-sudo preflight (tests/CI only; privileged "
-             "tools will still fail with sudo_auth at runtime). "
-             "Also: ATLAS_SKIP_SUDO_CHECK=1.",
-    )
+            "unfinished, 4 finished but coverage or beliefs do not support "
+            "calling it complete")
+    _add_run_args(p_run)
     p_run.add_argument("--quiet", action="store_true",
                        help="suppress per-turn narration")
     p_run.add_argument("--interactive", action="store_true",
                        help="supervise the run — the agent may consult you via "
                             "atlas_ask_analyst at decision points")
-    _add_skin_arg(p_run)
     p_run.add_argument("--json", action="store_true",
                        help="print a machine-readable result to stdout "
                             "(implies --quiet)")
-    p_run.add_argument("--no-brain", action="store_true",
-                       help="disable Brain injection and post-run learning "
-                            "for this investigation")
-    p_run.add_argument("--no-capture-brain", action="store_true",
-                       help="skip legacy review-bullet capture even when "
-                            "ATLAS_CAPTURE_BRAIN is set (background learn "
-                            "still runs unless --no-brain)")
-    p_run.add_argument("--capture-brain", action="store_true",
-                       help="also stage legacy review/self-correction "
-                            "candidates (background investigation learn "
-                            "already runs by default after a finished run)")
-    p_run.add_argument(
-        "--language", "-L", choices=("en", "de"), default=None,
-        help="report language (en|de); persisted in .atlas/case_config.json",
-    )
     p_run.set_defaults(func=cmd_run)
 
     p_interactive = sub.add_parser(
@@ -3452,7 +3998,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="a supervised run — the agent asks you for guidance when it hits "
              "a decision point",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        description=_wrap("Exactly `atlas run`, but the agent may pause and consult "
+        description=_wrap("`atlas run` with the same options and the same start rule "
+                    "(all but --quiet, --json and --interactive), but the agent "
+                    "may pause and consult "
                     "you (via atlas_ask_analyst) at genuine decision points — "
                     "scope questions, competing pivots, business context the "
                     "evidence can't answer. Between questions it works "
@@ -3460,46 +4008,7 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=_examples(
             "atlas interactive --case ~/cases/mycase -q 'How did they "
             "get in?'"))
-    p_interactive.add_argument("--case", help="case directory (default: cwd if "
-                                             "it looks like a case)")
-    p_interactive.add_argument("--question", "-q",
-                               help="optional override of CASE.md investigation "
-                                    "requests for this run")
-    p_interactive.add_argument("--model",
-                               help="override LLMHUB_MODEL for the analyst")
-    p_interactive.add_argument("--case-id",
-                               help="override the case ID used for the trace "
-                                    "filename + anchor")
-    p_interactive.add_argument("--output-dir",
-                               help="write outputs to this dir instead of "
-                                    "inside the case")
-    p_interactive.add_argument("--remote", metavar="HOST",
-                               help="run forensic tools on an external SIFT "
-                                    "VM (host key in ~/cases/.common/"
-                                    "live_hosts.json) — see docs/cli.md")
-    p_interactive.add_argument("--remote-mode", choices=["resident", "copy"],
-                               default="resident",
-                               help="resident (default): evidence already on "
-                                    "the VM; copy: rsync evidence up, sync "
-                                    "outputs back")
-    p_interactive.add_argument("--remote-workspace", metavar="DIR",
-                               help="remote workspace base dir for copy mode")
-    p_interactive.add_argument("--all-tools", action="store_true",
-                               help="expose every namespace up front")
-    p_interactive.add_argument(
-        "--fresh", action="store_true",
-        help="wipe analysis/exports/reports + ledger statuses + session "
-             "before starting (same as atlas run --fresh)",
-    )
-    p_interactive.add_argument(
-        "--resume", action="store_true",
-        help="continue the existing execution trace (same as atlas run --resume)",
-    )
-    p_interactive.add_argument(
-        "--skip-sudo-check", action="store_true",
-        help="skip passwordless-sudo preflight (same as atlas run --skip-sudo-check)",
-    )
-    _add_skin_arg(p_interactive)
+    _add_run_args(p_interactive)
     p_interactive.set_defaults(func=cmd_interactive)
 
     p_train = sub.add_parser(
@@ -3507,7 +4016,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="fresh full run, then an independent agent reviews it",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description=_wrap("Clean-slate run plus an independent review: the case's "
-                    "analysis/exports/reports are cleared (evidence is never "
+                    "reports and trace are moved to .atlas/run_history/, "
+                    "analysis/ and exports/ are deleted (evidence is never "
                     "touched; --no-clear keeps prior state), the "
                     "investigation runs to completion, then a separate "
                     "reviewer model grades it from the trace, report, and "
@@ -3522,14 +4032,16 @@ def build_parser() -> argparse.ArgumentParser:
             "# isolated mirror; real case untouched",
             "atlas train -q '...' --review-model <model-id>",
         ) + "\nexit codes: 0 ok, 1 reviewer error, 2 run didn't finish, "
-            "3 review says NEEDS WORK")
+            "3 review says NEEDS WORK, 4 finished and review OK but coverage "
+            "or beliefs do not support calling it complete, or the reviewer "
+            "refused a trace of another case")
     p_train.add_argument("--case", help="case directory (default: cwd if it "
                                         "looks like a case)")
     p_train.add_argument("--question", "-q",
                          help="optional override of CASE.md investigation "
                               "requests (required only if CASE.md has none)")
-    p_train.add_argument("--model", help="override LLMHUB_MODEL for the "
-                                         "analyst")
+    p_train.add_argument("--model", help="override the analyst provider's "
+                                         "model")
     p_train.add_argument("--case-id", help="override the case ID used for the "
                                            "trace filename + anchor")
     p_train.add_argument("--output-dir", help="write analysis/exports/reports "
@@ -3554,14 +4066,18 @@ def build_parser() -> argparse.ArgumentParser:
                               "the reviewer provider's model, then "
                               "REASON_MODEL)")
     p_train.add_argument("--no-clear", action="store_true",
-                         help="keep existing analysis/exports/reports instead "
-                              "of starting from a clean case")
+                         help="keep the existing reports, trace, analysis/ and "
+                              "exports/ instead of starting from a clean case")
     p_train.add_argument(
         "--skip-sudo-check", action="store_true",
         help="skip passwordless-sudo preflight (tests/CI only)",
     )
     p_train.add_argument("--all-tools", action="store_true",
-                         help="expose every namespace up front (large context)")
+                         help="load tool namespaces up front until the schema "
+                              "budget is full (it follows the model's context "
+                              "window; ATLAS_AGENT_MAX_OPENAI_TOOLS or the "
+                              "provider profile's max_tools can change it); "
+                              "the rest still load on demand")
     p_train.add_argument("--quiet", action="store_true",
                          help="suppress per-turn narration")
     _add_skin_arg(p_train)
@@ -3633,16 +4149,21 @@ def build_parser() -> argparse.ArgumentParser:
             "atlas chat --case ~/cases/mycase       # case-aware",
             "atlas chat                             # no case: toolbox Q&A"))
     p_chat.add_argument("--case", help="case directory")
-    p_chat.add_argument("--model", help="override LLMHUB_MODEL")
-    p_chat.add_argument("--all-tools", action="store_true")
+    p_chat.add_argument("--model", help="override the analyst provider's model")
+    p_chat.add_argument("--all-tools", action="store_true",
+                        help="load tool namespaces up front until the schema "
+                             "budget is full (it follows the model's context "
+                             "window; ATLAS_AGENT_MAX_OPENAI_TOOLS or the "
+                             "provider profile's max_tools can change it); "
+                             "the rest still load on demand")
     _add_skin_arg(p_chat)
     p_chat.set_defaults(func=cmd_chat)
 
     p_report = sub.add_parser(
-        "report", help="render the case's newest final report",
+        "report", help="render the case's main report",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        description=_wrap("Find the newest report under the case's reports/ (or "
-                    "analysis/) and render it — pretty-printed in the "
+        description=_wrap("Find the case's main report (the one the dashboard's "
+                    "Report tab shows) and render it — pretty-printed in the "
                     "terminal by default, or as Markdown/HTML for sharing."),
         epilog=_examples(
             "atlas report                           # terminal",
@@ -3853,12 +4374,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_models = sub.add_parser("models", help="list models on a provider")
     p_models.add_argument("--provider", default="",
-                          help="registered provider name (required; no implicit default)")
+                          help="registered provider name (default: the analyst's "
+                               "provider, ATLAS_AGENT_PROVIDER)")
     p_models.set_defaults(func=cmd_models)
     p_doctor = sub.add_parser("doctor", help="show resolved configuration")
     p_doctor.add_argument("--probe", action="store_true",
-                          help="also GET /models on every provider "
-                               "(the only network call doctor makes)")
+                          help="also GET /models on each provider a role uses "
+                               "or ATLAS_PROVIDERS declares (the only network "
+                               "call doctor makes; an implicit hub no role "
+                               "uses is not contacted)")
     p_doctor.set_defaults(func=cmd_doctor)
 
     from agent.tui import LIVE_SKINS as _LIVE_SKINS
@@ -3889,7 +4413,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_skin.set_defaults(func=cmd_skin)
 
-    p_provider = sub.add_parser("provider", help="inspect or switch model providers")
+    p_provider = sub.add_parser(
+        "provider", help="inspect or switch model providers",
+        description="Register, test and switch LLM providers: OpenAI-compatible gateways, the "
+                    "Anthropic Messages API, local servers. What Atlas knows about each kind of "
+                    "provider is a provider profile: shipped ones in provider_profiles/, your own "
+                    "in provider_profiles.local/ (`atlas provider profile path`; docs/llm.md).")
     p_provider_sub = p_provider.add_subparsers(dest="provider_cmd")
     p_provider_sub.required = True
     p_provider_sub.add_parser(
@@ -3900,8 +4429,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_provider_use.add_argument("name", help="registered provider name")
     p_provider_use.add_argument(
         "--role", default="all",
-        choices=["all", "analyst", "reviewer", "report", "reason", "dair"],
-        help="which model surface to switch (default: all)")
+        choices=["all", "analyst", "reviewer", "report", "reason", "dair", "vision"],
+        help="which model surface to switch (default: all, which leaves vision as it is: "
+             "its model must take images)")
     p_provider_use.add_argument(
         "--model", default="",
         help="model id to pin for this provider (required if it has none yet)")
@@ -3922,9 +4452,22 @@ def build_parser() -> argparse.ArgumentParser:
     p_provider_sub.add_parser(
         "setup",
         help="interactive wizard: register a new LLM provider and point "
-             "roles at it (OpenAI, local/self-hosted, Telekom LLM Hub, or "
-             "any other OpenAI-compatible endpoint)",
+             "roles at it (OpenAI, Anthropic, local/self-hosted, Telekom LLM Hub, "
+             "any other OpenAI-compatible endpoint, or a profile of your own)",
     ).set_defaults(func=cmd_provider_setup)
+    p_provider_profile = p_provider_sub.add_parser(
+        "profile", help="your own provider profiles: copy a shipped one to edit, or show the folders")
+    p_provider_profile_sub = p_provider_profile.add_subparsers(dest="profile_cmd")
+    p_provider_profile_sub.required = True
+    p_profile_init = p_provider_profile_sub.add_parser(
+        "init", help="copy a shipped profile, with its comments, into your profile folder")
+    p_profile_init.add_argument("id", help="shipped profile id (the file name, e.g. openai)")
+    p_profile_init.add_argument("--force", action="store_true",
+                                help="replace a file of that name in your folder")
+    p_profile_init.set_defaults(func=cmd_provider_profile_init)
+    p_provider_profile_sub.add_parser(
+        "path", help="where your own and the shipped profiles are read from"
+    ).set_defaults(func=cmd_provider_profile_path)
 
     p_share = sub.add_parser(
         "share", help="SMB network share for case evidence (mount from Windows)")
@@ -4059,7 +4602,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--regenerate-sections", action="store_true",
         help=(
             "AI-regenerate stale report projection sections then assemble "
-            "(requires LLMHUB_API_KEY unless deterministic fallback applies)"
+            "(requires the report provider's API key unless deterministic fallback applies)"
         ),
     )
     p_rerun.add_argument(
@@ -4072,7 +4615,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="assemble format when regenerating/assembling (default: markdown)",
     )
     p_rerun.add_argument("--model", default=None,
-                         help="override LLMHUB_MODEL for analyst-context Plane B")
+                         help="override the analyst provider's model for analyst-context Plane B")
     p_rerun.add_argument(
         "--language", "-L", choices=("en", "de"), default=None,
         help="report language (en|de); persisted in .atlas/case_config.json "
@@ -4111,7 +4654,8 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Build a case-level timeline without requiring Timeline Builder. "
             "Default: claim graph + journal milestones. "
-            "Optional: analysis/master_timeline.tsv via --from-master."
+            "Optional: the Timeline Builder's reports/master_timeline.tsv via "
+            "--from-master."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
@@ -4126,9 +4670,11 @@ def build_parser() -> argparse.ArgumentParser:
     src.add_argument("--from-claims", action="store_true", default=True,
                      help="derive from claim graph + journal (default)")
     src.add_argument("--from-master", action="store_true",
-                     help="use analysis/master_timeline.tsv if present")
+                     help="use the case's master_timeline.tsv (reports/, the "
+                          "newest snapshot, or analysis/)")
     p_timeline.add_argument("--limit", type=int, default=200,
-                            help="max events to print (default 200)")
+                            help="max events to read and print (default 200; "
+                                 "0 = every row)")
     p_timeline.add_argument("--json", action="store_true")
     p_timeline.set_defaults(func=cmd_timeline)
 

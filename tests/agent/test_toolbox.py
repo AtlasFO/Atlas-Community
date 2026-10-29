@@ -375,7 +375,7 @@ class TestControlPlane:
         assert tb.loaded == set()
 
     def test_room_comes_from_cold_unkept_namespaces_only(self, tb, monkeypatch):
-        """A cold core namespace is ordinary room now that the control plane
+        """A cold core namespace is ordinary room, since the control plane
         is listed on its own; a kept one and one in recent use never are."""
         tb._use_clock = 50
         tb._last_used = {"misc": 3}          # cold
@@ -526,3 +526,20 @@ class TestControlPlane:
         assert toolbox_mod.max_openai_tools() <= 40
         toolbox_mod.set_learned_tool_ceiling(None)
         assert toolbox_mod.max_openai_tools() > 40
+
+
+def test_a_view_note_reaches_every_entry_the_call_wrote(monkeypatch, tmp_path):
+    """A strings_grep's executor entries carry the view note too, so a
+    finding that cites one of them is checked against what was shown."""
+    from core.execution_log import ExecutionLog
+    log = ExecutionLog()
+    log.configure("CASE-A", str(tmp_path / "CASE-A_trace.json"))
+    monkeypatch.setattr("core.execution_log.log", log)
+    executor = log.record_tool_call("strings -a evidence/mem/ws01.raw", True, False, 0, 0, stdout_excerpt="x")
+    result = log.record_tool_call("<py>:strings_strings_grep", True, False, 0, 0, stdout_excerpt="{}")
+    note = {"view_rows_returned": 40, "view_rows_shown": 12, "view_omitted_rows": 28,
+            "view_truncated": True, "view_complete": False}
+    toolbox_mod._annotate_view(result, [executor, result], note)
+    by = log.index().by_call_id
+    for cid in (executor, result):
+        assert by[cid]["view_omitted_rows"] == 28 and by[cid]["view_complete"] is False

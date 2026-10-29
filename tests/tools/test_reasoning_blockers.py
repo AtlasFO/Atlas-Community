@@ -1,3 +1,4 @@
+import pytest
 """pre_report_check's synthesize-blocker hatch in prose form, and the
 open-question blocker that names its way out."""
 import json
@@ -5,6 +6,9 @@ import json
 from tools.reasoning import (
     _blocker_sentences, _split_persisted_blockers, _task_disposition_for_report,
 )
+
+
+pytestmark = pytest.mark.usefixtures("todays_report_check")
 
 
 def _synth(text):
@@ -82,7 +86,7 @@ class TestMiscitedFindingsAreLoweredNotHeld:
     applied: the claim drops to the floor tier, so the report claims only what
     the evidence shows."""
 
-    def _finding(self, statement="Account gnome authenticated from 10.0.0.9"):
+    def _finding(self, statement="Account ftpuser authenticated from 10.0.0.9"):
         return {"type": "finding", "description": statement, "call_id": 11,
                 "linked_call_id": 7, "input_call_ids": [7], "host": "PC1"}
 
@@ -150,3 +154,10 @@ class TestTheGateWritesOnlyForTheAnalyst:
         fn = getattr(R.reason_pre_report_check, "__wrapped__",
                      R.reason_pre_report_check)
         assert list(inspect.signature(fn).parameters) == []
+
+
+def test_a_parsed_blocker_item_names_its_call_and_is_not_read():
+    from tools.reasoning import _blocker_state
+    s = _blocker_state({"status": "parsed", "basis_call_id": 41})
+    assert s == "parsed by call 41 (no report of what it processed; not counted read)"
+    assert _blocker_state({"status": "resolved", "basis_call_id": 7}) == "resolved by call 7"

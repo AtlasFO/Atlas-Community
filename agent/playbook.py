@@ -7,7 +7,7 @@ Consumers:
 - ``python -m agent.playbook`` — print or write assembled playbook
 
 The thin ``hub/ENTRY.md`` is the agent entry point; it must not duplicate the
-modules. Legacy ``claude/`` paths are accepted if present (one-release dual-read).
+modules. A ``claude/`` playbook directory is read when ``hub/playbook`` is absent.
 """
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ def _resolve_paths() -> tuple[Path, Path, Path]:
     if hub_play.is_dir():
         entry = REPO_ROOT / "hub" / "ENTRY.md"
         if not entry.is_file():
-            # legacy filename inside hub/
+            # alternate entry filename inside hub/
             alt = REPO_ROOT / "hub" / "CLAUDE.md"
             entry = alt if alt.is_file() else entry
         return hub_play, hub_play / "MANIFEST", entry
@@ -59,9 +59,23 @@ def load_modules() -> list[tuple[str, str]]:
     out: list[tuple[str, str]] = []
     for name in manifest_names():
         path = PLAYBOOK_DIR / name
+        variant = path.with_name(path.stem + ".no_defer" + path.suffix)
+        if variant.is_file():
+            # The texts about the DAIR window and deferred intents have a
+            # variant for no deferral (ATLAS_DAIR_NO_DEFER).
+            from core.deferred_intents import dair_no_defer_on
+            if dair_no_defer_on():
+                path = variant
         body = _read(path).strip()
         if not body:
             raise FileNotFoundError(f"playbook module missing or empty: {path}")
+        from core.deferred_intents import report_check_no_scenario_on
+        if report_check_no_scenario_on():
+            # The scenario-shaped report checks and the hypothesize observer
+            # are gone (ATLAS_REPORT_CHECK_NO_SCENARIO): their rows go too.
+            body = "\n".join(line for line in body.splitlines()
+                              if not line.startswith(("| `pre_report_check_required` / structural blocking issue",
+                                                      "| `hypothesize_required` |")))
         out.append((name, body))
     return out
 

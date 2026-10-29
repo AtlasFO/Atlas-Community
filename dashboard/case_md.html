@@ -45,6 +45,16 @@
   .autofill-review-banner {
     color: var(--warn); font-size: var(--fs-small); margin: 0 0 8px;
   }
+  #md-conflict {
+    margin: 12px 0; padding: 12px 14px; border: 1px solid var(--warn-line);
+    border-radius: 8px; background: var(--warn-soft);
+  }
+  #md-conflict p { margin: 0 0 8px; font-size: var(--fs-small); }
+  #md-conflict textarea {
+    width: 100%; box-sizing: border-box; min-height: 30vh; resize: vertical;
+    font-family: var(--mono); font-size: 13px; line-height: 1.6;
+  }
+  #md-conflict .md-actions { margin: 8px 0 0; }
 </style>
 </head>
 <body>
@@ -59,6 +69,12 @@ const $app = () => document.getElementById('app');
 const esc = AtlasShell.esc;
 let savedContent = '';
 let currentCase = null;
+// The version of the brief the editor started from (the server's hash of
+// the text). Every save sends it; the server refuses a save whose version
+// is no longer current, so a stale tab never overwrites a later save.
+let baseVersion = '';
+let shownCase = null;
+let stopPoll = null;
 
 function setMsg(text, cls) {
   const el = document.getElementById('md-msg');
@@ -82,15 +98,56 @@ function markDirty() {
 
 async function save() {
   const ta = document.getElementById('md-editor');
+  const sent = ta.value;
   setMsg('Saving…', 'dirty');
   try {
     const r = await AtlasShell.apiPost('case/case_md/save', {
-      case: currentCase, content: ta.value,
+      case: currentCase, content: sent, version: baseVersion,
     });
-    savedContent = ta.value;
+    savedContent = sent;
+    baseVersion = r.version || baseVersion;
     if (r && r.unclosed_fence) setMsg(`Saved, but ${fenceNote(r.unclosed_fence)}`, 'warn');
     else setMsg('Saved.', 'ok');
-  } catch (e) { setMsg(e.message, 'err'); }
+  } catch (e) {
+    if (e.status === 409 && e.data && e.data.conflict) showConflict(e.data, sent);
+    else setMsg(e.message, 'err');
+  }
+}
+
+// Someone else saved first. The editor takes their text (and its version);
+// the text this tab tried to save stays below it, to copy from, or to put
+// back with "Use mine instead", which then saves over theirs knowingly.
+function showConflict(server, mine) {
+  const ta = document.getElementById('md-editor');
+  ta.value = server.content || '';
+  savedContent = ta.value;
+  baseVersion = server.version || '';
+  let box = document.getElementById('md-conflict');
+  if (!box) {
+    box = document.createElement('div');
+    box.id = 'md-conflict';
+    ta.after(box);
+  }
+  box.innerHTML = `
+    <p><strong>Someone else saved the brief after you opened it.</strong> The editor above now
+      shows their version. Your unsaved text is below: copy what you need into the editor, then Save.</p>
+    <textarea id="md-mine" readonly spellcheck="false">${esc(mine)}</textarea>
+    <div class="md-actions">
+      <button class="btn" id="md-mine-copy" type="button">Copy my text</button>
+      <button class="btn" id="md-mine-use" type="button">Use mine instead</button>
+    </div>`;
+  document.getElementById('md-mine-copy').addEventListener('click', () => {
+    const mineEl = document.getElementById('md-mine');
+    mineEl.select();
+    if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(mine).catch(() => {});
+    else document.execCommand('copy');
+  });
+  document.getElementById('md-mine-use').addEventListener('click', () => {
+    ta.value = mine;
+    box.remove();
+    markDirty();
+  });
+  setMsg('Not saved: the brief changed on the server. Their version is in the editor.', 'warn');
 }
 
 function autofillRowHtml(r, i, prefix) {
@@ -224,9 +281,13 @@ async function applyAutofill(proposal) {
       case: currentCase, rows: finalRows,
       add_standard_request: addRequest ? addRequest.checked : false,
       prior_knowledge: priorKnowledgeSelection(),
+      version: proposal.version,
     });
     const ta = document.getElementById('md-editor');
     ta.value = result.content;
+    // The preview is built on the brief as it is on the server now; the
+    // save that follows changes that version.
+    baseVersion = result.version;
     markDirty();
     panel.innerHTML = '';
     setMsg('Review the changes below, then Save.', 'dirty');
@@ -254,6 +315,8 @@ async function runAutofill() {
 
 function render(cd, data, canEdit) {
   savedContent = data.content || '';
+  baseVersion = data.version || '';
+  shownCase = cd;
   $app().innerHTML = `
     <h1 class="page-title">Brief</h1>
     <p class="page-sub">${data.exists
@@ -285,23 +348,52 @@ async function refresh() {
   const cd = AtlasShell.activeCase();
   currentCase = cd;
   if (!cd) {
+    shownCase = null;
     $app().innerHTML = `<h1 class="page-title">Brief</h1>
       <div class="state-empty">Select a case to view its CASE.md.</div>`;
     return;
   }
-  $app().innerHTML = '<div class="state-loading">Loading</div>';
+  const first = shownCase !== cd;
+  if (first) $app().innerHTML = '<div class="state-loading">Loading</div>';
   try {
     const data = await AtlasShell.api('case/case_md', { case: cd });
     if (AtlasShell.activeCase() !== cd) return;
-    const canEdit = AtlasShell.roleAtLeast('analyst');
-    render(cd, data, canEdit);
+    if (first) {
+      render(cd, data, AtlasShell.roleAtLeast('analyst'));
+      return;
+    }
+    // A later round: the brief may have been saved elsewhere (another user,
+    // the start dialog, a rerun). An editor with nothing unsaved takes the
+    // new text; one with unsaved edits keeps them and is told, and its
+    // save will show both versions.
+    if (!data.version || data.version === baseVersion) return;
+    const ta = document.getElementById('md-editor');
+    if (!ta) return;
+    // The conflict panel (the user's own text) and an open Autofill review
+    // are work in progress too: a reload would wipe them.
+    const panel = document.getElementById('autofill-panel');
+    const inProgress = document.getElementById('md-conflict') || (panel && panel.innerHTML.trim());
+    if (ta.value === savedContent && !inProgress) {
+      render(cd, data, AtlasShell.roleAtLeast('analyst'));
+      setMsg('Reloaded: the brief changed on the server.', 'ok');
+    } else {
+      setMsg('The brief changed on the server since you opened it. Save will show both versions.', 'warn');
+    }
   } catch (e) {
     if (AtlasShell.activeCase() !== cd) return;
+    if (!first) return;   // a failed background check keeps the editor as it is
     $app().innerHTML = `<div class="state-error">Could not load CASE.md.\n${esc(e.message)}</div>`;
   }
 }
 
-AtlasShell.init({ page: 'casemd', onCase: refresh });
+AtlasShell.init({
+  page: 'casemd',
+  onCase: () => {
+    if (stopPoll) stopPoll();
+    shownCase = null;
+    stopPoll = AtlasShell.poll(refresh, 15000);
+  },
+});
 </script>
 </body>
 </html>

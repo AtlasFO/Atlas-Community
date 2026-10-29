@@ -82,10 +82,10 @@ class TestCuriosityProbeEntry:
     def test_entry_shape_and_default_lineage(self, tmp_path):
         l = _log_with_budget(tmp_path, budget=2)
         dair_cid = l._last_dair_cid
-        cid = l.record_curiosity_probe("look at RM#2 recycle bin", seeded_by="H0007")
+        cid = l.record_curiosity_probe("look at MEDIA#2 recycle bin", seeded_by="H0007")
         entry = l.index().by_call_id[cid]
         assert entry["type"] == "curiosity_probe"
-        assert entry["probe_rationale"] == "look at RM#2 recycle bin"
+        assert entry["probe_rationale"] == "look at MEDIA#2 recycle bin"
         assert entry["seeded_by"] == "H0007"
         # defaults lineage to the most recent dair_assess so it's not an orphan
         assert entry["input_call_ids"] == [dair_cid]

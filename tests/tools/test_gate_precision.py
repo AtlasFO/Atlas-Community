@@ -5,6 +5,8 @@ output kept on disk still names the artifacts it read, and a sentence that
 denies egress needs no transfer artifact."""
 from __future__ import annotations
 
+import pytest
+
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -30,12 +32,12 @@ def _ctx(description, *, tier="LIKELY", supporting_evidence="", linked_call_id=0
 class TestQuotedTextIsNotTheAnalystsQuantifier:
     def test_universal_words_inside_a_quotation_do_not_count(self):
         assert not uft.is_universal_or_negative(
-            "The thread reads: sender 'It is very hard to transfer all data over the "
-            "internet!'; reply 'No problem. Deliver storage devices.'")
+            "The thread reads: sender 'It is far too slow to send all files over the "
+            "network!'; reply 'No problem. Bring the drives in person.'")
 
     def test_the_analysts_own_universal_still_counts(self):
         assert uft.is_universal_or_negative(
-            "'Hello, Iaman' and all subsequent requests came from the same sender")
+            "'Hello, Jane' and all subsequent requests came from the same sender")
 
     def test_a_possessive_is_not_a_quotation(self):
         # An apostrophe inside a word must not open a "quotation" that
@@ -46,9 +48,9 @@ class TestQuotedTextIsNotTheAnalystsQuantifier:
     def test_a_cut_view_no_longer_refuses_a_finding_quoting_the_evidence(self):
         cut = {"type": "tool_call", "cmd": "<py>:strings_read_text", "view_truncated": True,
                "view_omitted_chars": 500, "evidence_ref": "mnt/host/fs/Users/u/mail.ost",
-               "stdout_excerpt": "Stop it! It is very hard to transfer all data"}
-        ctx = _ctx("The mail.ost thread shows the reply 'It is very hard to transfer all "
-                   "data over the internet' on 24 Mar", by_call_id={61: cut},
+               "stdout_excerpt": "Re: Re: It is far too slow to send all files"}
+        ctx = _ctx("The mail.ost thread shows the reply 'It is far too slow to send all "
+                   "files over the network' on 14 Mar", by_call_id={61: cut},
                    input_call_ids=[61])
         assert uft.check(ctx) is None
 
@@ -57,7 +59,7 @@ class TestNamedActorExtraction:
     def test_a_folder_segment_is_not_a_person(self):
         out = nag.check(_ctx(
             "Two sample files were uploaded from the local sync folder "
-            "C:\\Users\\informant\\Google Drive to the personal cloud account"))
+            "C:\\Users\\jdoe\\Google Drive to the personal cloud account"))
         assert out is None
 
     def test_a_domain_qualified_name_still_is(self):
@@ -168,9 +170,9 @@ class TestProtocolTransferEvidenceCountsAsATransferRecord:
     STOR = ("T 10.0.0.5:2000 -> 192.0.2.10:21 [AP] STOR archive.zip..\n"
             "T 192.0.2.10:21 -> 10.0.0.5:2000 [AP] 150 Opening BINARY mode data "
             "connection for archive.zip..")
-    LS = ("total 1066..-rw-r--r-- 1 gnome staff 230566 Apr 26 2004 archive.zip..")
+    LS = ("total 512..-rw-r--r-- 1 ftpuser staff 129875 Apr 21 2031 archive.zip..")
     CLAIM = ("The workstation at 10.0.0.5 uploaded archive.zip to the FTP server at "
-             "192.0.2.10 under the account gnome")
+             "192.0.2.10 under the account ftpuser")
 
     def _ctx(self, excerpt):
         call = {"type": "tool_call", "call_id": 274, "success": True,
@@ -205,10 +207,10 @@ class TestProgramsNamedLikePeopleAreNotActors:
 
     CLAM = {"type": "tool_call", "call_id": 5, "success": True,
             "cmd": "<py>:misc_clamscan_file",
-            "stdout_excerpt": "C:\\Program Files\\Cain\\Abel.dll: Win.Trojan.Cain-9 FOUND"}
+            "stdout_excerpt": "C:\\Program Files\\Victor\\Hugo.dll: Win.Trojan.Victor-9 FOUND"}
 
     def test_a_tool_named_like_a_person_does_not_need_a_session_artifact(self):
-        ctx = _ctx("AV detection: ClamAV flagged Abel.dll; Abel is Cain's companion "
+        ctx = _ctx("AV detection: ClamAV flagged Hugo.dll; Hugo is Victor's companion "
                    "password-recovery tool, flagged for its credential-grabbing routines",
                    tier="LIKELY", by_call_id={5: self.CLAM}, input_call_ids=[5], linked_call_id=5)
         assert self.pag.check(ctx) is None
@@ -221,7 +223,7 @@ class TestProgramsNamedLikePeopleAreNotActors:
     def test_a_profile_directory_does_not_exempt_a_person(self):
         listing = {"type": "tool_call", "call_id": 6, "success": True,
                    "cmd": "fls -r -o 63 image.raw 344",
-                   "stdout_excerpt": "d/d 3671: Documents and Settings\\Alice\\Desktop"}
+                   "stdout_excerpt": "d/d 4410: Documents and Settings\\Alice\\Desktop"}
         ctx = _ctx("The credential for the service account is Alice's", tier="LIKELY",
                    by_call_id={6: listing}, input_call_ids=[6], linked_call_id=6)
         assert self.pag.check(ctx) is not None
@@ -229,7 +231,7 @@ class TestProgramsNamedLikePeopleAreNotActors:
     def test_a_program_subject_is_not_an_actor_for_the_named_actor_gate(self):
         tools_dir = {"type": "tool_call", "call_id": 7, "success": True,
                      "cmd": "fls -r -o 63 image.raw 9000",
-                     "stdout_excerpt": "r/r 9012: Desktop\\Tools\\Agent.lnk\nr/r 9013: Desktop\\Tools\\Cain.lnk"}
+                     "stdout_excerpt": "r/r 9012: Desktop\\Tools\\Agent.lnk\nr/r 9013: Desktop\\Tools\\Victor.lnk"}
         ctx = _ctx("Agent copied the harvested credentials to the remote host over the tunnel",
                    tier="LIKELY", by_call_id={7: tools_dir}, input_call_ids=[7], linked_call_id=7)
         assert nag.check(ctx) is None
@@ -252,6 +254,7 @@ class TestBehaviourWordsAreAssertedWords:
     def test_an_investigation_task_is_not_a_scheduled_task(self):
         assert hyp.check(_ctx("The investigation task on the inbox was answered by two beliefs")) is None
 
+    @pytest.mark.usefixtures("todays_dair", "todays_report_check")
     def test_asserted_behaviour_is_still_gated(self):
         out = hyp.check(_ctx("svchost.exe beacons to 10.0.0.5 every 60 seconds"))
         assert out is not None and out["gate"] == "hypothesize_required"
@@ -269,16 +272,16 @@ class TestAMediumsOwnListingIsTheTransferRecord:
     own file system is the transfer record; a folder on the host is not."""
 
     LISTING = {"type": "tool_call", "cmd": "fls -r -o 32 mnt/stick/ewf/ewf1",
-               "stdout_excerpt": ("r/r 2051:\tAuthorized USB (Volume Label Entry)\n"
-                                  "d/d 3075:\tSecret Project Data\n"
-                                  "+ r/r 5123:\t[secret_project]_design_concept.ppt\n")}
+               "stdout_excerpt": ("r/r 2051:\tWork Stick (Volume Label Entry)\n"
+                                  "d/d 3075:\tFalcon Project Data\n"
+                                  "+ r/r 5123:\t[falcon]_layout_draft.ppt\n")}
     OTHER = {"type": "tool_call", "cmd": "fls -r -o 32 mnt/stick/ewf/ewf1",
-             "stdout_excerpt": "r/r 2051:\tholiday.jpg\nr/r 2052:\tsong.mp3\n"}
+             "stdout_excerpt": "r/r 2051:\tbeach.jpg\nr/r 2052:\ttrack01.mp3\n"}
     FOLDER = {"type": "tool_call", "cmd": "ls -la mnt/pc/fs/Users/u/Dropbox",
-              "stdout_excerpt": "[secret_project]_design_concept.ppt\n"}
+              "stdout_excerpt": "[falcon]_layout_draft.ppt\n"}
 
-    DESC = ("The USB stick (exFAT, serial 4C530012450531101593) was used to exfiltrate the "
-            "confidential Secret Project Data folder, among it [secret_project]_design_concept.ppt")
+    DESC = ("The USB stick (exFAT, serial 7A210098760543212345) was used to exfiltrate the "
+            "confidential Falcon Project Data folder, among it [falcon]_layout_draft.ppt")
 
     def test_the_mediums_listing_naming_the_data_passes(self):
         assert ecg.check(_ctx(self.DESC, input_call_ids=[1], by_call_id={1: self.LISTING})) is None
@@ -288,16 +291,16 @@ class TestAMediumsOwnListingIsTheTransferRecord:
         assert out is not None and out["gate"] == "exfil_channel_grounding"
 
     def test_a_folder_on_the_host_is_staging_for_a_cloud_channel(self):
-        desc = ("[secret_project]_design_concept.ppt was uploaded to the personal Dropbox "
+        desc = ("[falcon]_layout_draft.ppt was uploaded to the personal Dropbox "
                 "account from the sync folder")
         out = ecg.check(_ctx(desc, input_call_ids=[1], by_call_id={1: self.FOLDER}))
         assert out is not None
 
     def test_optical_media_is_a_channel_and_its_listing_the_record(self):
         desc = ("Exfiltration over physical media: the CD-R burned on the host carries "
-                "[secret_project]_technical_review.ppt")
+                "[falcon]_test_report.ppt")
         cdr = {"type": "tool_call", "cmd": "strings -a -n 4 evidence/cd/disc.dd",
-               "stdout_excerpt": "UDF Volume\n[secret_project]_technical_review.ppt\n"}
+               "stdout_excerpt": "UDF Volume\n[falcon]_test_report.ppt\n"}
         out = ecg.check(_ctx(desc, supporting_evidence="the disc was found in the bag"))
         assert out is not None and out["gate"] == "exfil_channel_grounding"
         assert ecg.check(_ctx(desc, input_call_ids=[1], by_call_id={1: cdr})) is None
@@ -311,9 +314,9 @@ class TestServicesAndDocumentsAreNotPeople:
     def test_a_document_title_is_not_a_person(self):
         out = nag.check(_ctx(
             "Planning material for the attack is present on the Desktop and was copied to "
-            "consumer cloud sync folders. Documents: 'The Manifesto.docx', 'Planning.docx', "
-            "'Operation Smoke.pptx'. The same documents appear in Dropbox and Google Drive folders.",
-            supporting_evidence="Desktop listing: Planning.docx, The Manifesto.docx"))
+            "consumer cloud sync folders. Documents: 'The Outline.docx', 'Plans.docx', "
+            "'Project Lantern.pptx'. The same documents appear in Dropbox and Google Drive folders.",
+            supporting_evidence="Desktop listing: Plans.docx, The Outline.docx"))
         assert out is None
 
     def test_a_web_service_spelled_as_a_domain_is_not_a_person(self):
@@ -344,10 +347,10 @@ class TestABindingToAnAccountOrAThingIsNotAPrincipal:
 
     def test_an_account_used_by_an_account_binds_no_person(self):
         out = pag.check(_ctx(
-            "The machine is owned and used by local Windows account 'jcloudy'. The user profile "
-            "C:\\Users\\jcloudy contains the Desktop, Documents and cloud sync folders. Two online "
+            "The machine is owned and used by local Windows account 'jroe'. The user profile "
+            "C:\\Users\\jroe contains the Desktop, Documents and cloud sync folders. Two online "
             "identities are bound to the browser: user@example.test and user1@example.test.",
-            supporting_evidence="Users listing shows jcloudy; Chrome Login Data binds user@example.test"))
+            supporting_evidence="Users listing shows jroe; Chrome Login Data binds user@example.test"))
         assert out is None
 
     def test_an_account_used_by_nobody_named_binds_no_person(self):
@@ -355,12 +358,15 @@ class TestABindingToAnAccountOrAThingIsNotAPrincipal:
                               supporting_evidence="fls: archive.7z")) is None
 
     def test_an_account_operated_by_a_named_person_is_still_gated(self):
-        out = pag.check(_ctx("The account jsmith is operated by Jim Cloudy, who staged the archive",
+        out = pag.check(_ctx("The account jsmith is operated by John Roe, who staged the archive",
                              supporting_evidence="fls: archive.7z"))
         assert out is not None and out["gate"] == "principal_attribution_grounding"
 
-    def test_a_session_artifact_still_grounds_it(self):
-        out = pag.check(_ctx("The account jsmith is operated by Jim Cloudy",
-                             supporting_evidence="Security 4624 LogonType 10 TargetUserName jsmith "
-                                                 "IpAddress 10.0.0.5 at 2031-02-04T12:00:00Z"))
+    def test_a_session_artifact_still_grounds_it(self, monkeypatch):
+        monkeypatch.setenv("ATLAS_ATTRIBUTION_IDENTITY_ROWS", "0")     # the session-vocabulary path
+        row = "Security 4624 LogonType 10 TargetUserName jsmith IpAddress 10.0.0.5 at 2031-02-04T12:00:00Z"
+        by_id = {7: {"type": "tool_call", "cmd": "<py>:table_table_grep", "stdout_excerpt": row}}
+        out = pag.check(_ctx("The account jsmith is operated by John Roe", input_call_ids=[7], by_call_id=by_id))
         assert out is None
+        # The same row typed into supporting_evidence is the analyst's text, not a session artifact.
+        assert pag.check(_ctx("The account jsmith is operated by John Roe", supporting_evidence=row)) is not None

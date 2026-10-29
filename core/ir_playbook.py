@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Any
+from typing import Any, Iterable
 
 # (phase, scope, urgency, {lang: action})
 _STEP = tuple[str, str, str, dict[str, str]]
@@ -210,9 +210,15 @@ _DOMAIN_ACT = r"(?:compromis|kompromitt|access|zugriff|logon|login|anmeld|latera
 CLASSES: dict[str, dict[str, Any]] = {
     "ransomware": {
         "words": r"ransom|ransomware|encrypt|decrypt|\.lock|extort|erpress|verschl[uü]ssel|l[oö]segeld",
-        "asserted": (r"ransom|extort|erpress|l[oö]segeld|\.lock\b"
-                     + r"|" + _OBJECT + r"\W+(?:\S+\s+){0,4}(?:encrypt|verschl[uü]ssel)"
-                     + r"|(?:encrypt|verschl[uü]ssel)\w*\W+(?:\S+\s+){0,4}" + _OBJECT),
+        "asserted": r"ransom|extort|erpress|l[oö]segeld|\.lock\b",
+        # An object near an act of encryption: an encrypted archive reads the
+        # same as encrypted shares. A finding whose validated techniques do
+        # not include the class's defining one does not assert it this way
+        # (classify ``techniques``). T1486 is public ATT&CK taxonomy ("Data
+        # Encrypted for Impact"); the explicit words above are never vetoed.
+        "asserted_weak": (_OBJECT + r"\W+(?:\S+\s+){0,4}(?:encrypt|verschl[uü]ssel)"
+                          + r"|(?:encrypt|verschl[uü]ssel)\w*\W+(?:\S+\s+){0,4}" + _OBJECT),
+        "technique": "T1486",
         "steps": [
             ("contain", "estate", "now", {
                 "en": "Isolate affected systems from the network without powering them off",
@@ -397,7 +403,7 @@ STEP_OBJECTS: dict[tuple[str, int], str] = {
     ("exfiltration", 2): "preserve",
     ("malware", 0): "hosts",
     ("malware", 1): "block",
-    ("domain_compromise", 1): "credentials",
+    ("domain_compromise", 1): "privileged",
     ("insider", 0): "subject",
     ("universal", 0): "estate_hosts",
 }
@@ -406,28 +412,40 @@ MANDATORY_CLASSES = tuple(n for n, spec in CLASSES.items() if spec.get("mandator
 MANDATORY_RATIONALE_PREFIX = "mandatory escalation"
 
 
-def _class_spans(spec: dict[str, Any], low: str, asserted: bool) -> list[tuple[int, int]]:
+def _class_spans(spec: dict[str, Any], low: str, asserted: bool,
+                 techniques: Iterable[str] | None = None) -> list[tuple[int, int]]:
     """Where the text asserts the class: its matches, less the negated ones
-    ("no ransomware was found" names none, in a brief as in a finding)."""
+    ("no ransomware was found" names none, in a brief as in a finding).
+    A class's weak assertion form counts unless ``techniques`` (a finding's
+    validated ATT&CK ids; empty or None: not known) lacks the class's
+    defining technique."""
     matcher = spec.get("match")
     if matcher is not None:
         return matcher(low)
     pattern = (spec.get("asserted") or spec["words"]) if asserted else spec["words"]
+    weak = spec.get("asserted_weak") if asserted else None
+    if weak and not (techniques and spec.get("technique")
+                     and spec["technique"] not in {str(t).upper().split(".")[0] for t in techniques}):
+        pattern = pattern + "|" + weak
     spans = [(m.start(), m.end()) for m in re.finditer(pattern, low)]
     return [sp for sp in spans if not negated(low, *sp)]
 
 
-def classify(text: str, *, asserted: bool = False) -> list[str]:
+def classify(text: str, *, asserted: bool = False,
+             techniques: Iterable[str] | None = None) -> list[str]:
     """Threat classes the text names, in table order. ``asserted`` reads
     the text as a finding: the class must be asserted, not mentioned, and
     a match in a negated clause asserts nothing. A class fires when at
-    least one of its matches stands."""
+    least one of its matches stands. ``techniques``: the finding's validated
+    ATT&CK ids (_class_spans); a finding without them keeps the prose
+    reading."""
     low = (text or "").lower()
-    return [name for name, spec in CLASSES.items() if _class_spans(spec, low, asserted)]
+    return [name for name, spec in CLASSES.items() if _class_spans(spec, low, asserted, techniques)]
 
 
 def baseline_steps(text: str, language: str = "en", *,
-                   asserted: bool = False, subject: bool = False) -> list[dict[str, Any]]:
+                   asserted: bool = False, subject: bool = False,
+                   techniques: Iterable[str] | None = None) -> list[dict[str, Any]]:
     """The precautions the text warrants, in the case's language. A
     mandatory class's step carries ``mandatory: True``; with ``subject``
     (the device of the person under investigation) such a class takes its
@@ -435,7 +453,7 @@ def baseline_steps(text: str, language: str = "en", *,
     lang = language if language in ("en", "de") else "en"
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for name in classify(text, asserted=asserted):
+    for name in classify(text, asserted=asserted, techniques=techniques):
         spec = CLASSES[name]
         own_steps = not (subject and spec.get("subject_steps"))
         steps = spec["steps"] if own_steps else spec["subject_steps"]
@@ -464,12 +482,13 @@ PRECAUTION_RATIONALE_PREFIXES = ("precaution for a suspected", "precaution every
                                  "precaution for a seized")
 
 
-def dismiss_first_hour_rows(case_dir: str | os.PathLike) -> list[str]:
+def dismiss_first_hour_rows(case_dir: str | os.PathLike, actor: str = "system owner: suspect") -> list[str]:
     """Dismiss the open remediation rows Atlas itself derived (the intake's
     prior-knowledge precautions, the playbook rows derived from findings
     and the ATT&CK mitigations) on a case whose evidence is the device of
-    the person under investigation, examined after the fact. Returns the
-    ids dismissed."""
+    the person under investigation, examined after the fact, or whose brief
+    names no system owner (``actor`` says which). Returns the ids
+    dismissed."""
     from core.claim_graph import load_graph, set_recommendation_state
     out: list[str] = []
     for nid, n in (load_graph(case_dir).get("nodes") or {}).items():
@@ -489,8 +508,7 @@ def dismiss_first_hour_rows(case_dir: str | os.PathLike) -> list[str]:
                 or rationale.startswith(PRECAUTION_RATIONALE_PREFIXES)
                 or (n.get("source") == "derived"
                     and rationale.startswith("MITRE ATT&CK mitigation"))):
-            r = set_recommendation_state(case_dir, nid, "dismissed",
-                                         actor="system owner: suspect")
+            r = set_recommendation_state(case_dir, nid, "dismissed", actor=actor)
             if r.get("success"):
                 out.append(nid)
     return out
@@ -564,7 +582,14 @@ def seed_from_intake(case_dir: str | os.PathLike) -> dict[str, Any]:
         from core.indicators import frame_for
         frame = frame_for(case_dir)
     except Exception:  # noqa: BLE001
-        frame = "incident"
+        frame = "neutral"
+    if frame == "neutral":
+        # No owner named: a first-hour precaution protects an owner's live
+        # estate the brief does not name. The brief's mandatory steps (a
+        # handling stop) were seeded above.
+        return {"present": bool(info.get("present")), "classes": classes,
+                "seeded": seeded, "dismissed": dismiss_first_hour_rows(case_dir, actor="no system owner named"),
+                "skipped": "no system owner named: no first-hour precautions"}
     if suspect:
         # Seized running: acquisition steps only, no class precaution. The
         # seizure step applies to a device that arrived live (a live

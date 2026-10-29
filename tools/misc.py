@@ -3,17 +3,20 @@
 Also includes the email-forensics, packer-detection, capability-analysis, Office-macro,
 Sigma-hunt, and batch-execution helpers.
 """
+import json
 import os
 import re
 import shutil
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 from fastmcp import FastMCP
+
+from tools import media_types as MT
 from core import run, run_with_output_file, output_safe
 from core.envfile import env_int
-from core.paths import (assert_output_safe, missing_program_result,
-                        program_argv, tool_program)
+from core.paths import (assert_output_safe, missing_module_result,
+                        missing_program_result, program_argv, tool_program)
 
 mcp = FastMCP("misc")
 
@@ -34,7 +37,7 @@ def _bin_or_warn(name: str) -> Optional[str]:
 def parse_event_ids(event_ids) -> tuple:
     """Normalise the many shapes a model writes Event IDs in.
 
-    Accepts ``"4624,4625"``, ``"(4624, 4625)"``, ``"[4624, 4625]"``,
+    Accepts ``"1000,1001"``, ``"(1000, 1001)"``, ``"[1000, 1001]"``,
     space-separated strings, a bare int, or a list/tuple of ints/strings.
     Returns ``(ids, received_repr)``. Digits are extracted after stripping
     wrapping brackets — models often wrap a list in parentheses.
@@ -104,19 +107,73 @@ def _evtx_input_refusal(tool: str, evtx_path: str) -> Optional[dict]:
 
 def _log_inprocess_call(cmd: str, *, success: bool, elapsed: float,
                         stdout: str = "", stderr: str = "",
-                        truncated: bool = False, exit_code: int = 0) -> None:
+                        truncated: bool = False, exit_code: int = 0,
+                        extra: Optional[dict] = None) -> Optional[int]:
+    """The trace entry of an in-process read, as the executor writes one for
+    a program: ``stdout`` is what the call returned (kept whole on disk and
+    hashed like a program's output). Returns the entry's id."""
     from core.executor import _log_tool
-    _log_tool({
+    res = {
         "success": success, "stdout": stdout, "stderr": stderr[:512],
         "exit_code": exit_code, "truncated": truncated, "cmd": cmd,
         "retries": 0, "elapsed_seconds": round(elapsed, 2),
-    })
+    }
+    _log_tool(res)
+    if extra and res.get("_atlas_call_id"):
+        # A cut call says so on its trace entry: incomplete, with its resume.
+        from core.execution_log import log
+        log.annotate_tool_call(res["_atlas_call_id"], **extra)
+    return res.get("_atlas_call_id")
+
+
+# Calls cut at their deadline, by what they read and write: an identical call
+# without resume_from is answered with the cursor instead of reading from the
+# start again (and, for the dump, overwriting the file the cut call began).
+_CUT_CALLS: dict[tuple, dict] = {}
+
+
+def _cut_key(*parts) -> tuple:
+    try:
+        from core.execution_log import log
+        where = str(log.trace_path() or "")
+    except Exception:  # noqa: BLE001
+        where = ""
+    return (where, *parts)
+
+
+def _remembered_cut(key: tuple, tool: str) -> Optional[dict]:
+    prior = _CUT_CALLS.get(key)
+    if not prior:
+        return None
+    out = dict(prior)
+    out["repeated_cut_call"] = True
+    out["note"] = (f"An identical {tool} call was cut at its deadline before; nothing was read again. Continue "
+                   f"with resume_from=\"{prior['resume']['resume_from']}\" (and the same output_path), or parse "
+                   "the log with ez.evtxecmd. " + str(prior.get("note") or ""))
+    return out
+
+
+def _deadline_note(tool: str, done: int, total: Optional[int], elapsed: float, cursor: str,
+                   output_path: Optional[str]) -> tuple[str, float]:
+    """The cut call's note and its observed records per second: how far the
+    read got, the resume, the time the rest would take at this pace, the
+    native parser for the same format, and that no absence follows."""
+    rate = done / elapsed if elapsed > 0 else 0.0
+    left = max(0, (total or 0) - done) if total else None
+    pace = (f" (about {left / rate / 60:.0f} minutes at this pace)"
+            if left is not None and rate > 0 else "")
+    where = (f" and the same output_path to append the rest{pace}; the output file has no closing tag yet"
+             if output_path else f" for the next records{pace}")
+    of = f" of about {total}" if total else ""
+    return (f"Stopped at the per-call deadline after {done}{of} records. Call {tool} again with "
+            f"resume_from=\"{cursor}\"{where}, or parse the log with ez.evtxecmd, which reads the same "
+            "format natively. This is part of the log: no absence follows from it.", rate)
 
 
 @mcp.tool()
 @output_safe
 def evtx_dump(evtx_path: str, output_path: Optional[str] = None,
-              max_records: int = 200) -> dict:
+              max_records: int = 200, resume_from: str = "") -> dict:
     """
     Read an EVTX file record by record and return (or write) its XML.
 
@@ -125,64 +182,117 @@ def evtx_dump(evtx_path: str, output_path: Optional[str] = None,
                  exports/) — the whole log, for grep or table tools. Without
                  it, the first ``max_records`` records are returned inline.
     max_records: inline cap (default 200); ``truncated`` says more exist.
+    resume_from: the ``resume_from`` a cut call returned; the read goes on
+                 there (with the same output_path it appends).
 
     Pure Python (no .NET): slower than ez.evtxecmd on a large log, but it
-    runs everywhere and needs no conversion for a quick look.
+    runs everywhere and needs no conversion for a quick look. A call stops
+    at its per-call deadline and returns how far it got and how to resume.
     """
     import time
     from core import evtx_reader
+    from core.timeout import evtx_deadline_seconds, inprocess_deadline_on
 
     refusal = _evtx_input_refusal("misc.evtx_dump", evtx_path)
     if refusal:
         return refusal
     if output_path:
         assert_output_safe(output_path)
+    on = inprocess_deadline_on()
+    cut_key = _cut_key("evtx_dump", os.path.realpath(evtx_path), output_path or "",
+                       "" if output_path else int(max_records))
+    if on and not resume_from:
+        repeat = _remembered_cut(cut_key, "misc.evtx_dump")
+        if repeat:
+            return repeat
     start = time.monotonic()
-    written = 0
+    limit_s = evtx_deadline_seconds(evtx_path) if on else None
+    deadline = start + limit_s if limit_s else None
+    written = unreadable = 0
     records: list[str] = []
     truncated = False
+    cursor = ""
     error = ""
     try:
         if output_path:
-            with open(output_path, "w", encoding="utf-8") as out:
-                out.write('<?xml version="1.0" encoding="utf-8"?>\n<Events>\n')
-                for xml, _ts in evtx_reader.iter_records(evtx_path):
+            with open(output_path, "a" if resume_from else "w", encoding="utf-8") as out:
+                if not resume_from:
+                    out.write('<?xml version="1.0" encoding="utf-8"?>\n<Events>\n')
+                for ci, ri, xml, _ts in evtx_reader.iter_from(evtx_path, resume_from):
+                    if deadline is not None and time.monotonic() > deadline:
+                        cursor = f"{ci}:{ri}"
+                        break
+                    if xml is None:
+                        unreadable += 1
+                        continue
                     out.write(xml)
                     out.write("\n")
                     written += 1
-                out.write("</Events>\n")
+                if not cursor:
+                    out.write("</Events>\n")
         else:
-            for xml, _ts in evtx_reader.iter_records(evtx_path):
+            for ci, ri, xml, _ts in evtx_reader.iter_from(evtx_path, resume_from):
+                if xml is None:
+                    unreadable += 1
+                    continue
                 if len(records) >= max(1, int(max_records)):
                     truncated = True
+                    break
+                if deadline is not None and time.monotonic() > deadline:
+                    cursor = f"{ci}:{ri}"
                     break
                 records.append(xml)
     except Exception as exc:  # noqa: BLE001 — a corrupt log is a result, not a crash
         error = f"{type(exc).__name__}: {exc}"
     elapsed = time.monotonic() - start
-    success = not error and (written > 0 or bool(records))
-    _log_inprocess_call(f"<py>:evtx_dump {evtx_path}", success=success,
-                        elapsed=elapsed, stderr=error, truncated=truncated,
-                        exit_code=0 if success else 1)
+    cut = bool(cursor) and not error
+    success = not error and not cut and (written > 0 or bool(records))
+    extra = None
     out: dict = {
         "success": success,
         "evtx_path": evtx_path,
         "elapsed_seconds": round(elapsed, 2),
     }
+    if cut:
+        counts = evtx_reader.chunk_counts(evtx_path) or []
+        c, r = evtx_reader.parse_cursor(cursor)
+        done = sum(counts[:c]) + r if counts else written + len(records)
+        total = sum(counts) if counts else None
+        note, rate = _deadline_note("misc.evtx_dump", done, total, elapsed, cursor, output_path)
+        resume = {"resume_from": cursor, **({"output_path": output_path} if output_path else {})}
+        out.update(incomplete=True, gate="call_deadline", records_total=total, deadline_seconds=limit_s,
+                   records_per_second=round(rate, 1), resume=resume, note=note)
+        extra = {"incomplete": True, "resume": resume, "records_per_second": round(rate, 1)}
+    if on and unreadable:
+        out["records_unreadable"] = unreadable
     if error:
         out["error"] = error
     if output_path:
         out["output_path"] = output_path
         out["records_written"] = written
         out["artifact_paths"] = [output_path]
-        out["hint"] = "grep the XML with strings.strings_grep, or filter by Event ID with misc.evtx_filter"
+        if not cut:
+            out["hint"] = "grep the XML with strings.strings_grep, or filter by Event ID with misc.evtx_filter"
     else:
         out["records"] = records
         out["records_returned"] = len(records)
-        out["truncated"] = truncated
+        out["truncated"] = truncated or cut
         if truncated:
             out["hint"] = ("more records exist — pass output_path to dump the "
                            "whole log, or misc.evtx_filter for specific Event IDs")
+    # The records returned are the call's output: kept on its trace entry
+    # like a program's stdout, so a citation or a later check can read them.
+    cid = _log_inprocess_call(f"<py>:evtx_dump {evtx_path}", success=success,
+                              elapsed=elapsed, stderr=error or (out.get("note") or ""),
+                              stdout=json.dumps(out, default=str),
+                              truncated=truncated or cut, exit_code=0 if success else 1, extra=extra)
+    if cid:
+        out["_atlas_call_id"] = cid
+    if on:
+        if cut:
+            _CUT_CALLS[cut_key] = {k: v for k, v in out.items() if k not in ("records", "_atlas_call_id")}
+        elif success:
+            _CUT_CALLS.pop(cut_key, None)
     return out
 
 
@@ -192,12 +302,13 @@ def evtx_filter(evtx_path: str, event_ids: str,
                 max_results: int = 200,
                 wall_clock_budget_s: int = 60,
                 time_start: str = "",
-                time_end: str = "") -> dict:
+                time_end: str = "",
+                resume_from: str = "") -> dict:
     """
     Stream an EVTX file and keep the records with the given Event IDs —
     without parsing the whole log into memory or into a CSV first.
 
-    event_ids: comma-separated Event IDs, e.g. ``4624,4625,4688``.
+    event_ids: comma-separated Event IDs (``<id>,<id>``).
     max_results: stop after this many matches (default 200).
     wall_clock_budget_s: stop scanning after this many seconds (default 60,
         raised automatically for large files). A scan cut by the budget is
@@ -206,6 +317,8 @@ def evtx_filter(evtx_path: str, event_ids: str,
     time_start / time_end: ISO-ish bounds (``2031-02-04`` or
         ``2031-02-04T22:00:00``, UTC). Records outside the window are
         skipped, which is the right retry when a full scan times out.
+    resume_from: the ``resume_from`` a cut scan returned; the scan goes on
+        there instead of starting again.
     """
     import time
     from core import evtx_reader
@@ -215,7 +328,7 @@ def evtx_filter(evtx_path: str, event_ids: str,
         return {
             "success": False,
             "error": (f"no valid event_ids parsed from {received!r}. Pass "
-                      "digits and commas only — e.g. '4624,4625'."),
+                      "digits and commas only, as in '1000,1001'."),
             "event_ids_received": received,
             "event_ids_requested": [],
             "gate": "bad_args",
@@ -228,15 +341,26 @@ def evtx_filter(evtx_path: str, event_ids: str,
         return raw.strip().replace(" ", "T")[:19] if raw else ""
 
     ts_lo, ts_hi = _norm_bound(time_start), _norm_bound(time_end)
+    cut_key = _cut_key("evtx_filter", os.path.realpath(evtx_path), tuple(sorted(ids)), ts_lo, ts_hi,
+                       int(max_results))
+    from core.timeout import inprocess_deadline_on as _deadline_on
+    if _deadline_on() and not resume_from:
+        repeat = _remembered_cut(cut_key, "misc.evtx_filter")
+        if repeat:
+            return repeat
     try:
         size_mb = os.path.getsize(evtx_path) / (1024 * 1024)
     except OSError:
         size_mb = 0.0
     requested_budget = max(1, int(wall_clock_budget_s))
+    from core.timeout import evtx_deadline_seconds, inprocess_deadline_on
+    deadline_on = inprocess_deadline_on()
     # A large log under the default budget is a guaranteed incomplete scan;
     # raise the floor so a plain call has a chance, still fail closed if
-    # the raised budget is hit.
-    effective_budget = int(min(900, max(requested_budget, 60 + size_mb * 0.5)))
+    # the raised budget is hit. With the per-call deadline the floor is the
+    # one rule of every in-process record loop.
+    effective_budget = (evtx_deadline_seconds(evtx_path, requested_budget) if deadline_on
+                        else int(min(900, max(requested_budget, 60 + size_mb * 0.5))))
     budget_raised = effective_budget > requested_budget
 
     def _in_window(xml: str, ts) -> bool:
@@ -265,11 +389,15 @@ def evtx_filter(evtx_path: str, event_ids: str,
     error = ""
     start = time.monotonic()
     deadline = start + effective_budget
+    cursor = next_page = ""
     try:
-        for xml, ts in evtx_reader.iter_records(evtx_path):
+        for ci, ri, xml, ts in evtx_reader.iter_from(evtx_path, resume_from):
             if time.monotonic() > deadline:
                 timed_out = True
+                cursor = f"{ci}:{ri}"
                 break
+            if xml is None:
+                continue
             scanned += 1
             if not _in_window(xml, ts):
                 skipped += 1
@@ -279,6 +407,7 @@ def evtx_filter(evtx_path: str, event_ids: str,
                 results.append(xml[:2000])
                 if len(results) >= max(1, int(max_results)):
                     cap_hit = True
+                    next_page = f"{ci}:{ri + 1}"     # the record after the last match
                     break
     except Exception as exc:  # noqa: BLE001
         error = f"{type(exc).__name__}: {exc}"
@@ -300,11 +429,8 @@ def evtx_filter(evtx_path: str, event_ids: str,
             "Or convert with ez.evtxecmd and query the CSV with table.table_query.",
             "Do not record an absence finding from this result.",
         ]
-    _log_inprocess_call(
-        f"<py>:evtx_filter {evtx_path} event_ids={sorted(ids)}",
-        success=success, elapsed=elapsed,
-        stderr=(error or (guidance[0] if incomplete else "")),
-        truncated=cap_hit or timed_out, exit_code=0 if success else 1)
+        if deadline_on:
+            guidance.insert(1, f"Or go on where it stopped: the same call with resume_from=\"{cursor}\".")
     out: dict = {
         "success": success,
         "event_ids_requested": sorted(ids),
@@ -331,12 +457,36 @@ def evtx_filter(evtx_path: str, event_ids: str,
                         "budget — this is not a negative result.")
         out["gate"] = "scan_timeout"
         out["retry_guidance"] = guidance
+        if deadline_on:
+            out["resume"] = {"resume_from": cursor}
+    if deadline_on and cap_hit and next_page:
+        # A page: the next call with this cursor reads the matches after it.
+        out["resume"] = {"resume_from": next_page}
+        out["hint"] = (f"{len(results)} matches is max_results: the same call with "
+                       f"resume_from=\"{next_page}\" returns the next ones.")
+    # The matching records are the call's output: kept on its trace entry
+    # like a program's stdout (whole on disk, hashed), so a citation, an
+    # identity check or a later count can read the rows the analyst saw.
+    cid = _log_inprocess_call(
+        f"<py>:evtx_filter {evtx_path} event_ids={sorted(ids)}",
+        success=success, elapsed=elapsed,
+        stderr=(error or (guidance[0] if incomplete else "")),
+        stdout=json.dumps(out, default=str),
+        truncated=cap_hit or timed_out, exit_code=0 if success else 1,
+        extra=({"incomplete": True, "resume": {"resume_from": cursor}} if incomplete and deadline_on else None))
+    if cid:
+        out["_atlas_call_id"] = cid
+    if deadline_on:
+        if incomplete:
+            _CUT_CALLS[cut_key] = {k: v for k, v in out.items() if k not in ("events", "_atlas_call_id")}
+        elif success:
+            _CUT_CALLS.pop(cut_key, None)
     return out
 
 
 # ── $MFT without .NET ────────────────────────────────────────────────────────
 
-@mcp.tool()
+@mcp.tool(meta={"input_names": ["$MFT"]})
 @output_safe
 def analyzemft_parse(mft_path: str, output_csv: str) -> dict:
     """
@@ -356,6 +506,10 @@ def analyzemft_parse(mft_path: str, output_csv: str) -> dict:
             "pip install analyzeMFT (listed in requirements.txt)")
     if not os.path.isfile(mft_path):
         return {"success": False, "error": f"Not a file: {mft_path}"}
+    from core.input_kind import refuse_non_mft
+    refusal = refuse_non_mft(mft_path)
+    if refusal:
+        return refusal
     assert_output_safe(output_csv)
     # run(output_dir=…) makedirs its argument, so it must be the parent
     # directory — passing the CSV path itself would create a directory where
@@ -439,7 +593,7 @@ def _mft_rule_matches(jsonl_path: str, top_n: int) -> dict:
             "by_rule": ranked[:top_n]}
 
 
-@mcp.tool()
+@mcp.tool(meta={"input_names": ["$MFT"]})
 @output_safe
 def mft_rule_hunt(mft_path: str, output_dir: str,
                   rules_dir: Optional[str] = None, top_n: int = 40) -> dict:
@@ -625,7 +779,7 @@ def _resolve_regripper_plugin(plugin: str, index) -> dict:
     return {"mode": "unknown", "suggestions": _regripper_suggest(norm, index)}
 
 
-@mcp.tool()
+@mcp.tool(meta={"input_names": ["SYSTEM", "SOFTWARE", "SAM", "SECURITY", "NTUSER.DAT", "UsrClass.dat", "*.hve"]})
 @output_safe
 def regripper_hive(
     hive_path: str,
@@ -717,7 +871,7 @@ def regripper_list_plugins() -> dict:
 
 # ── USN Journal ───────────────────────────────────────────────────────────────
 
-@mcp.tool()
+@mcp.tool(meta={"input_names": ["$UsnJrnl:$J"]})
 @output_safe
 def usnparser_parse(usn_journal: str, output_path: Optional[str] = None) -> dict:
     """
@@ -817,33 +971,54 @@ def onedrive_odl(odl_dir: str, settings_dir: str = "", output_path: Optional[str
 
 # ── Browser forensics ─────────────────────────────────────────────────────────
 
+# What a refusal of hindsight_chrome tells the model to do instead. Nothing
+# else in Atlas reads a Chromium profile's SQLite stores on Linux: table.*
+# reads csv, tsv, xlsx and jsonl only and refuses the raw files, and SQLECmd
+# does not run here, so the honest outcome is a stated gap.
+_HINDSIGHT_UNPARSED = "browser history could not be parsed on this system: record that as a limitation"
+
+
 @mcp.tool()
 @output_safe
 def hindsight_chrome(
     profile_path: str,
     output_dir: str,
-    output_format: str = "json",
+    output_format: str = "jsonl",
 ) -> dict:
     """
     Parse Chrome/Chromium browser history, cookies, cache, and extensions using Hindsight.
     profile_path: path to Chrome 'Default' profile directory.
-    output_format: 'json', 'sqlite', 'csv'.
+    output_format: 'jsonl' (one record per line), 'sqlite' or 'xlsx'.
     """
     import os
     prog = tool_program("hindsight.py") or tool_program("hindsight")
     if not prog:
         return missing_program_result(
             "misc.hindsight_chrome", "hindsight",
-            "installed by install.sh (pyhindsight); browser history can also "
-            "be read with table.* once the History SQLite is exported")
+            f"installed by install.sh (pyhindsight). Until then {_HINDSIGHT_UNPARSED}")
+    # hindsight's -f takes exactly these; "json" is the one name a caller
+    # can still mean by it, and any other value dies in its argument parser.
+    fmt = str(output_format or "jsonl").strip().lower()
+    fmt = "jsonl" if fmt == "json" else fmt
+    if fmt not in ("jsonl", "sqlite", "xlsx"):
+        return {"success": False, "gate": "bad_args",
+                "error": (f"misc.hindsight_chrome: output_format {output_format!r} is not one hindsight "
+                          "writes. Pass jsonl, sqlite or xlsx."),
+                "stdout": "", "stderr": "", "exit_code": 2}
     output_file = os.path.join(output_dir, "hindsight_chrome")
     cmd = [
         *program_argv(prog),
         "-i", profile_path,
         "-o", output_file,
-        "-f", output_format,
+        "-f", fmt,
     ]
-    return run(cmd, timeout=300, output_dir=output_dir)
+    res = run(cmd, timeout=300, output_dir=output_dir)
+    # hindsight imports its Chromium readers when it starts: a missing one
+    # kills every call, and the traceback reads like a call to retry.
+    return missing_module_result(
+        "misc.hindsight_chrome", "hindsight", res,
+        "install.sh installs the module (pinned in install-versions.env), rerun it. "
+        f"Until then {_HINDSIGHT_UNPARSED}") or res
 
 
 # ── AV scanning ──────────────────────────────────────────────────────────────
@@ -866,7 +1041,7 @@ def clamscan_directory(directory: str, recursive: bool = True) -> dict:
     return run(cmd, timeout=1800)
 
 
-@mcp.tool()
+@mcp.tool(meta={"input_names": ["setupapi.dev.log", "setupapi.log"]})
 @output_safe
 def device_install_inventory(setupapi_log_path: str, output_path: Optional[str] = None) -> dict:
     """COMPLETE structured inventory of every device from the Windows device-install
@@ -990,7 +1165,7 @@ def parse_scheduled_tasks(tasks_dir: str) -> dict:
 
 # ── PDF analysis ──────────────────────────────────────────────────────────────
 
-@mcp.tool()
+@mcp.tool(meta={"reads": list(MT.PDF)})
 @output_safe
 def pdfid_scan(pdf_path: str) -> dict:
     """
@@ -1006,7 +1181,7 @@ def pdfid_scan(pdf_path: str) -> dict:
     return run([*program_argv(prog), pdf_path], timeout=30)
 
 
-@mcp.tool()
+@mcp.tool(meta={"reads": list(MT.PDF)})
 @output_safe
 def pdf_parser_analyze(pdf_path: str, object_id: Optional[int] = None) -> dict:
     """
@@ -1108,7 +1283,7 @@ def _pe_report(pe, path: str) -> dict:
     }
 
 
-@mcp.tool()
+@mcp.tool(meta={"reads": list(MT.PE)})      # pefile: PE images
 @output_safe
 def pe_scanner(file_path: str) -> dict:
     """Triage a PE executable: headers, timestamps, sections with entropy,
@@ -1396,40 +1571,6 @@ def _normalize_finding_text(text: str) -> str:
     return _WHITESPACE_RE.sub(" ", (text or "").lower()).strip()[:60]
 
 
-def _finding_volume_advisory(log) -> str:
-    """A note for the agent when findings outnumber the case's questions by a
-    wide margin.
-
-    A run that records every packet, hash and repeated sighting as its own
-    finding buries the case-level answers under observations; the answer
-    key of a case holds a handful of conclusions, not a log. This never
-    refuses anything — a large case legitimately has many findings — it
-    names the ratio and the two moves that bring it down: fold related
-    observations into one finding, and close questions with a promoted
-    conclusion rather than another finding.
-    """
-    try:
-        recorded = len(log.index().by_type.get("finding") or [])
-        case = log.case_dir()
-        requests = 0
-        if case:
-            from core.investigation_tasks import list_tasks
-            requests = len(list_tasks(case))
-    except Exception:  # noqa: BLE001 — advisory only
-        return ""
-    floor = max(env_int("ATLAS_FINDING_VOLUME_FLOOR", 12),
-                env_int("ATLAS_FINDING_VOLUME_PER_REQUEST", 4) * max(requests, 1))
-    if recorded <= floor:
-        return ""
-    return (
-        f"{recorded} findings recorded for {requests or 'an unknown number of'} "
-        "investigation request(s). Related observations — the same event seen "
-        "in several packets, files or hashes — belong in one finding; answer "
-        "each question with claim.promote_conclusion and "
-        "misc.update_investigation_task rather than recording more of the same."
-    )
-
-
 # How far back the trace is read for calls about the artifacts a finding
 # names. The call that read an artifact is often many batches older than the
 # finding drawn from it; the recency window alone missed it.
@@ -1527,6 +1668,7 @@ def _repair_lineage_ids(
     input_call_ids: list[int] | None,
     linked_call_id: int,
     description: str = "",
+    host: str = "",
 ) -> tuple[list[int], int, dict]:
     """Drop fabricated / unknown call ids and fall back to inference.
 
@@ -1576,14 +1718,18 @@ def _repair_lineage_ids(
 
     lid = int(linked_call_id or 0)
 
-    # Explicit ids that are about other artifacts than the finding names are
-    # replaced by the trace's calls about those artifacts, when it has any.
-    # A citation says where a claim came from; one that names the wrong
-    # evidence was refused outright (lineage_relevance) while an omitted one
-    # was inferred silently, so supplying less became the way through. When
-    # the trace holds nothing about the named artifacts the ids stand and
-    # the gate refuses as before: no call supports the claim.
-    if kept and not lineage_inferred and description:
+    # Lineage by wiring (ATLAS_LINEAGE_WIRING): the analyst's ids stand as
+    # cited. When none of them shows the claim by its rows, the calls of the
+    # whole trace that do are located and recorded beside them, labelled
+    # (meta located_call_ids); nothing is replaced. With the switch off the
+    # earlier repair runs: explicit ids about other artifacts than the
+    # finding names are replaced by the trace's calls about those artifacts.
+    from tools._gates.citation_support import _wiring_on
+    if kept and not lineage_inferred and description and _wiring_on():
+        located = _locate_for(log, kept, description, host)
+        if located:
+            meta["located_call_ids"] = located
+    elif kept and not lineage_inferred and description:
         replaced = _replace_irrelevant_lineage(log, lookback, kept, description)
         if replaced is not None:
             irrelevant = [c for c in kept if c not in replaced]
@@ -1624,6 +1770,67 @@ def _repair_lineage_ids(
     if lineage_inferred and "lineage_inferred" not in meta:
         meta["lineage_inferred"] = True
     return kept, lid, meta
+
+
+def _is_absence_statement(description: str) -> bool:
+    try:
+        from tools._gates.citation_support import is_absence_claim
+        return is_absence_claim(description)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _claim_terms_text(description: str, host: str = "") -> str:
+    """What a finding names, for the citation line of the result: its strong
+    entities and minute times as the row test reads them."""
+    try:
+        from tools._gates.citation_support import claim_terms
+        terms = claim_terms(description, host=host)
+        parts = sorted(e.split(":", 1)[1] for e in terms["strong"]) + sorted(terms["times"])
+        return ", ".join(parts[:6]) or "what this finding names"
+    except Exception:  # noqa: BLE001
+        return "what this finding names"
+
+
+def _not_shown_line(log, description: str, host: str = "") -> str:
+    """The citation line of a not_shown finding: the values no row of the
+    trace holds at all (unseen_terms), or, when each stands in some row but
+    no row binds them as the finding does, all of them, said to be apart."""
+    try:
+        from core.forensic_citation import known_case_hosts
+        from tools._gates.citation_support import unseen_terms
+        tool_calls = [e for e in (getattr(log, "_entries", None) or []) if e.get("type") == "tool_call"]
+        unseen, every = unseen_terms(description, tool_calls, hosts=known_case_hosts(log.case_dir()),
+                                     host=host, case_dir=log.case_dir())
+    except Exception:  # noqa: BLE001 - the line falls back to every value
+        unseen, every = [], []
+    if unseen:
+        return (f"no call in the trace shows {', '.join(unseen[:6])}; the report states that. Cite the "
+                "call whose row carries it, or leave that detail out.")
+    terms = ", ".join(every[:6]) if every else _claim_terms_text(description, host)
+    return (f"no row in the trace shows {terms} together as the finding states them; the report states "
+            "that. Cite the call whose row carries them together, or leave the detail out.")
+
+
+def _locate_for(log, cited: list[int], description: str, host: str = "") -> list[int]:
+    """The calls of the whole trace whose rows show the finding when none of
+    its cited calls does (tools._gates.citation_support.locate); empty when a
+    cited call shows it, when the finding names nothing checkable, or when
+    no call shows it."""
+    try:
+        from core.forensic_citation import known_case_hosts
+        from tools._gates.citation_support import citation_supports, locate
+        by = log.index().by_call_id or {}
+        entries = list(getattr(log, "_entries", None) or [])
+        tool_calls = [e for e in entries if e.get("type") == "tool_call"]
+        case_dir = log.case_dir()
+        hosts = known_case_hosts(case_dir)
+    except Exception:  # noqa: BLE001
+        return []
+    cited_entries = [by[c] for c in cited if c in by]
+    if citation_supports(description, cited_entries, tool_calls=tool_calls, host=host, hosts=hosts) is not False:
+        return []
+    return locate(description, tool_calls, hosts, exclude=cited, claim_host=host, case_dir=case_dir)
 
 
 def _replace_irrelevant_lineage(log, lookback: list[dict], cited: list[int],
@@ -1892,19 +2099,23 @@ def _auto_fill_supporting_evidence(
     from core.forensic_citation import MACHINE_CITATION_MARK
     additions: list[str] = []
     added_cids: list[int] = []
+    from tools._gates._citation import held_form
     evid_l = evidence.lower()
-    sources = [(None, b) for b in cited] + recent
+    # Each blob lowered once; a value is looked for in every form it takes in
+    # evidence text (JSON-escaped included), and the window spans the form found.
+    sources = [(cid_i, blob, blob.lower()) for cid_i, blob in [(None, b) for b in cited] + recent]
     for val in uncited:
-        if not val or val.lower() in evid_l:
+        if not val or held_form(val, evid_l):
             continue
         low = val.lower()
-        for cid_i, blob in sources:
-            pos = blob.lower().find(low)
+        for cid_i, blob, blob_l in sources:
+            form = held_form(val, blob_l)
+            pos = blob_l.find(form) if form else -1
             if pos < 0:
                 continue
             # a short window around the match for the citation line
             start = max(0, pos - 40)
-            end = min(len(blob), pos + len(val) + 40)
+            end = min(len(blob), pos + len(form) + 40)
             snippet = " ".join(blob[start:end].split())
             if cid_i is not None:
                 snippet = f"[call_id={cid_i}] {snippet}"
@@ -1930,10 +2141,10 @@ _TIER_DOWNGRADE = {
 # belief honestly instead of starving the run.
 #
 # confirmed_requires_supported_evaluate is deliberately NOT in this set. A
-# CONFIRMED finding with no SUPPORTED reason.evaluate_finding used to land as
+# CONFIRMED finding with no SUPPORTED reason.evaluate_finding would land as
 # LIKELY, and LIKELY satisfies the BLOCKING case-question gate in
-# reason_pre_report_check — so the adversarial review became optional in
-# practice. Nothing compensated: the "N CONFIRMED but only M evaluate calls"
+# reason_pre_report_check — so the adversarial review becomes optional in
+# practice. Nothing compensates: the "N CONFIRMED but only M evaluate calls"
 # check is a warning, and it counts stored CONFIRMED findings, so a downgraded
 # one takes the count to 0 and the warning cannot even fire.
 #
@@ -2058,6 +2269,17 @@ def _relation(new: str, old: str, *, ignore_negation: bool = False,
                     ignore_negation=ignore_negation, elaborates=elaborates)
 
 
+def _another_fact(new: str, old: str) -> bool:
+    """Whether ``new``, which carries ``old``'s words and adds to them, lacks
+    a number or an artifact (a file or path name, core.entities
+    .artifact_tokens) that ``old`` states: a template repeated with another
+    time, id or file is another fact (a sibling event), not a sharper
+    statement of the same one."""
+    from core.entities import artifact_tokens
+    return bool(set(_NUMBER_RE.findall(old)) - set(_NUMBER_RE.findall(new))
+                or artifact_tokens(old) - artifact_tokens(new))
+
+
 def _near_duplicate(description: str, host: str, log, exclude=()) -> dict | None:
     """The recorded finding on ``host`` that ``description`` restates,
     refines or elaborates, or None (see ``_relation``); a restatement comes
@@ -2075,7 +2297,7 @@ def _near_duplicate(description: str, host: str, log, exclude=()) -> dict | None
             continue
         old = str(entry.get("description") or "")
         rel = _relation(description, old, elaborates=True)
-        if rel is None:
+        if rel is None or (rel[0] == "refines" and _another_fact(description, old)):
             continue
         relation, score = rel
         if best is None or (relation == "restates", score) > (best["relation"] == "restates",
@@ -2135,7 +2357,7 @@ def standing_duplicate_pairs(nodes: dict) -> list[dict]:
             kind, score = rel
             added: list[str] = []
             if kind == "refines":
-                if set(_NUMBER_RE.findall(old_s)) - set(_NUMBER_RE.findall(new_s)):
+                if _another_fact(new_s, old_s):
                     continue
                 if _TIERS.get(str(new.get("confidence") or "").upper(), 0) < \
                         _TIERS.get(str(old.get("confidence") or "").upper(), 0):
@@ -2305,17 +2527,129 @@ def _sibling_review_evidence(log, description: str) -> str:
     return ""
 
 
+def _likely_attribution_evaluation_on() -> bool:
+    from core.attribution_identity import likely_attribution_evaluation_on
+    return likely_attribution_evaluation_on()
+
+
+def _review_call_ids(input_call_ids, linked_call_id) -> list[int]:
+    """The calls an evaluation of a finding reads the rows of: its lineage
+    and its linked call, one list for every evaluation record_finding runs
+    and for the check that judges an evaluation stale."""
+    out: list[int] = []
+    for c in [*(input_call_ids or []), linked_call_id]:
+        try:
+            ci = int(c or 0)
+        except (TypeError, ValueError):
+            continue
+        if ci > 0 and ci not in out:
+            out.append(ci)
+    return out
+
+
+def _is_attribution_verdict(ctx) -> bool:
+    """The attribution contract's two shapes: an account bound to a person,
+    or a person named as the actor of the core act."""
+    try:
+        from tools._gates.named_actor_attribution_grounding import actor_names
+        from tools._gates.principal_attribution_grounding import binds_account_to_person
+        return binds_account_to_person(ctx) or bool(actor_names(ctx))
+    except Exception:  # noqa: BLE001 - no recognition, no evaluation
+        return False
+
+
+def _cut_words(text: object, limit: int) -> str:
+    from core.text_bounds import cut
+    return cut(text, limit)
+
+
+def _confirmed_presence(log, description: str, host: str, analyst_call_ids: list[int],
+                        located_call_ids: list[int], supporting_evidence: str) -> dict | None:
+    """The presence check a CONFIRMED finding passes before its gates run.
+    Both parts read one set, the analyst's own ids (input_call_ids plus
+    linked_call_id, ids not in the trace dropped; no auto-fill or inferred
+    ids: a value borrowed from an uncited call is not the finding's
+    citation). Its citation status over that set is "cited" (a row test
+    sighting, a cited complete search behind an absence, or a quotation of
+    the statement in the cited rows); and every checkable entity, minute
+    time and quotation it states stands in a row of that set. The status over the own set is at most
+    the stored status over the larger set (analyst plus auto-fill): a
+    finding that names only the file its own call read, with the name
+    shown by an uncited call the auto-fill drew on, is "located" here, not
+    "cited". It checks presence, never meaning; the evaluation the
+    CONFIRMED gate requires judges that. A status of "located" never
+    passes, so no finding the located lowering lowered passes here. None
+    when it passes or the row test is off (ATLAS_CITATION_ROWS,
+    ATLAS_LINEAGE_WIRING); else the record of the lowering to LIKELY with
+    the line that names the call to cite for each value."""
+    from tools._gates.citation_support import (
+        _wiring_on, citation_status, shown_values, showing_call)
+    if not _wiring_on():
+        return None
+    from core.forensic_citation import known_case_hosts
+    by = log.index().by_call_id or {}
+    case_dir = log.case_dir()
+    hosts = known_case_hosts(case_dir)
+    tool_calls = [e for e in log._entries if e.get("type") == "tool_call"]
+    own = [by[c] for c in dict.fromkeys(analyst_call_ids) if c in by]
+    status, located, _detail = citation_status(description, own, located_call_ids, host or "",
+                                               tool_calls, hosts=hosts, case_dir=case_dir)
+    check = shown_values(description, own, hosts=hosts, host=host or "", case_dir=case_dir,
+                         tool_calls=tool_calls, supporting_evidence=supporting_evidence or "")
+    if status == "cited" and not check["unshown"] and not check["unsupported"]:
+        return None
+    parts: list[str] = []
+    for value in check["unshown"][:5]:
+        kind, _, text = value.partition(":")
+        if kind == "ts":
+            parts.append(f"{text} (in a row that also holds the finding's values)")
+            continue
+        label = f'"{text}"' if kind == "quote" else text
+        cid = showing_call(value, tool_calls, case_dir=case_dir)
+        parts.append(f"{label}: call {cid} shows it" if cid else
+                     f"{label}: no tool output of this run shows it; leave it out, or read it first")
+    for sentence in check["unsupported"][:2]:
+        parts.append(f"'{_cut_words(sentence, 120)}': cite the complete search that would have shown it")
+    if not parts:
+        parts.append({
+            "located": "the calls you cited show none of its values; "
+                       + (f"call(s) {', '.join(str(c) for c in located[:3])} show them" if located
+                          else "the calls Atlas located show them"),
+            "own_words": "it cites only the run's own words; cite the tool call whose row shows it",
+            "not_checkable": "it names no entity, minute time or quotation a row could show; "
+                             "quote the row text or name its values",
+        }.get(status, "the rows of the calls you cited do not show it"))
+    line = ("Cite the call whose row shows each: " + "; ".join(parts) + ". Recorded at LIKELY: "
+            "CONFIRMED needs every checkable entity, minute time and quotation of the finding in a "
+            "row of the calls it cites.")
+    # A statement of several sentences whose cited rows show some of its
+    # values takes the tier of its least-shown part: a part that is a fact
+    # of its own can be recorded on its own and keep its tier.
+    from tools._gates.universal_from_truncated import split_sentences
+    split = (" A sentence that states a separate fact is a finding of its own: record it with "
+             "the call that shows it, and the facts these rows show can be CONFIRMED on their own."
+             if check["shown"] and len(split_sentences(description)) > 1 else "")
+    # The error is cut to its bound before the split advice, which is kept whole.
+    return {"tier_auto_downgraded_from": "CONFIRMED", "tier_auto_downgraded_to": "LIKELY",
+            "tier_auto_downgrade_reason": "citation_values_not_shown",
+            "tier_auto_downgrade_error": _cut_words(line, 400 - len(split)) + split, "citation": line + split}
+
+
 def _auto_evaluate(description: str, evidence: str,
                    input_call_ids: list[int]) -> dict:
     """Run the adversarial evaluation a CONFIRMED finding needs, on the
     evidence the analyst offered, and say what it returned. The gate then
-    reads the recorded reason_call as it would one the analyst made."""
+    reads the recorded reason_call as it would one the analyst made. A
+    verdict that is not SUPPORTED (CHALLENGED, UNCERTAIN, or none parsed)
+    carries the evaluator's words as ``text``: the reason travels with a
+    verdict that refuses, on every path; a supporting one carries none."""
     note: dict = {"auto": True}
     try:
-        from tools.reasoning import reason_evaluate_finding
-        result = reason_evaluate_finding(
-            finding=description, supporting_evidence=evidence,
-            input_call_ids=list(input_call_ids) or None)
+        from tools.reasoning import auto_evaluation, reason_evaluate_finding
+        with auto_evaluation(description, evidence):
+            result = reason_evaluate_finding(
+                finding=description, supporting_evidence=evidence,
+                input_call_ids=list(input_call_ids) or None)
     except Exception as exc:  # noqa: BLE001
         note["error"] = f"{type(exc).__name__}: {exc}"[:300]
         return note
@@ -2328,10 +2662,25 @@ def _auto_evaluate(description: str, evidence: str,
                   str(result.get("conclusion") or ""), re.IGNORECASE)
     if m:
         note["verdict"] = m.group(1).upper()
+    if note.get("verdict") != "SUPPORTED":
+        # Why it did not support (its contradiction, fact-check and
+        # hallucination sections), read on the raw answer, not its head.
+        from tools.reasoning import challenge_reason
+        text = challenge_reason(str(result.get("conclusion") or ""), note.get("verdict", ""))
+        if text:
+            note["text"] = text
     if not result.get("success"):
         note["error"] = str(result.get("error") or "evaluation did not run")[:300]
     if result.get("guidance"):
         note["guidance"] = str(result["guidance"])[:400]
+    from core.envfile import env_flag
+    if env_flag("ATLAS_EXTERNAL_LOOKUP_FIRST"):
+        # The read that would raise the tier travels with the verdict, on a
+        # refusal and on the recorded finding alike.
+        from tools.reasoning import additional_investigation
+        more = additional_investigation(str(result.get("conclusion") or ""))
+        if more:
+            note["additional_investigation"] = more
     return note
 
 
@@ -2394,12 +2743,12 @@ def _is_tier_strength_failure(failure: dict | None) -> bool:
     # Broad contract may only expose gate=evidence_strength + error text.
     #
     # These substrings must stay narrow to confidence_and_citation. Matching
-    # "evaluate_finding" here silently re-admitted
-    # confirmed_requires_supported_evaluate to the downgrade path even after it
-    # was removed from _AUTO_DOWNGRADE_DETAIL_GATES above: contracts._as_contract
+    # "evaluate_finding" here would silently re-admit
+    # confirmed_requires_supported_evaluate to the downgrade path although it
+    # is not in _AUTO_DOWNGRADE_DETAIL_GATES above: contracts._as_contract
     # rewrites that gate to "evidence_strength" and moves the module name into
     # detail_gate, and both of its refusal messages name reason.evaluate_finding.
-    # Measured — dropping it from the set alone changed nothing at all.
+    # Dropping it from the set alone changes nothing.
     err = str(failure.get("error") or "").lower()
     if failure.get("gate") == "evidence_strength" and (
         "inline citation" in err
@@ -2559,8 +2908,19 @@ def _host_consistency_warning(
         return ""
 
 
+def _window_text(func):
+    """ATLAS_WINDOW_NOTES off at import: the attacker_from sentence leaves
+    the parameter text, so the schema the model reads carries no window note."""
+    from core.incident_window import window_notes_on
+    if not window_notes_on() and func.__doc__:
+        func.__doc__ = re.sub(r'\s+A host or account row may carry\s+"attacker_from":.*?first appears\.', "",
+                              func.__doc__, count=1, flags=re.S)
+    return func
+
+
 @mcp.tool()
 @output_safe
+@_window_text
 def record_finding(
     description: str,
     confidence: str,
@@ -2584,7 +2944,19 @@ def record_finding(
     needs ("no exfiltration from this host, having searched X, Y and Z")
     is a finding.
 
-    confidence: CONFIRMED / LIKELY / SUSPECTED / UNCONFIRMED.
+    description: one fact: an event, the state of an artifact, a link
+        between two artifacts (one finding citing both) or a conclusion with
+        the rows it rests on. Several facts are several findings, also when
+        one output or one quotation shows them all; send them in one turn.
+    confidence: CONFIRMED / LIKELY / SUSPECTED / UNCONFIRMED. CONFIRMED
+        needs linked_call_id and a SUPPORTED reason.evaluate_finding of
+        these exact words, in the same call. A CONFIRMED claim that carries
+        its evidence but no evaluation is evaluated in this call once nothing
+        else objects: a missing linked_call_id is refused and stops that
+        evaluation. Cited rows that do not show every value the claim names,
+        an incomplete citation, and the same CONFIRMED sent again with no
+        evaluation since are recorded one tier lower (LIKELY, then
+        SUSPECTED) and say so.
     source: tool or artifact that produced the finding e.g. 'vol.psscan', 'ez.mftecmd'.
     host: which system the finding belongs to, using the hostname from the case
                     evidence table (e.g. 'WS01', 'DC01'). REQUIRED in practice
@@ -2593,7 +2965,8 @@ def record_finding(
                     per-host reports all group on this field. Omitting it in a
                     multi-host trace returns an advisory warning.
     linked_call_id: the _atlas_call_id value from the tool result that produced this
-                    finding — enables judges to trace any finding back to its source
+                    finding (REQUIRED for CONFIRMED: a tool call, not an
+                    evaluation's call id) — enables judges to trace any finding back to its source
                     tool execution in the audit log.
     supporting_evidence: RECOMMENDED for CONFIRMED/LIKELY. When supplied, the
                     confidence_and_citation gate runs a DETERMINISTIC citation
@@ -2619,7 +2992,10 @@ def record_finding(
                     accounts, tools run), victim for the owner's own systems
                     and accounts the activity touched, subject for the person
                     under investigation and what is theirs, third_party for
-                    anyone else. The person the brief names as Subject and
+                    anyone else, undetermined when the evidence shows the
+                    value but not whose it is (the row is listed with its
+                    sighting and no use until a later row states the side).
+                    The person the brief names as Subject and
                     what is theirs (accounts, devices, mailboxes, tools) are
                     subject in every frame, an insider on the owner's system
                     included; a row stated attacker whose value is one of
@@ -2630,12 +3006,18 @@ def record_finding(
                     on a subject's device, the subject's accounts, devices,
                     credentials, contacts and cloud resources: the indicator
                     list (block, hunt, scope and request items) is built
-                    from these rows, not from the prose. Every value must
-                    appear in the output a cited evidence call printed
-                    (linked_call_id / input_call_ids; reasoning and claim
-                    calls are the analyst's own words); a value they do not
-                    show is dropped and named in
-                    `indicators_dropped`, the finding still records. A value
+                    from these rows, not from the prose. Every value needs
+                    a sighting: a tool output of this case that read
+                    evidence and shows the value in a row, the cited calls
+                    first, then any other call. A kept row comes back with
+                    where it was seen (call, host, first and last time). A
+                    value no such output shows, such as one only the brief,
+                    the threat context, a finding or a file this run wrote
+                    names, is dropped and named in `indicators_dropped`; the
+                    finding still records. A host or account row may carry
+                    "attacker_from": when the attacker first acted on this
+                    host or with this account (the time of that first row),
+                    not when the value first appears. A value
                     that is one of the case's own assets is listed as such
                     whatever side is stated (`indicators_resided`). Rows can
                     be added to a recorded claim later with
@@ -2683,11 +3065,13 @@ def record_finding(
       - `lineage_required`: findings must cite upstream trace call IDs, either
         explicitly or via the auto-inferred recent-input path.
       - `lineage_relevance`: the cited calls must be about the artifacts the
-        finding names. Explicit ids that name other artifacts are replaced by
-        the trace's calls about the named ones when it has any (stamped
-        lineage_repaired / irrelevant_input_call_ids, reported in
-        `lineage_note`); the gate refuses only when nothing in the trace is
-        about them.
+        finding names. Your ids stay as cited; when none of them shows the
+        finding by its rows, Atlas records the calls of the trace that do
+        beside them as located (result `lineage`, trace and claim
+        `located_call_ids`, `citation_status`), and the report labels those
+        records "located by Atlas". A finding no call shows keeps its tier
+        and is listed under Evidence Gaps (result `citation`). The gate
+        refuses only when nothing in the trace is about the named artifacts.
       - duplicate guard (not a gate): the same statement, or a restatement
         adding no entity or number, is folded into the recorded finding (the
         result says when a higher tier or techniques were not applied) -
@@ -2697,8 +3081,8 @@ def record_finding(
         and named (`restates_call_id`). That re-record is a citation
         repair: recorded (`repairs_call_id`), the earlier claim superseded by
         the new one (`superseded_claim_id`), `tested_hypothesis_id` carried
-        over when omitted. It is what the report gate's citation blocker asks
-        for, and the only way a finding's citations can change.
+        over when omitted. It is the only way a finding's citations can
+        change; the report does not block on a citation, it discloses it.
       - `instruction_text_grounding`: a cited call's output carried text
         addressed to an analyst, overriding instructions, or dictating a
         verdict (trace field instruction_like_text) and the finding is not
@@ -2707,8 +3091,9 @@ def record_finding(
       - `evidence_strength`: confidence tier, linked evidence, ATT&CK IDs,
         SUPPORTED evaluation for CONFIRMED findings, citation support for
         CONFIRMED/LIKELY findings, and required hypothesis review.
-        When the request fails only because the tier is too strong (missing
-        SUPPORTED evaluate / incomplete citation), Atlas auto-downgrades to
+        When the request fails only because the tier is too strong (an
+        incomplete citation, or the same CONFIRMED sent again with no
+        evaluation since), Atlas auto-downgrades to
         LIKELY then SUSPECTED and still records (metadata
         ``tier_auto_downgraded_from``). Disable with
         ``ATLAS_FINDING_AUTO_DOWNGRADE=0``.
@@ -2740,16 +3125,18 @@ def record_finding(
         except (TypeError, ValueError):
             continue
 
-    # R4/R5: lineage must be real trace foreign keys. Omit → infer (R4).
-    # Explicit fabricated / unknown cids → drop + infer remainder (R5) — do NOT
+    # Lineage must be real trace foreign keys. Omit → infer.
+    # Explicit fabricated / unknown cids → drop + infer remainder — do NOT
     # let bad explicit ids defeat inference.
     input_call_ids, linked_call_id, lineage_meta = _repair_lineage_ids(
         log,
         input_call_ids=list(input_call_ids) if input_call_ids else None,
         linked_call_id=int(linked_call_id or 0),
         description=description,
+        host=host or "",
     )
     lineage_inferred = bool(lineage_meta.get("lineage_inferred"))
+    located_call_ids: list[int] = [int(c) for c in (lineage_meta.get("located_call_ids") or [])]
 
     # Citation auto-repair: pull concrete claim values from linked tool
     # outputs into supporting_evidence when they are missing. Stops the
@@ -2766,9 +3153,28 @@ def record_finding(
     # calls, and the evidence line now names this one.
     if _filled_cids:
         input_call_ids = list(dict.fromkeys(list(input_call_ids or []) + _filled_cids))
+        # The calls the auto-fill added are Atlas's, recorded as located too.
+        located_call_ids = list(dict.fromkeys(located_call_ids + [
+            int(c) for c in _filled_cids if int(c) not in analyst_call_ids]))
+
+    # A CONFIRMED finding whose cited rows do not show every checkable
+    # entity, minute time and quotation it states is recorded at LIKELY
+    # before any gate runs: no evaluation is spent on it, no refusal turn.
+    _presence: dict | None = None
+    if (confidence or "").strip().upper() == "CONFIRMED":
+        try:
+            _presence = _confirmed_presence(log, description, host or "", analyst_call_ids,
+                                            located_call_ids, supporting_evidence or "")
+        except Exception as _exc:  # noqa: BLE001 - unchecked is never CONFIRMED
+            _presence = {"tier_auto_downgraded_from": "CONFIRMED", "tier_auto_downgraded_to": "LIKELY",
+                         "tier_auto_downgrade_reason": "citation_presence_unchecked",
+                         "tier_auto_downgrade_error": f"{type(_exc).__name__}: {_exc}"[:400]}
+        if _presence is not None:
+            confidence = "LIKELY"
 
     requested_confidence = (confidence or "").strip()
-    tier_downgrade: dict | None = None
+    tier_downgrade: dict | None = (
+        {k: v for k, v in _presence.items() if k != "citation"} if _presence else None)
 
     def _run_at_tier(tier: str):
         ctx_local = GateContext(
@@ -2792,6 +3198,7 @@ def record_finding(
             mitre_techniques=list(mitre_techniques) if mitre_techniques else [],
             lineage_inferred=lineage_inferred,
             analyst_call_ids=list(dict.fromkeys(analyst_call_ids)),
+            located_call_ids=list(located_call_ids),
             host=host or "",
             supersedes=str(supersedes or ""),
         )
@@ -2815,20 +3222,26 @@ def record_finding(
     # here (inline, or already offered to a sibling reviewer) and no
     # evaluation exists, the review is run now on that evidence and the
     # gates re-read. The bar is unchanged: only a SUPPORTED verdict passes,
-    # a CHALLENGED one refuses with the verdict as before. What changes is
-    # that the honest path no longer costs a turn the downgrade does not.
+    # a CHALLENGED one refuses with the verdict. The honest path costs no
+    # extra turn that a downgrade would not.
     # Disable with ATLAS_FINDING_AUTO_EVALUATE=0.
     evaluation: dict | None = None
     if (
         failures
         and _finding_auto_evaluate_enabled()
         and any(f.get("missing_check") == "reason_evaluate_finding" for f in failures)
+        # Only when the evaluation is the sole objection: a finding a
+        # deterministic check refuses stays refused whatever the verdict,
+        # so it costs no evaluator call.
+        and all(f.get("missing_check") == "reason_evaluate_finding"
+                or f.get("detail_gate") in (None, "", "confirmed_requires_supported_evaluate")
+                and "evaluate_finding" in str(f.get("error") or "") for f in failures)
     ):
         evidence_text = (supporting_evidence or "").strip() or _sibling_review_evidence(
             log, description)
         if evidence_text:
             evaluation = _auto_evaluate(description, evidence_text,
-                                        list(input_call_ids) if input_call_ids else [])
+                                        _review_call_ids(input_call_ids, linked_call_id))
             ctx, failures = _run_at_tier(requested_confidence)
             failure = failures[0] if failures else None
 
@@ -2871,7 +3284,7 @@ def record_finding(
             if failure is None:
                 confidence = next_tier
                 tier_downgrade = {
-                    "tier_auto_downgraded_from": (requested_confidence or "").upper(),
+                    "tier_auto_downgraded_from": "CONFIRMED" if _presence else (requested_confidence or "").upper(),
                     "tier_auto_downgraded_to": next_tier,
                     "tier_auto_downgrade_reason": str(
                         original_failure.get("detail_gate")
@@ -2883,10 +3296,62 @@ def record_finding(
                 }
                 break
 
+    # A LIKELY verdict that binds an act or an account to a person gets the
+    # adversarial evaluation a CONFIRMED finding gets: its prompt asks for
+    # the alternative explanations and the second principal. A CHALLENGED
+    # verdict lowers the finding to SUSPECTED with the evaluator's words and
+    # never refuses (a refusal loop costs a small model its run); a
+    # SUPPORTED one stands behind the finding as its evaluation.
+    if (failure is None and evaluation is None
+            and (confidence or "").strip().upper() == "LIKELY"
+            and not ctx.gated_by_evaluate_call_id
+            and _likely_attribution_evaluation_on()
+            and _is_attribution_verdict(ctx)):
+        # The evaluator reads the cited calls' rows itself
+        # (reason_evaluate_finding); the analyst's text rides beside them.
+        evaluation = _auto_evaluate(
+            description,
+            (supporting_evidence or "").strip() or _sibling_review_evidence(log, description),
+            _review_call_ids(input_call_ids, linked_call_id))
+        verdict = evaluation.get("verdict")
+        if verdict == "SUPPORTED" and evaluation.get("call_id"):
+            ctx.gated_by_evaluate_call_id = evaluation["call_id"]
+        elif verdict == "CHALLENGED":
+            # Lowered whatever a SUSPECTED-only objection says: the finding
+            # passed every gate at LIKELY, a lower tier claims less, and a
+            # challenged verdict must not stand at LIKELY unmarked. Such an
+            # objection rides on the downgrade record.
+            _ctx_s, _fail_s = _run_at_tier("SUSPECTED")
+            if not _fail_s:
+                ctx = _ctx_s
+            confidence = "SUSPECTED"
+            tier_downgrade = {
+                "tier_auto_downgraded_from": "CONFIRMED" if _presence else "LIKELY",
+                "tier_auto_downgraded_to": "SUSPECTED",
+                "tier_auto_downgrade_reason": "attribution_evaluation_challenged",
+                "tier_auto_downgrade_error": _cut_words(
+                    evaluation.get("text") or "the adversarial evaluation challenged it", 400),
+            }
+            if _fail_s:
+                tier_downgrade["tier_auto_downgrade_objection"] = (
+                    f"[{_fail_s[0].get('detail_gate') or _fail_s[0].get('gate')}] "
+                    + str(_fail_s[0].get("error") or ""))[:400]
+
     if failure is not None:
         failure = dict(failure)
         if evaluation is not None:
             failure["evaluation"] = evaluation
+        if _presence:
+            # Asked CONFIRMED, judged at LIKELY: the refusal says why.
+            failure["tier_auto_downgraded_from"] = "CONFIRMED"
+            failure["citation"] = _presence.get("citation") or _presence["tier_auto_downgrade_error"]
+        # What each gate that named no sentence asks for, kept beside the
+        # objected sentences: the finish's own deferral of this refused finding
+        # quotes both (core.work_order.refused_deferral).
+        failure["gate_steps"] = [
+            {"gate": str(f.get("detail_gate") or f.get("gate") or ""),
+             "step": " ".join(str(f.get("error") or "").split())[:600]}
+            for f in failures if not f.get("objected_sentences")][:8]
         # Every further objection rides on the refusal: the first gate's
         # error is the headline, the rest are listed so one edit fixes all.
         if len(failures) > 1:
@@ -2895,11 +3360,21 @@ def record_finding(
                        "error": str(f.get("error") or "")[:600]}
                       for f in failures[1:]]
             failure["also_refused_by"] = others
+            objected = [s for f in failures for s in f.get("objected_sentences") or []]
+            if objected:
+                failure["objected_sentences"] = list(dict.fromkeys(objected))
             failure["error"] = (
                 str(failure.get("error") or "")
                 + f" ALSO REFUSED BY {len(others)} MORE GATE(S) - address every "
                 "objection in one re-record: "
-                + " | ".join(f"[{o['detail_gate']}] {o['error'][:400]}" for o in others)
+                # The evaluate gate's entry is cut at its last sentence end
+                # (the one cut rule): a review it names comes after its whole
+                # repair sentence and drops out whole. Every other gate keeps
+                # its first 400 characters, where its repair instruction is.
+                + " | ".join(f"[{o['detail_gate']}] "
+                             + (_cut_words(o['error'], 400)
+                                if o['detail_gate'] == "confirmed_requires_supported_evaluate"
+                                else o['error'][:400]) for o in others)
             )
         # Structured repair hint for citation / evidence_strength refuses
         detail = str(failure.get("error") or failure.get("detail") or "")
@@ -3022,10 +3497,41 @@ def record_finding(
         _inherited_hypothesis = str(_carried.get("tested_hypothesis_id") or "")
         tested_hypothesis_id = _inherited_hypothesis
 
+    # The finding's citation status (tools._gates.citation_support
+    # .citation_status), computed once over the trace so far and stored on
+    # the trace entry and the claim node: cited, located, not_shown,
+    # not_checkable or own_words. A CONFIRMED finding whose analyst-cited
+    # calls do not show it was recorded at LIKELY before its gates
+    # (_confirmed_presence: a "located" status never passes it).
+    _citation_status = ""
+    _citation_detail = ""
+    try:
+        from tools._gates.citation_support import _wiring_on as _wiring
+        if _wiring():
+            from core.forensic_citation import known_case_hosts
+            from tools._gates.citation_support import citation_status as _cstatus
+            _by = log.index().by_call_id or {}
+            _cited_now = [_by[c] for c in dict.fromkeys(
+                [*analyst_call_ids, *(_filled_cids or [])]) if c in _by]
+            _tool_calls = [e for e in log._entries if e.get("type") == "tool_call"]
+            _citation_status, _located_now, _citation_detail = _cstatus(
+                description, _cited_now, located_call_ids, host or "", _tool_calls,
+                hosts=known_case_hosts(log.case_dir()), case_dir=log.case_dir())
+            if _citation_status == "located":
+                located_call_ids = list(dict.fromkeys(located_call_ids + list(_located_now)))
+    except Exception:  # noqa: BLE001 - the finding stands without its status
+        _citation_status = ""
+
     # Carry every gate-matched call_id onto the finding entry as an explicit
     # foreign key. The Process view, accuracy report, and synthesize all use
     # these directly instead of inferring links from user_message substrings.
     gate_metadata = {}
+    if located_call_ids:
+        gate_metadata["located_call_ids"] = list(located_call_ids)
+    if _citation_status:
+        gate_metadata["citation_status"] = _citation_status
+    if _citation_detail:
+        gate_metadata["citation_detail"] = _citation_detail
     if _near is not None:
         gate_metadata["refines_call_id" if _near["relation"] == "refines"
                       else "restates_call_id"] = _near["call_id"]
@@ -3051,6 +3557,8 @@ def record_finding(
     if ctx.notes.get("instruction_like_text"):
         gate_metadata["instruction_like_text_in_lineage"] = (
             ctx.notes["instruction_like_text"])
+    if ctx.notes.get("mitre_unchecked"):
+        gate_metadata["mitre_unchecked"] = ctx.notes["mitre_unchecked"]
     if lineage_inferred:
         gate_metadata["lineage_inferred"] = True
     if lineage_meta.get("lineage_repaired"):
@@ -3121,13 +3629,24 @@ def record_finding(
             _icd = _rcd(None)
             _cited = ([int(linked_call_id)] if linked_call_id else []) + [
                 int(c) for c in (input_call_ids or []) if c]
-            _iv = validate(indicators, call_ids=_cited, case_dir=_icd, frame=frame_for(_icd))
+            _iv = validate(indicators, call_ids=_cited, case_dir=_icd, frame=frame_for(_icd),
+                           host=str(host or ""))
             _typed_rows = _iv["kept"]
             _dropped_rows = _iv["dropped"]
             if _typed_rows:
+                from core.indicators import seen_text, shared_mark
+                from core.shared_infrastructure import mark_text
+
+                def _marked(r):
+                    # A published shared edge, vendor service or popular
+                    # name (core.shared_infrastructure): what the row is.
+                    m = mark_text(shared_mark(str(r.get("type") or ""), str(r.get("value") or "")))
+                    return {"mark": m} if m else {}
                 result["indicators_kept"] = [
-                    {k: v for k, v in r.items() if k in ("type", "value", "side", "first_seen", "last_seen",
-                                                         "first_seen_note", "last_seen_note", "note")}
+                    {**{k: v for k, v in r.items() if k in ("type", "value", "side", "first_seen", "last_seen",
+                                                            "first_seen_note", "last_seen_note", "note",
+                                                            "attacker_from", "attacker_from_note")},
+                     **({"seen": seen_text(r)} if r.get("sightings") else {}), **_marked(r)}
                     for r in _typed_rows]
             if _iv["dropped"]:
                 result["indicators_dropped"] = _iv["dropped"]
@@ -3145,14 +3664,31 @@ def record_finding(
             f"{lineage_meta.get('irrelevant_input_call_ids')} were about other "
             f"artifacts than this finding names; replaced by {input_call_ids}, "
             "the calls in the trace that read or produced them")
-    _volume = _finding_volume_advisory(log)
-    if _volume:
-        result["volume_advisory"] = _volume
-    _cite = _citation_relevance_advisory(description, input_call_ids, linked_call_id, log,
-                                         supporting_evidence=supporting_evidence or "")
-    if _cite is not None:
-        result["citation_advisory"] = _cite["advisory"]
-        result["cite_suggested_call_ids"] = _cite["suggested_call_ids"]
+    if _citation_status:
+        if _citation_status == "located":
+            result["lineage"] = {
+                "cited": list(dict.fromkeys(analyst_call_ids)),
+                "located_by_atlas": list(located_call_ids),
+                "note": (f"call(s) {', '.join(str(c) for c in located_call_ids)} show what this finding "
+                         "names; recorded beside your citation as located by Atlas. Nothing to do."),
+            }
+        elif _citation_status == "not_shown" and _citation_detail.startswith("a hash bound to a file"):
+            result["citation"] = (
+                f"{_citation_detail}; the report states that. Cite the call whose row shows each file "
+                "with its hash, or leave the pairing out.")
+        elif _citation_status == "not_shown" and not _is_absence_statement(description):
+            result["citation"] = _not_shown_line(log, description, host or "")
+    if _presence and _presence.get("citation"):
+        result["citation"] = _presence["citation"]
+    from tools._gates.citation_support import is_absence_claim as _is_absence
+    # A flagged statement the rows already settled (cited or located) needs
+    # no advice to re-record; one they did not is pointed at its search.
+    if not _citation_status or (_is_absence(description) and _citation_status not in ("cited", "located")):
+        _cite = _citation_relevance_advisory(description, input_call_ids, linked_call_id, log,
+                                             supporting_evidence=supporting_evidence or "")
+        if _cite is not None:
+            result["citation_advisory"] = _cite["advisory"]
+            result["cite_suggested_call_ids"] = _cite["suggested_call_ids"]
     if _near is not None and _near["relation"] == "elaborates":
         result["restates_call_id"] = _near["call_id"]
         result["restatement"] = (
@@ -3191,6 +3727,9 @@ def record_finding(
             "tier_auto_downgraded_from"]
         result["tier_auto_downgraded_to"] = tier_downgrade[
             "tier_auto_downgraded_to"]
+        result["tier_auto_downgrade_reason"] = tier_downgrade["tier_auto_downgrade_reason"]
+        if tier_downgrade.get("tier_auto_downgrade_objection"):
+            result["tier_auto_downgrade_objection"] = tier_downgrade["tier_auto_downgrade_objection"]
         result["note"] = (
             f"Recorded as {tier_downgrade['tier_auto_downgraded_to']} "
             f"(requested {tier_downgrade['tier_auto_downgraded_from']}) — "
@@ -3202,6 +3741,7 @@ def record_finding(
         result["host_consistency_warning"] = _host_warning
     # Investigation Claim Graph mirror (fail-open): epistemic state lives in
     # <case>/.atlas/claim_graph.json; process audit remains the execution trace.
+    _cg = None
     try:
         from core.claim_graph import mirror_finding_fail_open
         _cg = mirror_finding_fail_open(
@@ -3216,13 +3756,16 @@ def record_finding(
             fresh=_repairs is not None or _replaces is not None,
             indicators=_typed_rows or None,
             indicators_dropped=_dropped_rows or None,
+            located_call_ids=list(located_call_ids) if (located_call_ids or _citation_status) else None,
+            analyst_call_ids=list(dict.fromkeys(analyst_call_ids)) if _citation_status else None,
+            citation_status=_citation_status,
         )
         if _cg and _cg.get("skipped"):
             # Distinct from "no active case" (mirror_finding_fail_open
             # returns bare None for that expected no-op) — this is the
-            # claim-graph write itself failing, which previously vanished
-            # entirely: the trace would show this finding but the
-            # dashboard's claim-graph beliefs would silently never get it.
+            # claim-graph write itself failing, which must not vanish
+            # silently: the trace would show this finding but the
+            # dashboard's claim-graph beliefs would never get it.
             result["claim_mirror_skipped"] = True
             result["claim_mirror_skip_reason"] = _cg.get("reason") or ""
         elif _cg and _cg.get("claim_id"):
@@ -3281,7 +3824,7 @@ def record_finding(
                         break
             except Exception:
                 pass
-            # Auto-link claim → matching investigation tasks (B3). Fail-open.
+            # Auto-link claim → matching investigation tasks. Fail-open.
             try:
                 from core.claim_graph import resolve_case_dir
                 from core.investigation_tasks import link_claim_to_tasks
@@ -3334,6 +3877,13 @@ def record_finding(
         )
     if ctx.validated_techniques:
         result["validated_techniques"] = ctx.validated_techniques
+    if ctx.notes.get("export_profile_advisory"):
+        result["export_profile_advisory"] = (str(ctx.notes["export_profile_advisory"])
+                                             + " Advisory only; the finding is recorded.")
+    if ctx.notes.get("mitre_unchecked"):
+        result["mitre_unchecked"] = (
+            f"Technique ID(s) {', '.join(ctx.notes['mitre_unchecked'])} were not checked: the local ATT&CK table "
+            "is missing or empty (ATLAS_MITRE_TABLE). The finding is recorded with them unverified.")
     if ctx.notes.get("instruction_like_text"):
         result["instruction_text_warning"] = (
             "A cited tool output carries text addressed to an analyst or "
@@ -3347,6 +3897,27 @@ def record_finding(
             k: v for k, v in gate_metadata.items()
             if k.startswith("gated_by_")
         }
+    try:
+        from core.claim_graph import resolve_case_dir as _wcd
+        from core.incident_window import claim_is_new, note_after_record
+        _wdir = _wcd(None)
+        _note = note_after_record(_wdir, result, description, str(host or ""),
+                                  created=claim_is_new(_wdir, result, _cg, finding_call_id))
+        if _note:
+            # A disclosure, never a refusal: the record and its tier stand.
+            result["window_note"] = _note
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        # The incident map follows the claim graph (outside its lock): the
+        # belief just recorded reaches the map's entities, labels and feed.
+        from core import incident_map
+        _map_notes = incident_map.record_notes(_wdir)
+        if _map_notes:
+            # Disclosures, never refusals: the record and its tier stand.
+            result["map_notes"] = _map_notes
+    except Exception:  # noqa: BLE001
+        pass
     return result
 
 
@@ -3596,6 +4167,11 @@ def current_investigation_state(
     return build_current_investigation_state(cd, compact=compact)
 
 
+def _parts_flat_on() -> bool:
+    from core.envfile import env_flag
+    return env_flag("ATLAS_PARTS_FLAT_ARGS", True)
+
+
 @mcp.tool()
 def update_investigation_task(
     task_id: str,
@@ -3603,37 +4179,40 @@ def update_investigation_task(
     related_claim_ids: list[str] | None = None,
     case_dir: str = "",
     parts: dict | str | None = None,
+    part: str = "",
+    part_claim_ids: list[str] | None = None,
+    limitation_basis: Literal["source_absent", "examined", "unreadable", "out_of_scope"] | None = None,
+    limitation_reason: str = "",
+    limitation_call_ids: list[int] | None = None,
 ) -> dict:
-    """Update an investigation task status, linked claim ids and/or parts.
+    """Update an investigation task: its status, the beliefs that answer it,
+    and its parts (the things a request lists, each with the kind of value it
+    asks for). A part is answered by a linked belief whose statement carries
+    a value of that kind in the clause naming it; the linked beliefs are
+    tested automatically, and the task's status follows its parts:
+    ``answered`` is refused while a part is open (the response lists the open
+    parts and the kind each needs). CASE.md is the investigator inbox; the
+    lifecycle lives in ``.atlas/investigation_tasks.json``. Call as work
+    progresses; do not paste findings into CASE.md. Best practice: promote
+    the belief that states the answer with ``claim.promote_conclusion``
+    first, then link it here.
 
-    CASE.md is the investigator inbox; task lifecycle lives in
-    ``.atlas/investigation_tasks.json``. Valid statuses: open, in_progress,
-    partial, answered, blocked_missing_evidence, reopened, dropped.
-
-    ``answered`` and ``partial`` REQUIRE ``related_claim_ids``: the current
-    claim / conclusion ids whose statements answer the question. The
-    answer shown to the analyst is derived from exactly those beliefs, so a
-    status change without them is refused (gate ``task_answer_unsupported``;
-    the response lists candidate ids). Best practice: promote the belief
-    that states the answer with ``claim.promote_conclusion`` first, then
-    link it here.
-
-    A request has parts (the things it lists: an install date, a timezone,
-    the accounts, ...), each with the kind of value it asks for. A part is
-    answered by a linked belief whose statement carries a value of that
-    kind in the clause naming the part; the linked beliefs are tested
-    automatically. ``parts`` names what the test cannot: ``{"p3":
-    {"claim_ids": ["C0012"]}}`` for a part answered by a stated relation or
-    a belief that speaks to it, or ``{"p2": {"limitation": {"basis":
-    "source_absent" | "examined" | "unreadable" | "out_of_scope", "reason": "...",
-    "call_ids": [412]}}}`` when a part cannot be answered: ``source_absent`` means the source is not in the evidence and is refused
-    for a source the case holds; ``examined`` means the source was read and
-    holds no answer (cite the successful read); ``unreadable`` the failed read;
-    ``out_of_scope`` the brief's exclusion. The task's
-    status follows its parts: ``answered`` is refused while a part is open
-    (the response lists the open parts and the kind each needs).
-
-    Call as work progresses — do not paste findings into CASE.md.
+    status: open, in_progress, partial, answered, blocked_missing_evidence,
+        reopened or dropped. ``answered`` and ``partial`` need
+        related_claim_ids (gate ``task_answer_unsupported`` lists candidates).
+    related_claim_ids: the current claim or conclusion ids whose statements
+        answer the question; the answer shown is derived from exactly these.
+    part: one part, by its id (p3) or its text.
+    part_claim_ids: the beliefs that answer that part.
+    limitation_basis: why that part cannot be answered: source_absent (the
+        source is not in the evidence; refused for a source the case holds),
+        examined (the source was read and holds no answer: cite the read),
+        unreadable (cite the failed read), out_of_scope (the brief excludes it).
+    limitation_reason: the reason in words.
+    limitation_call_ids: the calls the limitation rests on.
+    parts: several parts in one call, ``{"p3": {"claim_ids": ["C0012"]}}``
+        or ``{"p2": {"limitation": {"basis": "examined", "reason": "...",
+        "call_ids": [412]}}}``; not together with part=.
     """
     from core.claim_graph import resolve_case_dir
     from core.investigation_tasks import TASK_STATUSES, update_task
@@ -3660,6 +4239,27 @@ def update_investigation_task(
         kwargs["status"] = status
     if related_claim_ids is not None:
         kwargs["related_claim_ids"] = related_claim_ids
+    flat = bool(part or part_claim_ids or limitation_basis or limitation_reason or limitation_call_ids)
+    if flat and not _parts_flat_on():
+        return {"success": False, "gate": "task_part_args",
+                "error": "the one-part parameters (part=, part_claim_ids=, limitation_*) are off in this run: "
+                         "pass parts={\"<part>\": {\"claim_ids\": [...]}} or {\"limitation\": {...}}"}
+    if flat and _parts_flat_on():
+        # The flat form for one part (ATLAS_PARTS_FLAT_ARGS), translated into
+        # the parts object; the object stays for several parts in one call.
+        if parts:
+            return {"success": False, "gate": "task_part_args",
+                    "error": "pass either parts= for several parts or part=/limitation_basis= for one, not both"}
+        if not str(part or "").strip():
+            return {"success": False, "gate": "task_part_args",
+                    "error": "part= names the part (its id such as p2, or its text)"}
+        entry: dict = {}
+        if part_claim_ids:
+            entry["claim_ids"] = list(part_claim_ids)
+        if limitation_basis or limitation_reason or limitation_call_ids:
+            entry["limitation"] = {"basis": limitation_basis or "", "reason": limitation_reason or "",
+                                   "call_ids": list(limitation_call_ids or [])}
+        parts = {str(part).strip(): entry}
     if isinstance(parts, str) and parts.strip():
         # The object sent as its JSON text: read it.
         import json as _json
@@ -4300,6 +4900,76 @@ def record_agent_message(
 _ATLAS_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+def _archive_run_outputs(case_dir: str) -> tuple[str, list[str], str]:
+    """Move what a fresh start must not lose to .atlas/run_history/trace-<stamp>/:
+    the entries of reports/ (the delivered report, its renders and the
+    immutable rerun snapshots) into its reports/, the snapshot index that
+    lists them, and the trace and transcripts in analysis/, the audit trail
+    of what was done and why.
+
+    The reports/ directory itself stays where it is, with its mode, group,
+    ACL, or its link to another disk: only what it holds moves. All or
+    nothing: each move is recorded, and on the first failure the recorded
+    ones are moved back in reverse order and the error is returned, so the
+    case is left as it was and the caller deletes nothing. On one filesystem
+    a move is a rename (shutil.move copies only across filesystems, and
+    removes its source only after a whole copy). reports/latest is a relative
+    link (core.report_snapshots), so it still names its snapshot inside the
+    archive. Returns (archive dir or "", moved paths, error)."""
+    import glob
+    import shutil
+    from datetime import datetime, timezone
+    reports = os.path.join(case_dir, "reports")
+    index = os.path.join(case_dir, ".atlas", "report_snapshots_index.json")
+    traces = sorted(
+        p for p in glob.glob(os.path.join(case_dir, "analysis", "*"))
+        if os.path.isfile(p) and (
+            os.path.basename(p).lower().startswith(("agent_transcript_", "chat_transcript_"))
+            or os.path.basename(p).lower().endswith(("_trace.json", "_trace.jsonl"))))
+    try:
+        entries = sorted(os.listdir(reports)) if os.path.isdir(reports) else []
+    except OSError as e:
+        return "", [], f"cannot list {reports}: {e}"
+    if not (entries or traces or os.path.isfile(index)):
+        return "", [], ""
+    history = os.path.join(case_dir, ".atlas", "run_history")
+    history_was_there = os.path.isdir(history)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    archive, n = os.path.join(history, f"trace-{stamp}"), 2
+    while os.path.lexists(archive):         # a second clear in the same second
+        archive, n = os.path.join(history, f"trace-{stamp}-{n}"), n + 1
+    plan = [(os.path.join(reports, e), os.path.join(archive, "reports", e)) for e in entries]
+    if os.path.isfile(index):
+        plan.append((index, os.path.join(archive, os.path.basename(index))))
+    plan += [(p, os.path.join(archive, os.path.basename(p))) for p in traces]
+    moved: list[tuple[str, str]] = []
+    try:
+        os.makedirs(os.path.join(archive, "reports") if entries else archive)
+        for src, dst in plan:
+            shutil.move(src, dst)
+            moved.append((src, dst))
+    except OSError as e:
+        stuck = []
+        for src, dst in reversed(moved):
+            try:
+                shutil.move(dst, src)
+            except OSError as back:
+                stuck.append(f"{dst} ({back})")
+        made = [os.path.join(archive, "reports"), archive]
+        if not history_was_there:
+            made.append(history)
+        for d in made:
+            try:
+                os.rmdir(d)                 # only when nothing is left in it
+            except OSError:
+                pass
+        error = f"moving the previous run's outputs to {archive} failed: {e}"
+        if stuck:
+            error += "; not moved back: " + ", ".join(stuck)
+        return archive, [], error
+    return archive, [src for src, _ in moved], ""
+
+
 @mcp.tool()
 @output_safe
 def clear_case_run(case_dir: str, clear_memory: bool = True) -> dict:
@@ -4383,23 +5053,24 @@ def clear_case_run(case_dir: str, clear_memory: bool = True) -> dict:
             "mounts_remaining": mount_result["remaining"],
         }
 
-    # The previous run's trace and transcript, and any chat about the case,
-    # are the audit trail of what was done and why; they are moved under
-    # run_history, never deleted.
-    from datetime import datetime, timezone
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    archive = os.path.join(case_dir, ".atlas", "run_history", f"trace-{stamp}")
-    for item in glob.glob(os.path.join(case_dir, "analysis", "*")):
-        base = os.path.basename(item).lower()
-        if os.path.isfile(item) and (
-                base.startswith(("agent_transcript_", "chat_transcript_"))
-                or base.endswith(("_trace.json", "_trace.jsonl"))):
-            try:
-                os.makedirs(archive, exist_ok=True)
-                shutil.move(item, os.path.join(archive, os.path.basename(item)))
-                cleared.append(item)
-            except OSError as e:
-                errors.append(str(e))
+    # What the previous run delivered and how it got there is moved under
+    # run_history before anything is deleted; a move that fails ends the
+    # clear with nothing deleted. analysis/ and exports/ are derived from the
+    # evidence and go below.
+    archive, moved, archive_error = _archive_run_outputs(case_dir)
+    if archive_error:
+        return {
+            "success": False,
+            "cleared_count": 0,
+            "cleared": [],
+            "errors": [f"Refusing to clear: {archive_error}"],
+            "archive": archive,
+            "archived": moved,
+            "memory_cleared": False,
+            "memory_skipped_reason": "",
+            "unmounted": mount_result["unmounted"],
+        }
+    cleared.extend(moved)
     for subdir in ("analysis", "exports", "reports"):
         target = os.path.join(case_dir, subdir)
         for item in glob.glob(os.path.join(target, "*")):
@@ -4440,6 +5111,13 @@ def clear_case_run(case_dir: str, clear_memory: bool = True) -> dict:
         "run_status.json",
         # The question the cleared run was given (core.run_state).
         "run_objective.json",
+        # The frontier's feed cursor and dismissed items (agent.frontier);
+        # the incident map itself is kept, like the claim graph.
+        "frontier_state.json",
+        # What a stopped run left for its report (core.investigation_exit).
+        "stop_record.json",
+        # Foreground-call marks a killed run left (core.memory_batch).
+        "busy",
     ):
         target = os.path.join(case_dir, ".atlas", run_scoped)
         try:
@@ -4466,6 +5144,17 @@ def clear_case_run(case_dir: str, clear_memory: bool = True) -> dict:
                 f"reset to unseen)")
     except Exception as e:
         errors.append(f"coverage ledger reset: {e}")
+
+    # The contents index's copies and partial views cite the trace this
+    # clear archived; the listing itself stands (an image whose listing
+    # call is not in the next trace is listed again at intake).
+    try:
+        from core.contents_index import reset_run_scoped
+        n_idx = reset_run_scoped(case_dir)
+        if n_idx:
+            cleared.append(f".atlas/contents_index.db ({n_idx} copy and partial-view row(s))")
+    except Exception as e:  # noqa: BLE001
+        errors.append(f"contents index reset: {e}")
 
     # Access stage: analysis/ wipe orphans export_raw mount_plan rows —
     # demote/drop so tasks/runtime cannot believe media is still staged.
@@ -4525,6 +5214,7 @@ def clear_case_run(case_dir: str, clear_memory: bool = True) -> dict:
         "cleared_count": len(cleared),
         "cleared": cleared,
         "errors": errors,
+        "archive": archive,
         "memory_cleared": memory_cleared,
         "memory_skipped_reason": memory_skipped_reason,
         "unmounted": mount_result["unmounted"],
@@ -4535,7 +5225,7 @@ def clear_case_run(case_dir: str, clear_memory: bool = True) -> dict:
 
 # ── Email forensics ─────────────────────────────────────────────────────────
 
-@mcp.tool()
+@mcp.tool(meta={"input_names": ["*.pst", "*.ost"]})
 @output_safe
 def pff_export(pst_path: str, output_dir: str, mode: str = "items") -> dict:
     """
@@ -4551,7 +5241,7 @@ def pff_export(pst_path: str, output_dir: str, mode: str = "items") -> dict:
     return run([binary, "-m", mode, "-t", output_dir, pst_path], timeout=1800)
 
 
-@mcp.tool()
+@mcp.tool(meta={"input_names": ["*.pst", "*.ost"]})
 @output_safe
 def readpst_extract(pst_path: str, output_dir: str, format_mbox: bool = True) -> dict:
     """
@@ -4953,7 +5643,7 @@ def _chainsaw_mapping_for(sigma_dir: str) -> Optional[str]:
 
 # ── Capability analysis (FLARE capa) ────────────────────────────────────────
 
-@mcp.tool()
+@mcp.tool(meta={"reads": [*MT.PE, *MT.ELF]})      # capa: PE, ELF (and .NET, a PE)
 @output_safe
 def capa_analyze(file_path: str, output_path: Optional[str] = None) -> dict:
     """
@@ -4987,7 +5677,7 @@ def capa_analyze(file_path: str, output_path: Optional[str] = None) -> dict:
 
 # ── Office macro analysis (python-oletools) ─────────────────────────────────
 
-@mcp.tool()
+@mcp.tool(meta={"reads": list(MT.OFFICE)})      # oletools: OLE2 and OOXML Office documents
 @output_safe
 def olevba_scan(office_path: str, decode: bool = True) -> dict:
     """
@@ -5010,7 +5700,7 @@ def olevba_scan(office_path: str, decode: bool = True) -> dict:
     return run(cmd, timeout=300)
 
 
-@mcp.tool()
+@mcp.tool(meta={"reads": list(MT.OFFICE)})
 @output_safe
 def mraptor_scan(office_path: str) -> dict:
     """
@@ -5033,6 +5723,7 @@ def list_evidence_dir(
     path: str = "",
     glob: str = "*",
     limit: int = 80,
+    offset: int = 0,
 ) -> dict:
     """List basenames (and sizes) under an evidence/analysis directory.
 
@@ -5044,6 +5735,8 @@ def list_evidence_dir(
         open case's evidence/ directory.
     glob: fnmatch pattern (default '*').
     limit: max entries returned (default 80).
+    offset: the entries after the first ``offset`` (name order), for the
+        next page; ``total`` counts every entry the glob matches.
     """
     import fnmatch
 
@@ -5086,37 +5779,11 @@ def list_evidence_dir(
         names = sorted(os.listdir(target))
     except OSError as e:
         return {"success": False, "error": str(e)}
-
-    def _winevt_priority(name: str) -> tuple:
-        n = name.casefold()
-        if n == "security.evtx":
-            return (0, name)
-        if n == "system.evtx":
-            return (1, name)
-        if n == "application.evtx":
-            return (2, name)
-        if n.startswith("microsoft-windows-sysmon"):
-            return (3, name)
-        if n.startswith("microsoft-windows-terminalservices"):
-            return (4, name)
-        if n.startswith("microsoft-windows-smb"):
-            return (5, name)
-        if "security-" in n and n.endswith(".evtx"):
-            return (80, name)
-        return (50, name)
-
-    norm_target = target.replace("\\", "/").casefold()
-    is_winevt = "/winevt/logs" in norm_target or (
-        "winevt" in norm_target and norm_target.rstrip("/").endswith("/logs")
-    )
-    if is_winevt:
-        names = sorted(names, key=_winevt_priority)
-
-    for name in names:
-        if name.startswith("."):
-            continue
-        if not fnmatch.fnmatch(name, pattern):
-            continue
+    # Name order with paging: no file is put first and none hides behind
+    # the page bound; the total says how many the glob matches.
+    matched = [n for n in names if not n.startswith(".") and fnmatch.fnmatch(n, pattern)]
+    start = max(0, int(offset or 0))
+    for name in matched[start:start + cap]:
         full = os.path.join(target, name)
         try:
             st = os.stat(full)
@@ -5128,34 +5795,26 @@ def list_evidence_dir(
             })
         except OSError:
             entries.append({"name": name, "path": full, "is_dir": None, "size": None})
-        if len(entries) >= cap:
-            break
+    rest = len(matched) - start - len(entries)
     result = {
         "success": True,
         "path": target,
         "glob": pattern,
         "count": len(entries),
-        "truncated": len(entries) >= cap,
+        "total": len(matched),
+        "truncated": rest > 0,
         "entries": entries,
         "note": (
             "Open one of these basenames with table.* / the matching parser. "
-            "Do not guess MFT.csv / USNJRNL.csv when a differently named "
-            "sibling is listed here. Listing alone does NOT unlock forensic "
-            "tools — call misc_inventory_evidence for the assessment latch."
+            "Do not guess a parser's default output name when a differently "
+            "named sibling is listed here: open the listed name. Listing alone "
+            "does NOT unlock forensic tools — call misc_inventory_evidence for "
+            "the assessment latch."
         ),
     }
-    if is_winevt:
-        result["priority_hint"] = (
-            "For account logon / lateral movement start with Security.evtx "
-            "(Event IDs 4624/4625/4648/4672), then System.evtx / Sysmon if "
-            "present. Do NOT prefer Microsoft-Windows-Security-*Operational "
-            "side channels over Security.evtx."
-        )
-        prefer = [e["name"] for e in entries
-                  if e["name"].casefold() in (
-                      "security.evtx", "system.evtx", "application.evtx")]
-        if prefer:
-            result["recommended_first"] = prefer
+    if rest > 0:
+        result["more"] = (f"+{rest} more entries: list_evidence_dir(path, glob, "
+                          f"offset={start + len(entries)})")
     return result
 
 
@@ -5188,7 +5847,18 @@ def inventory_evidence() -> dict:
             ),
         }
     from core.evidence_inventory_gate import build_evidence_inventory
-    return build_evidence_inventory(case)
+    out = build_evidence_inventory(case)
+    try:
+        from core.export_profile import inventory_lines, profile_on
+        if profile_on() and isinstance(out, dict):
+            lines = inventory_lines(case)
+            if lines:
+                # What each export covers (export_profile has the channels,
+                # event ids and what it skipped per host).
+                out["export_profiles"] = lines
+    except Exception:  # noqa: BLE001
+        pass
+    return out
 
 
 def _has_non_ascii(text: str) -> bool:
@@ -5362,35 +6032,21 @@ def _enumeration_cap_hit(cmd) -> dict | None:
 @output_safe
 def batch_run(tool_calls: list[dict], max_concurrent: int = 4) -> dict:
     """
-    Execute multiple independent shell tool calls concurrently and return all
-    results. Use this when DAIR's priority_tools contains several commands that
-    don't depend on each other.
+    Run several independent raw commands concurrently (argv lists via exec,
+    not a shell: no pipes, redirects or && chains) and return every result,
+    for low-level batches such as hashing ten files or stating five paths.
+    Typed MCP tools are called directly instead. A forensic binary that has
+    an MCP wrapper (tcpdump, fls, vol, strings, the EZ tools, yara, ...) is
+    refused with a redirect to the wrapper: output of a raw run cannot be
+    cited in a finding (the mcp_routing gate). Several near-identical raw
+    commands in a row are refused (gate raw_bash_enumeration_cap) with the
+    typed equivalent; force does not lift that cap.
 
-    tool_calls: list of {"cmd": ["binary", "arg1", ...], "timeout": optional int}
+    tool_calls: list of {"cmd": ["binary", "arg1", ...], "timeout": optional
+        int, "force": optional bool (run a wrapped binary raw when truly needed)}.
     max_concurrent: maximum parallel workers (default 4).
 
     Returns: {"success": all_succeeded, "results": [per-call dicts]}.
-
-    Note: this runs raw subprocess commands as argv lists via exec — not a
-    shell. There is no pipe / redirect / && chaining: do not pass
-    ``["sh", "-c", "a | b"]`` or argv tokens containing ``|`` / ``&&`` /
-    ``;``. For typed MCP forensic tools, call them directly (or use the MCP
-    client's own parallel-call mechanism). This helper is for low-level
-    batches like "hash these 10 files" or "stat these 5 paths".
-
-    Forensic binaries that have a dedicated MCP wrapper (tcpdump, fls, vol,
-    strings/EZ tools, yara, …) are rejected up front with a redirect to the
-    wrapper: evidence run through raw Bash is tagged source='claude_code_bash'
-    and cannot be cited in a finding (see the mcp_routing gate). Pass
-    {"force": true} on an individual spec to override when you genuinely need
-    the raw binary.
-
-    Near-identical raw commands are capped: after several repeats of the same
-    command shape (same binary + targets, offsets/inodes ignored) within the
-    recent raw-call window, the spec is refused (gate:
-    raw_bash_enumeration_cap) with a pointer to the typed equivalent.
-    force=true does NOT bypass the cap — vary the target or use the typed
-    tool.
     """
     import concurrent.futures
     from core.middleware import _identify_forensic_binary, MCP_WRAPPER_HINTS
@@ -5592,18 +6248,18 @@ def launch_dashboard(case_dir: str, port: int = 8765,
 
     Does NOT start any server — that's the standalone `atlas-dashboard`
     process's job. If the standalone isn't reachable, returns a hint for the
-    operator to launch it. `port` is accepted for back-compat and ignored
-    (the standalone owns the port).
+    operator to launch it. `port` is accepted and ignored (the standalone
+    owns the port).
 
     trace_path: the actual trace file being written (from start_execution_log's
     output_path). When given, the deep link is built from this real file
     (expressed relative to the dashboard's cases_root), so the URL can never
-    disagree with what is on disk — the source of the historical 404 was
-    re-deriving `{case_id}_trace.json`, which mismatched the true filename's
-    casing. Empty falls back to the legacy `{case_id}_trace.json` derivation.
+    disagree with what is on disk (re-deriving `{case_id}_trace.json` can
+    mismatch the true filename's casing). Empty falls back to the
+    `{case_id}_trace.json` derivation.
 
-    Returned shape matches the prior in-process server's contract so callers
-    in start_execution_log don't need to branch.
+    The returned dict has the shape callers in start_execution_log expect,
+    so they don't need to branch.
     """
     case_dir = os.path.abspath(os.path.expanduser(case_dir))
     if not os.path.isdir(case_dir):
@@ -5687,26 +6343,10 @@ def serve_dashboard(case_dir: str, port: int = 8765) -> dict:
 # ── Knowns-driven IOC hunting helper ─────────────────────────────────────────
 
 def _derive_person_variants(full_name: str) -> list[str]:
-    """Generate common username/email-prefix variants from 'Firstname Lastname'.
-    Includes initial+last, first.last, first_last, last+initial, first+last,
-    initial+last+initial, plus the raw first and last names. Lowercased."""
-    parts = [p for p in full_name.strip().lower().split() if p]
-    if not parts:
-        return []
-    if len(parts) == 1:
-        return [parts[0]]
-    first, *_, last = parts
-    return [
-        first + last,           # e.g. janedoe
-        first + "." + last,     # e.g. jane.doe
-        first + "_" + last,     # e.g. jane_doe
-        first[0] + last,        # e.g. jdoe
-        first[0] + last + first[0],  # e.g. jdoej
-        first[0] + "." + last,  # e.g. j.doe
-        last + first[0],        # e.g. doej
-        first,                  # e.g. jane
-        last,                   # e.g. doe
-    ]
+    """Username and mail-prefix spellings of 'Firstname Lastname'
+    (core.attribution_identity.person_variants, the one source)."""
+    from core.attribution_identity import person_variants
+    return person_variants(full_name)
 
 
 def _derive_hostname_variants(host: str) -> list[str]:

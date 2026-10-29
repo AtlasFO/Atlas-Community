@@ -70,7 +70,7 @@ def test_the_lock_is_held_for_the_whole_command(tmp_path, monkeypatch):
     case = _case(tmp_path)
     seen = {}
 
-    def fake_investigation(args, case_dir, command="run", lock_fd=None):
+    def fake_investigation(args, case_dir, command="run", lock_fd=None, client=None):
         seen["lock_fd"] = lock_fd
         seen["held"] = run_lock.held_here(case_dir)
         raise SystemExit(4)
@@ -79,6 +79,7 @@ def test_the_lock_is_held_for_the_whole_command(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "_apply_report_language", lambda *a, **k: None)
     monkeypatch.setattr(cli, "_prepare_run_isolation", lambda *a, **k: None)
     monkeypatch.setattr(cli, "_run_investigation", fake_investigation)
+    monkeypatch.setattr(cli, "_analyst_client", lambda *a, **k: object())
     with pytest.raises(SystemExit):
         cli.cmd_run(Namespace(case=str(case), no_capture_brain=True))
     assert seen["held"] is True and isinstance(seen["lock_fd"], int)

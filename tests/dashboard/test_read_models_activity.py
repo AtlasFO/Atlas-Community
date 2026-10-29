@@ -121,6 +121,15 @@ class TestActivityProjection:
             "updated_at": "2031-02-04T12:00:00Z",
         }
 
+    def test_a_requested_stop_reaches_the_panel_with_its_reason(self, tmp_path):
+        # The CLI records a dashboard Stop (SIGTERM) as stop_requested; the
+        # panel labels it from this record, also after a dashboard restart.
+        _write_run_status(tmp_path, stopped_reason="stop_requested", pid=_DEAD_PID,
+                          finish_status="interrupted", updated_at="2031-02-04T12:00:00Z")
+        result = read_models.activity_projection(str(tmp_path))
+        assert result["last_stop"]["reason"] == "stop_requested"
+        assert result["last_stop"]["finish_status"] == "interrupted"
+
     @pytest.mark.parametrize("reason", ["finished", "closed_out"])
     def test_last_stop_absent_for_a_clean_finish(self, tmp_path, reason):
         # "closed_out" is the loop writing the reports itself once the
@@ -217,3 +226,42 @@ class TestIocSummary:
         # the Overview asks for this every few seconds.
         read_models.ioc_summary(str(tmp_path))
         assert len(calls) == 1
+
+
+class TestLastNarrationIsProse:
+    """The Overview's activity line shows what the run last said to people:
+    the model's notes and dispositions. A machine record the report
+    composer keeps as a narration with its own kind ("report_answer", a
+    JSON measurement per question) is never shown there."""
+
+    def _trace(self, tmp_path, entries):
+        import json
+        case = tmp_path / "CASE-A"
+        (case / "analysis").mkdir(parents=True)
+        (case / "analysis" / "CASE-A_trace.json").write_text(
+            json.dumps({"entries": entries}), encoding="utf-8")
+        return str(case)
+
+    def _note(self, content, kind=None, ts="2031-03-01T10:00:00Z"):
+        e = {"type": "investigation_narration", "ts": ts, "content": content}
+        if kind is not None:
+            e["kind"] = kind
+        return e
+
+    def test_a_report_record_after_a_note_leaves_the_note(self, tmp_path):
+        from dashboard.read_models import activity_projection
+        record = '{"event": "report_answer", "task_id": "task-0001", "rounds": 1}'
+        case = self._trace(tmp_path, [self._note("Reading the registry hives of CORP-WS01."),
+                                      self._note(record, kind="report_answer")])
+        assert activity_projection(case)["last_narration"] == "Reading the registry hives of CORP-WS01."
+
+    def test_only_records_means_no_line(self, tmp_path):
+        from dashboard.read_models import activity_projection
+        case = self._trace(tmp_path, [self._note('{"event": "report_answer"}', kind="report_answer")])
+        assert activity_projection(case)["last_narration"] is None
+
+    def test_a_disposition_is_shown(self, tmp_path):
+        from dashboard.read_models import activity_projection
+        case = self._trace(tmp_path, [self._note("Searched the proxy log for 203.0.113.7: no hit.",
+                                                 kind="disposition")])
+        assert activity_projection(case)["last_narration"].startswith("Searched the proxy log")

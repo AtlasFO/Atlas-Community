@@ -28,6 +28,14 @@ def installed_programs(monkeypatch):
                         MagicMock(side_effect=lambda name, *rest: f"/usr/local/bin/{name}"))
 
 
+@pytest.fixture
+def no_presence_check(monkeypatch):
+    """The evaluate-gate tests below are about the gate; the presence check a
+    CONFIRMED request passes before it has its own tests
+    (test_confirmed_presence.py)."""
+    monkeypatch.setattr("tools.misc._confirmed_presence", lambda *a, **k: None)
+
+
 class TestRegripper:
     # A stand-in for the installed plugin set so resolution tests don't depend
     # on /opt/regripper being present on the test host.
@@ -212,6 +220,99 @@ class TestHindsight:
         hindsight_chrome("/mnt/wkstn01/Users/jsmith/AppData/Local/Google/Chrome/User Data/Default", str(tmp_path))
         assert mock_run.called
 
+    def test_the_default_format_is_one_hindsight_accepts(self, mock_run, tmp_path):
+        """hindsight takes -f {sqlite,jsonl,xlsx}; any other value dies in argparse."""
+        from tools.misc import hindsight_chrome
+        hindsight_chrome("/x/Default", str(tmp_path))
+        cmd = mock_run.call_args.args[0]
+        assert cmd[cmd.index("-f") + 1] == "jsonl"
+
+    def test_the_old_json_name_means_jsonl_and_other_names_are_refused_before_a_spawn(
+            self, mock_run, tmp_path):
+        from tools.misc import hindsight_chrome
+        for given, sent in (("json", "jsonl"), ("JSONL", "jsonl"), ("sqlite", "sqlite"), (" xlsx", "xlsx")):
+            mock_run.reset_mock()
+            hindsight_chrome("/x/Default", str(tmp_path), output_format=given)
+            cmd = mock_run.call_args.args[0]
+            assert cmd[cmd.index("-f") + 1] == sent, given
+        mock_run.reset_mock()
+        res = hindsight_chrome("/x/Default", str(tmp_path), output_format="csv")
+        assert res["success"] is False and res["gate"] == "bad_args"
+        assert "'csv'" in res["error"] and "jsonl, sqlite or xlsx" in res["error"]
+        assert not mock_run.called, "nothing may be spawned for a value hindsight rejects"
+
+    DIED_ON_IMPORT = (
+        "Traceback (most recent call last):\n"
+        '  File "/venv/bin/hindsight.py", line 22, in <module>\n'
+        "    from pyhindsight.analysis import AnalysisSession\n"
+        '  File "/venv/lib/pyhindsight/browsers/chrome.py", line 18, in <module>\n'
+        "    import ccl_chromium_reader\n"
+        "ModuleNotFoundError: No module named 'ccl_chromium_reader'")
+
+    def test_a_run_that_dies_on_a_missing_module_is_a_dependency_refusal(self, mock_run, tmp_path):
+        from tools.misc import hindsight_chrome
+        mock_run.return_value = {"success": False, "stdout": "", "exit_code": 1,
+                                 "stderr": self.DIED_ON_IMPORT, "cmd": "hindsight.py"}
+        res = hindsight_chrome("/x/Default", str(tmp_path))
+        assert res["success"] is False and res["gate"] == "program_missing"
+        assert res["missing_module"] == "ccl_chromium_reader"
+        assert "ccl_chromium_reader" in res["error"] and "is not installed" in res["error"]
+        assert "install.sh" in res["hint"]
+        assert "Traceback" not in str(res), "the model reads a reason, not a traceback"
+
+    def test_no_refusal_of_the_tool_sends_the_model_to_table_for_the_profile(self, mock_run, tmp_path):
+        """A Chromium profile is raw SQLite and LevelDB: table.* refuses it, SQLECmd does not
+        run on Linux. Both refusals say the history was not parsed and is a limitation."""
+        from tools.misc import hindsight_chrome
+        mock_run.return_value = {"success": False, "stdout": "", "exit_code": 1,
+                                 "stderr": self.DIED_ON_IMPORT, "cmd": "hindsight.py"}
+        module = hindsight_chrome("/x/Default", str(tmp_path))
+        with patch("tools.misc.tool_program", return_value=None):
+            absent = hindsight_chrome("/x/Default", str(tmp_path))
+        for res in (module, absent):
+            assert res["gate"] == "program_missing"
+            assert "limitation" in res["hint"] and "install.sh" in res["hint"]
+            assert "table" not in res["hint"].lower(), res["hint"]
+
+    def test_the_refusal_reads_as_a_search_that_never_ran(self, mock_run, tmp_path):
+        """An absence claim after a crashed parser is a gap, not a negative result."""
+        import json
+        from tools._gates.negative_completeness import _program_missing
+        from tools.misc import hindsight_chrome
+        mock_run.return_value = {"success": False, "stdout": "", "exit_code": 1,
+                                 "stderr": self.DIED_ON_IMPORT, "cmd": "hindsight.py"}
+        res = hindsight_chrome("/x/Default", str(tmp_path))
+        assert _program_missing({"success": False, "stderr": "",
+                                 "stdout_excerpt": json.dumps(res)})
+        assert not _program_missing({"success": False, "stderr": self.DIED_ON_IMPORT,
+                                     "stdout_excerpt": ""}), "the raw traceback never did"
+
+    def test_other_failures_reach_the_model_unchanged(self, mock_run, tmp_path):
+        from tools.misc import hindsight_chrome
+        usage = {"success": False, "stdout": "", "exit_code": 2, "cmd": "hindsight.py",
+                 "stderr": "hindsight.py: error: argument -f/--format: invalid choice: 'csv'"}
+        mock_run.return_value = usage
+        assert hindsight_chrome("/x/Default", str(tmp_path)) is usage
+        # An import failure the program survived and then another failure: the
+        # last line is the cause, not the logged ModuleNotFoundError before it.
+        later = {**usage, "stderr": self.DIED_ON_IMPORT + "\nSystemExit: bad profile"}
+        mock_run.return_value = later
+        assert hindsight_chrome("/x/Default", str(tmp_path)) is later
+
+    def test_a_script_that_really_dies_on_an_import_is_reported_through_the_executor(
+            self, monkeypatch, tmp_path):
+        """No mocked run: the traceback is the interpreter's own."""
+        from core import run
+        from tools.misc import hindsight_chrome
+        script = tmp_path / "hindsight.py"
+        script.write_text("import atlas_test_module_that_does_not_exist\n")
+        monkeypatch.setattr("tools.misc.run", run)
+        monkeypatch.setattr("tools.misc.tool_program",
+                            lambda name, *rest: str(script) if name == "hindsight.py" else None)
+        res = hindsight_chrome("/x/Default", str(tmp_path / "out"))
+        assert res["gate"] == "program_missing"
+        assert res["missing_module"] == "atlas_test_module_that_does_not_exist"
+
 
 def _seed_log_with_dair(tmp_path):
     """Helper: configure log + seed a dair_call so finding gates can be exercised."""
@@ -314,6 +415,7 @@ class TestMissingArtifactHashAdvisory:
                        ev="hash_file: d41d8cd98f00b204e9800998ecf8427e") is False
 
 
+@pytest.mark.usefixtures("no_presence_check")
 class TestRecordFinding:
     def test_record_finding_returns_success(self, tmp_path):
         from tools.misc import record_finding
@@ -509,6 +611,7 @@ class TestParseMsgOle:
         assert "not a valid .msg" in r["error"]
 
 
+@pytest.mark.usefixtures("no_presence_check")
 class TestRecordFindingLinkedCallIdGate:
     """confirmed_requires_linked_call_id: CONFIRMED needs a non-zero linked_call_id.
     linked_call_id_must_exist: the id must point at a real trace entry."""
@@ -528,7 +631,7 @@ class TestRecordFindingLinkedCallIdGate:
         # Keep the fabricated id so linked_call_id_must_exist can fire.
         with patch("core.execution_log.log", l), patch(
             "tools.misc._repair_lineage_ids",
-            lambda log, input_call_ids=None, linked_call_id=0, description="": (
+            lambda log, input_call_ids=None, linked_call_id=0, description="", host="": (
                 list(input_call_ids or []), int(linked_call_id or 0), {}),
         ):
             r = record_finding("malicious .exe", "CONFIRMED", "ez.mftecmd", linked_call_id=99999, input_call_ids=[1])
@@ -558,7 +661,7 @@ class TestRecordFindingLinkedCallIdGate:
         l = _seed_log_with_dair(tmp_path)
         with patch("core.execution_log.log", l), patch(
             "tools.misc._repair_lineage_ids",
-            lambda log, input_call_ids=None, linked_call_id=0, description="": (
+            lambda log, input_call_ids=None, linked_call_id=0, description="", host="": (
                 list(input_call_ids or []), int(linked_call_id or 0), {}),
         ):
             r = record_finding("possible anomaly", "SUSPECTED", "vol.netscan", linked_call_id=42, input_call_ids=[1])
@@ -566,6 +669,7 @@ class TestRecordFindingLinkedCallIdGate:
         assert "42" in r["error"]
 
 
+@pytest.mark.usefixtures("no_presence_check")
 class TestRecordFindingEvaluateVerdictGate:
     """confirmed_requires_supported_evaluate: CONFIRMED refused if most recent
     reason.evaluate_finding verdict is CHALLENGED."""
@@ -635,7 +739,7 @@ class TestRecordFindingEvaluateVerdictGate:
     def test_uncertain_verdict_blocks_confirmed(self, tmp_path):
         # VERDICT: UNCERTAIN is insufficient for CONFIRMED — it means the
         # reviewer could not confirm, not that they supported the claim.
-        # The gate now requires an explicit SUPPORTED verdict.
+        # The gate requires an explicit SUPPORTED verdict.
         from tools.misc import record_finding
         from core.execution_log import ExecutionLog
         l = ExecutionLog()
@@ -655,11 +759,10 @@ class TestRecordFindingEvaluateVerdictGate:
         assert sc
 
     def test_auto_downgrade_can_be_disabled(self, tmp_path, monkeypatch):
-        # Re-pointed at the citation gate on purpose. This test used to assert a
-        # refusal on confirmed_requires_supported_evaluate with the switch off —
-        # but that gate no longer downgrades at all, so the refusal happens with
-        # the switch on or off and the test proved nothing about the switch.
-        # confidence_and_citation is now the only gate the switch governs.
+        # Aimed at the citation gate on purpose: confirmed_requires_supported_evaluate
+        # does not downgrade at all, so its refusal happens with the switch on
+        # or off and would prove nothing about the switch.
+        # confidence_and_citation is the only gate the switch governs.
         monkeypatch.setenv("ATLAS_FINDING_AUTO_DOWNGRADE", "0")
         from tools.misc import record_finding
         from core.execution_log import ExecutionLog
@@ -684,28 +787,21 @@ class TestRecordFindingEvaluateVerdictGate:
 
     def test_evidence_lookup_reads_nested_output_not_only_stdout(self, tmp_path):
         # The subject here is the evidence lookup finding a table tool's payload
-        # under `output` instead of `stdout`. It arrived asserting only
-        # success + tier_auto_downgraded_from, which tested the downgrade and
-        # never the lookup its name claimed — and the downgrade path it relied on
-        # is gone, since a missing evaluate now refuses rather than lowering the
-        # tier. So it asserts the lookup, with the tier made admissible.
+        # under `output` instead of `stdout`. Asserting only
+        # success + tier_auto_downgraded_from would test the downgrade and
+        # never the lookup — and a missing evaluate refuses rather than lowering
+        # the tier. So it asserts the lookup, with the tier made admissible.
         from tools.misc import record_finding
         from core.execution_log import ExecutionLog
         l = ExecutionLog()
         l.configure("TEST", str(tmp_path / "trace.json"))
         l.record_dair_call("Triage", "", False, "", "", "stay", "")
-        tid = l.record_tool_call("table.table_query", True, False, 0, 0)
-        # Simulate table tool payload stored under output (not stdout).
-        for e in l._entries:
-            if e.get("call_id") == tid:
-                e["output"] = {
-                    "success": True,
-                    "matched_rows": 2,
-                    "rows": [
-                        {"RemoteIP": "10.0.0.101", "AccountName": "user01"},
-                    ],
-                }
-                break
+        import json
+        # A table tool's payload as the trace keeps it: the JSON result in the
+        # excerpt, its rows nested under "rows".
+        tid = l.record_tool_call("table.table_query", True, False, 0, 0, stdout_excerpt=json.dumps({
+            "success": True, "matched_rows": 2,
+            "rows": [{"RemoteIP": "10.0.0.101", "AccountName": "user01"}]}))
         desc = "user01 authenticated from 10.0.0.101"
         ins = {"user_message": desc}
         l.record_reason_call(
@@ -733,11 +829,10 @@ class TestRecordFindingEvaluateVerdictGate:
         assert r.get("tier_auto_downgraded_from") is None
 
     def test_missing_evaluate_refuses_instead_of_downgrading(self, tmp_path):
-        # The behaviour change, pinned on its own: a CONFIRMED request with no
-        # reason.evaluate_finding at all is refused. It used to land as LIKELY,
-        # and LIKELY satisfies the blocking case-question gate in
-        # reason_pre_report_check — so the adversarial review was optional in
-        # practice while nothing blocked on its absence.
+        # A CONFIRMED request with no reason.evaluate_finding at all is
+        # refused. Landing as LIKELY instead would satisfy the blocking
+        # case-question gate in reason_pre_report_check, making the
+        # adversarial review optional while nothing blocked on its absence.
         from tools.misc import record_finding
         from core.execution_log import ExecutionLog
         l = ExecutionLog()
@@ -756,7 +851,7 @@ class TestRecordFindingEvaluateVerdictGate:
         assert "SUSPECTED" in r["error"] or "LIKELY" in r["error"], r["error"]
 
     def test_evaluate_matched_by_description_not_cross_contaminated(self, tmp_path):
-        # Bug A regression: with two findings reviewed in one batch, a DIFFERENT
+        # With two findings reviewed in one batch, a DIFFERENT
         # finding's CHALLENGED verdict (more recent) must NOT block this finding
         # whose own evaluate_finding was SUPPORTED. The gate matches the
         # evaluate by description, not by 'most recent'.
@@ -766,7 +861,7 @@ class TestRecordFindingEvaluateVerdictGate:
         l.configure("TEST", str(tmp_path / "trace.json"))
         l.record_dair_call("Triage", "", False, "", "", "stay", "")
         tid = l.record_tool_call("vol.psscan", True, False, 0, 0)
-        a_ins = {"user_message": "cron persistence root crontab evil.sh"}
+        a_ins = {"user_message": "FINDING:\ncron persistence root crontab evil.sh\n\nSUPPORTING EVIDENCE:\nrow 3"}
         l.record_reason_call("reason_confidence_score", True,
                              'CONFIDENCE_SCORE:\n{"tier": "CONFIRMED"}', {}, inputs=a_ins)
         l.record_reason_call("reason_cite_check", True,
@@ -778,7 +873,7 @@ class TestRecordFindingEvaluateVerdictGate:
         # B's evaluate (CHALLENGED, more recent, a DIFFERENT finding)
         l.record_reason_call("reason_evaluate_finding", True,
                              "FINDING: injection marker pid 488\nVERDICT: CHALLENGED",
-                             {}, inputs={"user_message": "injection marker pid 488"})
+                             {}, inputs={"user_message": "FINDING:\ninjection marker pid 488\n\nSUPPORTING EVIDENCE:\nrow 4"})
         with patch("core.execution_log.log", l):
             r = record_finding("Cron persistence root crontab evil.sh", "CONFIRMED",
                                "ez.mftecmd", linked_call_id=tid,
@@ -810,6 +905,7 @@ class TestRecordFindingEvaluateVerdictGate:
 class TestRecordFindingDairGate:
     """Any finding (any tier) requires a recent dair_call."""
 
+    @pytest.mark.usefixtures("todays_dair")
     def test_finding_without_any_dair_refused(self, tmp_path):
         from tools.misc import record_finding
         from core.execution_log import ExecutionLog
@@ -822,6 +918,7 @@ class TestRecordFindingDairGate:
         assert "dair_assess" in r["error"]
         assert all(e["type"] != "finding" for e in l._entries)
 
+    @pytest.mark.usefixtures("todays_dair")
     def test_suspected_without_dair_also_refused(self, tmp_path):
         from tools.misc import record_finding
         from core.execution_log import ExecutionLog
@@ -832,6 +929,7 @@ class TestRecordFindingDairGate:
         assert r["success"] is False
         assert "dair_assess" in r["error"]
 
+    @pytest.mark.usefixtures("todays_dair")
     def test_stale_dair_beyond_30_entries_refused(self, tmp_path):
         from tools.misc import record_finding
         from core.execution_log import ExecutionLog
@@ -846,6 +944,7 @@ class TestRecordFindingDairGate:
         assert "dair_assess" in r["error"]
 
 
+@pytest.mark.usefixtures("no_presence_check")
 class TestRecordFindingEvaluateGate:
     """CONFIRMED tier additionally requires a recent reason.evaluate_finding."""
 
@@ -901,7 +1000,7 @@ class TestRecordFindingEvaluateGate:
         l, tid = _seed_log_ready_for_confirmed(tmp_path, desc)
         l.record_reason_call("reason_evaluate_finding", True,
                              f"FINDING: {desc}\nVERDICT: SUPPORTED",
-                             {}, inputs={"user_message": desc.lower()})
+                             {}, inputs={"user_message": f"FINDING:\n{desc}\n\nSUPPORTING EVIDENCE:\nrow 3"})
         for i in range(35):
             l.record_tool_call(f"strings grep {i}", True, False, 0, 0)
         l.record_dair_call("Analyze", "", False, "", "", "stay", "")
@@ -1063,6 +1162,7 @@ class TestBatchRun:
         assert seen == ["misc_batch_run", "misc_batch_run"]
 
 
+@pytest.mark.usefixtures("no_presence_check")
 class TestRecordAgentMessageWithFindings:
     """record_agent_message accepts an optional structured findings list and
     writes each as a finding entry through the same gate as record_finding."""
@@ -1337,6 +1437,36 @@ class TestRecordFindingMitreValidateGate:
         assert r.get("gate") == "evidence_strength"
         assert r.get("detail_gate") == "mitre_technique_validation"
         assert "T9999.999" in r.get("unknown_technique_ids", [])
+        # a caller without the correlate tools can follow it: leave the id out
+        assert "leave the unknown ID(s) out of the description and mitre_techniques" in r["error"]
+        assert "a finding stands without a technique ID" in r["error"]
+
+    def test_an_empty_or_missing_table_refuses_no_id_and_says_so(self, tmp_path):
+        """With no technique in the local table nothing can be checked;
+        the finding records with its ids unverified and the result says so.
+        A table that lacks the id still refuses it."""
+        from tools.misc import record_finding
+        desc = "wmi event subscription t1546.003"
+        for sub, count, recorded in (("empty", 0, True), ("stale", 858, False)):
+            (tmp_path / sub).mkdir()
+            l, tid = _seed_log_ready_for_confirmed(tmp_path / sub, desc)
+            with patch("core.execution_log.log", l), patch(
+                    "tools.correlate.mitre_validate",
+                    side_effect=lambda x, n=count, **kw: {"success": True, "exists": False, "technique_id": x,
+                                                         "available_count": n}):
+                r = record_finding("WMI Event Subscription T1546.003", "CONFIRMED", "ez.evtxecmd",
+                                   linked_call_id=tid, input_call_ids=[tid])
+            if recorded:
+                assert r["success"] is True, r
+                assert "T1546.003" in r["mitre_unchecked"] and not r.get("validated_techniques")
+                with patch("core.execution_log.log", l), patch(
+                        "tools.correlate.mitre_validate",
+                        side_effect=lambda x, **kw: {"exists": False, "technique_id": x, "available_count": 0}):
+                    bad = record_finding("WMI Event Subscription", "CONFIRMED", "ez.evtxecmd", linked_call_id=tid,
+                                         input_call_ids=[tid], mitre_techniques=["T10"])
+                assert bad["success"] is False and "Malformed technique ID" in bad["error"]   # still refused
+            else:
+                assert r["success"] is False and r.get("detail_gate") == "mitre_technique_validation"
 
     def test_known_tid_passes_and_records_validation(self, tmp_path):
         from tools.misc import record_finding
@@ -1489,7 +1619,7 @@ class TestRecordFindingConfidenceScoreCiteCheckGate:
 
 
 class TestRecordFindingInlineSupportingEvidence:
-    """R1 fast path: passing supporting_evidence inline runs a DETERMINISTIC
+    """Fast path: passing supporting_evidence inline runs a DETERMINISTIC
     citation check and skips the reason.confidence_score + reason.cite_check
     model round-trips entirely."""
 
@@ -1498,7 +1628,11 @@ class TestRecordFindingInlineSupportingEvidence:
         l = ExecutionLog()
         l.configure("INLINE", str(tmp_path / "trace.json"))
         l.record_dair_call("Triage", "", False, "", "", "stay", "")
-        tid = l.record_tool_call("vol.netscan", True, False, 0, 0)
+        # The call prints the values the findings below name: supporting_evidence
+        # points at a printed row, it does not replace one.
+        tid = l.record_tool_call("vol.netscan", True, False, 0, 0, stdout_excerpt=(
+            "NetstatEnriched: 203.0.113.10:8080 ESTABLISHED\n"
+            "/tmp/.kworkerd sha256 e3b0c4 /bin/sleep sha256 e3b0c4"))
         l.record_reason_call("reason_hypothesize", True, "OK", {})
         l.record_reason_call("reason_evaluate_finding", True, "VERDICT: SUPPORTED", {})
         return l, tid
@@ -1589,7 +1723,9 @@ class TestRecordFindingGateLinkageAlwaysStamped:
         l = ExecutionLog()
         l.configure("LINKAGE", str(tmp_path / "trace.json"))
         l.record_dair_call("Triage", "", False, "", "", "stay", "")
-        tid = l.record_tool_call("vol.psscan", True, False, 0, 0)
+        # The call prints the paths the findings below name.
+        tid = l.record_tool_call("vol.psscan", True, False, 0, 0,
+                                 stdout_excerpt="/tmp/.kworkerd sha256 e3b0c4 /bin/sleep sha256 e3b0c4 /var/tmp/.cache dir")
         l.record_reason_call("reason_hypothesize", True, "OK", {})
         return l, tid
 
@@ -1603,7 +1739,7 @@ class TestRecordFindingGateLinkageAlwaysStamped:
         from tools.misc import record_finding
         l, tid = self._base(tmp_path)
         desc = "Masquerade /tmp/.kworkerd is a copy of /bin/sleep"
-        _ins = {"user_message": desc.lower()}
+        _ins = {"user_message": f"FINDING:\n{desc}\n\nSUPPORTING EVIDENCE:\nhash-match"}
         ev_cid = l.record_reason_call("reason_evaluate_finding", True,
                                       "VERDICT: SUPPORTED", {}, inputs=_ins)
         cs_cid = l.record_reason_call("reason_confidence_score", True,
@@ -1653,7 +1789,7 @@ class TestRecordFindingGateLinkageAlwaysStamped:
         desc = "Masquerade /tmp/.kworkerd is a copy of /bin/sleep"
         ev_cid = l.record_reason_call(
             "reason_evaluate_finding", True, "VERDICT: CHALLENGED", {},
-            inputs={"user_message": desc.lower()})
+            inputs={"user_message": f"FINDING:\n{desc}\n\nSUPPORTING EVIDENCE:\nhash-match"})
         with patch("core.execution_log.log", l):
             r = record_finding(
                 desc, "LIKELY", "sha256sum", linked_call_id=tid,
@@ -1702,6 +1838,7 @@ class TestRecordFindingHypothesizeGate:
         l.record_reason_call("reason_evaluate_finding", True, "VERDICT: SUPPORTED", {})
         return l, tid
 
+    @pytest.mark.usefixtures("todays_dair", "todays_report_check")
     def test_process_keyword_without_hypothesize_refused(self, tmp_path):
         from tools.misc import record_finding
         desc = "rogue process pid 7000 c2 to internal host"
@@ -1960,10 +2097,10 @@ class TestWriteCaseDocument:
 def test_person_username_variants_include_initial_last_initial():
     from tools.misc import knowns_pattern_generate
 
-    r = knowns_pattern_generate(["Johnny Coach"], "person_username")
+    r = knowns_pattern_generate(["John Roe"], "person_username")
 
     assert r["success"] is True
-    assert "jcoachj" in r["all_terms"]
+    assert "jroej" in r["all_terms"]
 
 
 class TestClearCaseRunMemoryGuard:
@@ -2011,7 +2148,7 @@ class TestClearCaseRunMemoryGuard:
         from tools.misc import clear_case_run
         import tools.misc as misc
         home = self._isolated_home(tmp_path, monkeypatch)
-        case = tmp_path / "cases" / "nitroba"
+        case = tmp_path / "cases" / "case-a"
         (case / "analysis").mkdir(parents=True)
         monkeypatch.setattr(misc, "_ATLAS_REPO_ROOT", os.path.realpath(str(tmp_path / "elsewhere")))
         mem = self._seed_memory(home, case)
@@ -2026,7 +2163,7 @@ class TestClearCaseRunMemoryGuard:
         from tools.misc import clear_case_run
         import tools.misc as misc
         home = self._isolated_home(tmp_path, monkeypatch)
-        case = tmp_path / "cases" / "nitroba"
+        case = tmp_path / "cases" / "case-a"
         (case / "analysis").mkdir(parents=True)
         monkeypatch.setattr(misc, "_ATLAS_REPO_ROOT", os.path.realpath(str(tmp_path / "elsewhere")))
         mem = self._seed_memory(home, case)
@@ -2052,7 +2189,7 @@ class TestClearCaseRunMountSafety:
 
     def test_refuses_clear_when_mount_cannot_be_unmounted(self, tmp_path, monkeypatch):
         from tools.misc import clear_case_run
-        case = tmp_path / "cases" / "szechuan-sauce"
+        case = tmp_path / "cases" / "case-b"
         (case / "analysis").mkdir(parents=True)
         (case / "analysis" / "old.json").write_text("keep", encoding="utf-8")
         base = os.path.realpath(str(case))
@@ -2073,7 +2210,7 @@ class TestClearCaseRunMountSafety:
 
     def test_unmounts_then_clears(self, tmp_path, monkeypatch):
         from tools.misc import clear_case_run
-        case = tmp_path / "cases" / "szechuan-sauce"
+        case = tmp_path / "cases" / "case-b"
         (case / "analysis").mkdir(parents=True)
         (case / "analysis" / "old.json").write_text("x", encoding="utf-8")
         base = os.path.realpath(str(case))
@@ -2094,7 +2231,7 @@ class TestClearCaseRunMountSafety:
 
     def test_no_mounts_clears_normally(self, tmp_path, monkeypatch):
         from tools.misc import clear_case_run
-        case = tmp_path / "cases" / "nitroba"
+        case = tmp_path / "cases" / "case-a"
         (case / "analysis").mkdir(parents=True)
         (case / "analysis" / "old.json").write_text("x", encoding="utf-8")
         proc = self._proc_with(tmp_path, ["/mnt/unrelated"])
@@ -2216,7 +2353,7 @@ class TestTierLanguageLint:
         from tools.misc import record_finding
         l = _seed_log_with_dair(tmp_path)
         with patch("core.execution_log.log", l):
-            r = record_finding("USB serial 4C53 first seen 2015-03-23",
+            r = record_finding("USB serial 7A21 first seen 2031-03-23",
                                "SUSPECTED", "ez.recmd", input_call_ids=[1])
         assert r["success"] is True
         assert "tier_language_warning" not in r

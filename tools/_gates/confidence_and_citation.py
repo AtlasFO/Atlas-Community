@@ -59,6 +59,35 @@ def _stamp_matching_calls(ctx, norm_desc: str, prior_dup_call_id: int) -> None:
             ctx.gated_by_cite_check_call_id = int(cc.get("call_id") or 0)
 
 
+def _printed_by_no_call(ctx, values: list[str]) -> list[str]:
+    """The values no tool call of this run prints in a row (held_form over
+    each evidence call's printed rows, the cited calls first): text in
+    supporting_evidence names a value, a row shows it. With no trace to
+    read (no log), nothing is judged."""
+    if not values:
+        return []
+    entries = list(getattr(getattr(ctx, "log", None), "_entries", None) or [])
+    if not entries:
+        return []
+    from ._citation import held_form
+    from .citation_support import call_rows, evidence_calls
+    cited = {int(c) for c in list(getattr(ctx, "input_call_ids", None) or [])
+             + [getattr(ctx, "linked_call_id", 0) or 0] if c}
+    calls = [e for e in evidence_calls(entries) if e.get("success") is not False]
+    calls.sort(key=lambda e: (e.get("call_id") not in cited, -int(e.get("call_id") or 0)))
+    texts: dict[int, str] = {}
+
+    def text(e: dict) -> str:
+        key = id(e)
+        if key not in texts:
+            try:
+                texts[key] = " ".join(call_rows(e)).lower()
+            except Exception:  # noqa: BLE001 - a call whose rows cannot be read shows nothing
+                texts[key] = ""
+        return texts[key]
+    return [v for v in values if not any(held_form(v, text(e)) for e in calls)]
+
+
 def check(ctx) -> Optional[dict]:
     norm_desc = _normalize(ctx.description)
     prior_dup_call_id = _prior_dup_call_id(ctx, norm_desc)
@@ -69,7 +98,7 @@ def check(ctx) -> Optional[dict]:
         _stamp_matching_calls(ctx, norm_desc, prior_dup_call_id)
         return None
 
-    # ── R1 fast path ──────────────────────────────────────────────────────
+    # ── fast path: inline supporting_evidence ───────────────────────
     # If supporting_evidence was supplied inline, run a DETERMINISTIC citation
     # check instead of requiring two 8B-model round-trips (confidence_score +
     # cite_check). CONFIRMED's tier guard is confirmed_requires_supported_evaluate
@@ -79,6 +108,23 @@ def check(ctx) -> Optional[dict]:
     if (ctx.supporting_evidence or "").strip():
         from ._citation import deterministic_cite_check
         cite = deterministic_cite_check(ctx.description, ctx.supporting_evidence)
+        unshown = _printed_by_no_call(ctx, cite["cited_claims"]) if cite["verdict"] == "ALL_CITED" else []
+        if unshown:
+            return {
+                "success": False,
+                "error": (
+                    "Inline citation check failed: these values stand in supporting_evidence "
+                    f"but no tool output of this run prints them in a row: {unshown}. "
+                    "supporting_evidence points at evidence, it is not evidence. Cite the call "
+                    "that prints each (a value you decoded or converted: the call that decodes "
+                    "or converts it), or record this finding at SUSPECTED."
+                ),
+                "description": ctx.description,
+                "confidence": ctx.confidence,
+                "gate": "confidence_and_citation",
+                "detail_gate": "values_printed_by_no_call",
+                "uncited_claims": unshown,
+            }
         if cite["verdict"] != "ALL_CITED":
             return {
                 "success": False,
@@ -87,7 +133,7 @@ def check(ctx) -> Optional[dict]:
                     "in the finding but not in supporting_evidence — "
                     f"{cite['uncited_claims']}. Add each value (with its tool/field "
                     "reference) to supporting_evidence, or remove the claim, then "
-                    "re-record."
+                    "re-record, or record this finding at SUSPECTED."
                     if cite["verdict"] == "UNCITED_CLAIMS_PRESENT"
                     else "supporting_evidence is empty or contains no artifact data."
                 ),

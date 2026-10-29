@@ -68,7 +68,7 @@
   .gantt .tr { position: relative; height: 100%; overflow: hidden; cursor: crosshair; touch-action: pan-y; }
   .gantt .blk {
     position: absolute; top: 8px; height: 16px; min-width: 3px; border-radius: var(--radius-row); cursor: pointer;
-    font-size: var(--fs-label); line-height: 16px; padding: 0 5px; color: #0c0f14; font-weight: 650;
+    font-size: var(--fs-label); line-height: 16px; padding: 0 5px; color: var(--on-fill); font-weight: 650;
     overflow: hidden; white-space: nowrap;
   }
   /* A failure is a 2px stroke inside an 8px hit area, so a pointer can land on it. */
@@ -147,9 +147,9 @@
     border: 1px solid rgba(91,157,255,.45); color: var(--accent); background: rgba(91,157,255,.08);
     font-family: var(--mono); font-size: var(--fs-label); line-height: 16px; cursor: pointer; white-space: nowrap;
   }
-  .chip-link:hover { background: var(--accent); color: #0c0f14; }
+  .chip-link:hover { background: var(--accent); color: var(--on-fill); }
   .chip-link.reverse { border-color: rgba(55,201,142,.5); color: var(--ok); background: rgba(55,201,142,.08); }
-  .chip-link.reverse:hover { background: var(--ok); color: #0c0f14; }
+  .chip-link.reverse:hover { background: var(--ok); color: var(--on-fill); }
 
   /* Detail, inside the sheet. */
   #detail h2 { font-size: var(--fs-body); margin: 0 0 10px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
@@ -246,6 +246,7 @@
       <label class="chip type-chip"><input type="checkbox" class="type-filter" value="self_correction" checked><span class="cdot" style="background:var(--warn)"></span>Corrections <span class="n count" data-count="self_correction">0</span></label>
       <label class="chip type-chip"><input type="checkbox" class="type-filter" value="curiosity_probe" checked><span class="cdot" style="background:var(--ok)"></span>Probes <span class="n count" data-count="curiosity_probe">0</span></label>
       <label class="chip type-chip"><input type="checkbox" class="type-filter" value="deferred_intent" checked><span class="cdot" style="background:var(--warn)"></span>Deferred <span class="n count" data-count="deferred_intent">0</span></label>
+      <label class="chip type-chip"><input type="checkbox" class="type-filter" value="work_item" checked><span class="cdot" style="background:var(--ok)"></span>Work items <span class="n count" data-count="work_item">0</span></label>
       <label class="chip type-chip"><input type="checkbox" class="type-filter" value="investigation_narration" checked><span class="cdot" style="background:var(--fg-2)"></span>Notes <span class="n count" data-count="investigation_narration">0</span></label>
       <label class="chip type-chip"><input type="checkbox" class="type-filter" value="call_initiated"><span class="cdot" style="background:var(--fg-2)"></span>Init <span class="n count" data-count="call_initiated">0</span></label>
       <label class="chip type-chip"><input type="checkbox" class="type-filter" value="call_abandoned" checked><span class="cdot" style="background:var(--bad)"></span>Aborted <span class="n count" data-count="call_abandoned">0</span></label>
@@ -609,6 +610,15 @@ function entrySummary(e) {
         meta: `${escapeHtml(st)}${e.blocked_reason ? ` · ${escapeHtml(shorten(e.blocked_reason, 80))}` : ''}${e.block_count ? ` · blocked ${escapeHtml(e.block_count)}×` : ''} ${chips}`,
       };
     }
+    case 'work_item': {
+      const st = e.status || 'due';
+      const closed = e.basis_call_id ? _linkChip(e.basis_call_id, `closed by #${e.basis_call_id}`) : '';
+      return {
+        pill: `<span class="pill ${st === 'resolved' ? 'ok' : (st === 'failed' ? 'error' : 'self-correction')}">Work item</span>`,
+        line: `${escapeHtml(e.origin || '')} · ${escapeHtml((e.task_ids || []).join(', '))} <code>${escapeHtml(e.tool || '')}</code> ${escapeHtml(shorten(e.args_summary || e.why || '', 100))}`,
+        meta: `${escapeHtml(st)}${e.outcome ? ` · ${escapeHtml(shorten(e.outcome, 80))}` : ''} ${closed}`,
+      };
+    }
     case 'trace_opened':
       return {
         pill: '<span class="pill">Trace opened</span>',
@@ -685,6 +695,7 @@ function _stripeFor(e) {
     case 'curiosity_probe': return 'var(--ok)';
     case 'call_abandoned': case 'system_error': return 'var(--bad)';
     case 'deferred_intent': return 'var(--warn)';
+    case 'work_item': return 'var(--ok)';
     default: return 'var(--fg-2)';
   }
 }
@@ -896,7 +907,7 @@ function renderChart() {
     if (z < t0 - m || a > t1 + m) { run = []; return; }
     const failed = run.filter(e => !e.success).length;
     toolsHtml += blk(run[0], x(a), x(z) - x(a) + 0.3, 'var(--fg-2)',
-      `${run.length} call${run.length > 1 ? 's' : ''}${failed ? ` · ${failed} failed` : ''}`, '#0c0f14', run[run.length - 1].call_id);
+      `${run.length} call${run.length > 1 ? 's' : ''}${failed ? ` · ${failed} failed` : ''}`, 'var(--on-fill)', run[run.length - 1].call_id);
     run = [];
   };
   // Zoomed in, a batch splits wherever two calls have room between them.

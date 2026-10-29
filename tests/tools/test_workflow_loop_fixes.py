@@ -1,19 +1,19 @@
 """Workflow regression tests: a run that burns its turns on gate rituals
-while most coverage-ledger units stay unseen. Root causes covered:
+while most coverage-ledger units stay unseen. Failure classes covered:
 
-1. pre_report_check never mentioned the coverage ledger → agent did tool
-   sweeps instead of probing real evidence. Ledger gaps now lead the
-   blocking issues.
-2. reason.synthesize was Report-exclusive while pre_report_check demanded a
-   fresh synthesize → structural refuse loop. Synthesize now runs from
-   Analyze onward; the refuse latch forces Analyze, not Report.
-3. Identical input_scale directory refusals repeated with no
-   escalation. Repeats now name concrete files inside the error text.
-4. batch_run executed MCP tool names as shell commands (gate bypass).
-5. coverage.mark_blocked on a directory prefix returned an unhelpful
-   error; now explains per-unit semantics and lists contained units.
-6. dair_call trace entries did not persist which valve enforced the
-   work order — made valve-forced transitions indistinguishable.
+1. pre_report_check must mention the coverage ledger, or the agent sweeps
+   tools instead of probing real evidence. Ledger gaps lead the blocking
+   issues.
+2. reason.synthesize must run from Analyze onward: a Report-exclusive
+   synthesize while pre_report_check demands a fresh one is a structural
+   refuse loop. The refuse latch forces Analyze, not Report.
+3. Identical input_scale directory refusals must escalate: repeats name
+   concrete files inside the error text.
+4. batch_run must not execute MCP tool names as shell commands (gate bypass).
+5. coverage.mark_blocked on a directory prefix must explain per-unit
+   semantics and list contained units.
+6. dair_call trace entries must persist which valve enforced the work
+   order, or valve-forced transitions are indistinguishable.
 """
 from __future__ import annotations
 
@@ -37,6 +37,7 @@ class TestPreReportLedgerBlocker:
         inst.record_reason_call("reason_synthesize", True, "ok", {})
         return inst
 
+    @pytest.mark.usefixtures("todays_coverage")
     def test_open_units_block_report(self, tmp_path):
         from tools.reasoning import reason_pre_report_check
         inst = self._base_log(tmp_path)

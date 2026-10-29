@@ -52,7 +52,7 @@ class TestExecutionLog:
 
     def test_record_budget_wrapup_appends_typed_entry(self, log):
         # Written only by the agent loop; the report gate keys off the typed
-        # entry to relax content-quality blockers (P4 report-gate deadlock).
+        # entry to relax content-quality blockers.
         cid = log.record_budget_wrapup("turn_budget", 130)
         assert cid > 0
         entry = log._entries[-1]
@@ -332,7 +332,7 @@ class TestExecutionLog:
     # ── edge cases ────────────────────────────────────────────────────────────
 
     def test_no_record_when_unconfigured(self):
-        """Each record_* on an unconfigured log now raises RuntimeError so
+        """Each record_* on an unconfigured log raises RuntimeError so
         the caller (and ultimately the agent) sees a structured failure
         instead of a silent drop."""
         import core.execution_log as elog
@@ -456,7 +456,7 @@ class TestAtomicFlush:
         assert tmp_files == []
 
     def test_flush_warns_and_raises_on_bad_dir(self, tmp_path, capsys):
-        """_flush still warns to stderr for visibility, but now also raises
+        """_flush warns to stderr for visibility and also raises
         so the caller can surface a structured ToolError to the agent."""
         l = ExecutionLog()
         l.configure("ATOMIC-001", str(tmp_path / "trace.json"))
@@ -513,7 +513,7 @@ class TestThreadSafety:
 
 
 class TestUnconfiguredRecordRaises:
-    """Unconfigured trace now raises RuntimeError on every record_*; the
+    """An unconfigured trace raises RuntimeError on every record_*; the
     error message names the missing setup step so the agent can react."""
 
     def test_record_tool_call_raises(self):
@@ -726,78 +726,28 @@ class TestVerificationSatisfiedRendering:
         assert l._entries[-1]["verification_satisfied"] is True
 
 
-class TestProtocolViolationFlag:
-    """tool_call entries are flagged when no recent dair_call exists."""
+class TestNoProtocolFlagOnRecordedCalls:
+    """The DAIR gate (core.middleware) refuses a forensic call outside a
+    batch before it runs; a call the log records kept the protocol, so the
+    log stamps no violation of its own, whatever the entry window holds."""
 
-    def test_first_tool_call_not_flagged(self, tmp_path):
-        # An empty log gets no flag — there's nothing before it to compare against.
+    def test_a_call_after_dair_left_the_entry_window_is_not_flagged(self, tmp_path):
         l = ExecutionLog()
         l.configure("PV-001", str(tmp_path / "trace.json"))
-        l.record_tool_call("vol.psscan", True, False, 0, 0)
-        assert "protocol_violation" not in l._entries[0]
+        l.record_dair_call("Triage", "", False, "", "", "stay", "")
+        for _ in range(20):
+            # A call's sub-commands fill the entry window on their own.
+            l.record_tool_call("strings -a -n 4 evidence/CORP-WS01/disk.raw", True, False, 0, 0)
+        l.record_tool_call("vol.netscan", True, False, 0, 0)
+        assert not any(e.get("protocol_violation") for e in l._entries)
+        assert "PROTOCOL_VIOLATION" not in l.to_markdown()
 
-    def test_cold_start_tool_calls_not_flagged_before_any_dair(self, tmp_path):
-        # R3b cold-start grace: the mandated pre-plan recon batch (hash verify,
-        # image mount, hive reads) runs BEFORE the first dair_assess and must
-        # NOT be flagged — flagging it was a self-contradiction. A missing-DAIR
-        # violation only applies once DAIR has engaged at least once.
+    def test_an_older_traces_flag_still_renders(self, tmp_path):
         l = ExecutionLog()
         l.configure("PV-002", str(tmp_path / "trace.json"))
         l.record_tool_call("vol.psscan", True, False, 0, 0)
-        l.record_tool_call("vol.netscan", True, False, 0, 0)
-        assert "protocol_violation" not in l._entries[1]
-
-    def test_tool_call_without_recent_dair_flagged_after_dair_aged_out(self, tmp_path):
-        # Once DAIR has engaged, a later tool_call with no dair in the 20-entry
-        # window IS flagged (the genuine "agent dropped DAIR mid-investigation").
-        l = ExecutionLog()
-        l.configure("PV-002b", str(tmp_path / "trace.json"))
-        l.record_dair_call("Triage", "", False, "", "", "stay", "")
-        for _ in range(20):
-            l.record_reason_call("reason_hypothesize", True, "ok", {})
-        l.record_tool_call("vol.netscan", True, False, 0, 0)
-        assert l._entries[-1].get("protocol_violation") == "no_active_dair_batch"
-
-    def test_tool_call_with_recent_dair_unflagged(self, tmp_path):
-        l = ExecutionLog()
-        l.configure("PV-003", str(tmp_path / "trace.json"))
-        l.record_dair_call("Triage", "", False, "", "", "stay", "")
-        l.record_tool_call("vol.psscan", True, False, 0, 0)
-        tc = [e for e in l._entries if e["type"] == "tool_call"][0]
-        assert "protocol_violation" not in tc
-
-    def test_tool_call_beyond_20_entry_window_flagged(self, tmp_path):
-        l = ExecutionLog()
-        l.configure("PV-004", str(tmp_path / "trace.json"))
-        l.record_dair_call("Triage", "", False, "", "", "stay", "")
-        # 20 reason_calls push the dair_call out of the lookback window.
-        for _ in range(20):
-            l.record_reason_call("reason_hypothesize", True, "ok", {})
-        l.record_tool_call("vol.psscan", True, False, 0, 0)
-        tc = [e for e in l._entries if e["type"] == "tool_call"][-1]
-        assert tc.get("protocol_violation") == "no_active_dair_batch"
-
-    def test_markdown_renders_violation_marker(self, tmp_path):
-        l = ExecutionLog()
-        l.configure("PV-005", str(tmp_path / "trace.json"))
-        # DAIR engaged once, then aged out of the 20-entry window → the next
-        # tool_call is a real violation that the markdown must render. (Under
-        # R3b a tool_call before any dair is cold-start grace, not a violation.)
-        l.record_dair_call("Triage", "", False, "", "", "stay", "")
-        for _ in range(20):
-            l.record_reason_call("reason_hypothesize", True, "ok", {})
-        l.record_tool_call("vol.netscan", True, False, 0, 0)
-        md = l.to_markdown()
-        assert "PROTOCOL_VIOLATION" in md
-        assert "no_active_dair_batch" in md
-
-    def test_markdown_no_violation_when_dair_recent(self, tmp_path):
-        l = ExecutionLog()
-        l.configure("PV-006", str(tmp_path / "trace.json"))
-        l.record_dair_call("Triage", "", False, "", "", "stay", "")
-        l.record_tool_call("vol.psscan", True, False, 0, 0)
-        md = l.to_markdown()
-        assert "PROTOCOL_VIOLATION" not in md
+        l._entries[-1]["protocol_violation"] = "no_active_dair_batch"
+        assert "PROTOCOL_VIOLATION: no_active_dair_batch" in l.to_markdown()
 
 
 class TestSelfCorrection:
@@ -1209,7 +1159,7 @@ class TestDairPhaseStamping:
     def test_stay_does_not_overwrite_stack_phase(self, tmp_path):
         """Phase stack is sole authority on stay.
 
-        A Collect↔Analyze oscillation: a valve pushes Analyze, then the
+        A Collect<->Analyze oscillation: a valve pushes Analyze, then the
         next dair_assess declares Collect+stay; reconciling to the declared
         phase would demote the stack. Stay must keep the stack top.
         """

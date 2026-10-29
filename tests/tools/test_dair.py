@@ -506,7 +506,7 @@ class TestDairExecutionLog:
         assert "_atlas_call_id" in r
 
     def test_record_dair_call_includes_phase_rationale(self, tmp_path, monkeypatch):
-        """Unconfigured log used to silently return 0 — now it raises, so this
+        """An unconfigured log raises, so this
         test must configure the log. Once configured, the entry round-trips
         with phase_rationale preserved."""
         import core.execution_log as elog
@@ -1402,8 +1402,9 @@ class TestDairPrincipalCandidates:
         assert r["stack_action"] == "stay"
         assert "MAINT_OP" in _candidate_values(r, "principal")
 
-    def test_network_logon_unknown_principal_queues_not_forces(self, tmp_path):
+    def test_network_logon_unknown_principal_queues_not_forces(self, tmp_path, monkeypatch):
         # Tier B: noisier network logon enqueues rather than pre-empting stay.
+        monkeypatch.setenv("ATLAS_DAIR_PRINCIPAL_UNSEEN", "0")      # the cue tiers' path
         from core.execution_log import ExecutionLog
         l = ExecutionLog()
         l.configure("PRINCIPALPUSH", str(tmp_path / "trace.json"))
@@ -1797,6 +1798,7 @@ class TestAssessOnChange:
         _r2, c2 = self._assess(l)
         c2.assert_called_once()
 
+    @pytest.mark.usefixtures("todays_dair")
     def test_an_open_deferred_probe_consults_the_director(self, tmp_path):
         l = self._log(tmp_path)
         self._assess(l)
@@ -1931,56 +1933,6 @@ class TestStructuredReply:
         assert a["directives"]["priority_tools"] == ["yara.scan_directory"]
 
 
-class TestRepeatedOutputNotice:
-    """The director is told when its recent work re-derives what the run
-    already holds. The empty-loop valve catches an identical work order; a
-    varied one returning answers already obtained is invisible to it, and to
-    the call memo, which keys on the question rather than the answer. The
-    notice reports that rate and decides nothing."""
-
-    class _Log:
-        def __init__(self, entries):
-            self._entries = entries
-
-    @staticmethod
-    def _calls(hashes):
-        return [{"type": "tool_call", "output_hash": h} for h in hashes]
-
-    def _rate(self, entries):
-        from unittest.mock import patch
-        from tools.dair import _recent_repeat_rate
-        with patch("core.execution_log.log", self._Log(entries)):
-            return _recent_repeat_rate()
-
-    def test_a_run_re_deriving_what_it_holds_is_told(self):
-        entries = self._calls([f"h{i}" for i in range(20)]
-                              + [f"h{i}" for i in range(20)])
-        out = self._rate(entries)
-        assert "REPEATED OUTPUT" in out
-        assert "20 of the last 40" in out
-        assert "Judge whether" in out          # reports, does not instruct
-
-    def test_a_productive_run_is_left_alone(self):
-        assert self._rate(self._calls([f"h{i}" for i in range(60)])) == ""
-
-    def test_a_moderate_rate_is_not_worth_saying(self):
-        entries = self._calls([f"h{i}" for i in range(40)]
-                              + [f"h{i}" for i in range(5)]
-                              + [f"n{i}" for i in range(35)])
-        assert self._rate(entries) == ""
-
-    def test_a_run_too_short_to_judge_says_nothing(self):
-        assert self._rate(self._calls(["a", "a", "a", "a"])) == ""
-
-    def test_calls_without_an_output_hash_are_ignored(self):
-        assert self._rate([{"type": "tool_call"} for _ in range(40)]) == ""
-
-    def test_entries_that_are_not_tool_calls_do_not_count(self):
-        entries = ([{"type": "finding", "output_hash": "h"} for _ in range(40)]
-                   + self._calls(["a", "b"]))
-        assert self._rate(entries) == ""
-
-
 class TestThePrivateHelperIsNotATool:
     """A helper added just above a decorated tool takes that tool's decorator
     and the tool stops existing. When `dair_assess` vanishes from the
@@ -2036,3 +1988,30 @@ def test_the_director_is_shown_the_report_gates_own_verdict():
     assert block.startswith("REPORT GATE (latest reason.pre_report_check, call #9)")
     assert "re-cite F3" in block and "cites nothing" not in block
     assert _report_gate_block(entries[:1]) == ""
+
+
+class TestUnseenPrincipalCandidates:
+    """ATLAS_DAIR_PRINCIPAL_UNSEEN, with the scenario checks off:
+    an account the case does not know is a candidate without logon words."""
+
+    def test_an_unseen_account_without_logon_words_is_a_candidate(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ATLAS_WORK_ORDER", "1")
+        monkeypatch.setenv("ATLAS_REPORT_CHECK_NO_SCENARIO", "1")
+        from core.execution_log import ExecutionLog
+        l = ExecutionLog()
+        l.configure("PRINCIPALUNSEEN", str(tmp_path / "trace.json"))
+        with patch("core.execution_log.log", l):
+            run = TestDairPrincipalCandidates()._run
+            r = run(summary="user batch_svc read archive.zip on host-01",
+                    case_context="Subject jdoe on host host-01", assessment=_SCAN_STAY_EMPTY_FOCUS)
+            known = run(summary="user jdoe read archive.zip on host-01",
+                        case_context="Subject jdoe on host host-01", assessment=_SCAN_STAY_EMPTY_FOCUS)
+        cand = [p for p in r.get("candidate_pivots") or [] if p.get("kind") == "principal"]
+        assert [(p["value"], p["cue"]) for p in cand] == [("BATCH_SVC", "unseen")]
+        assert not [p for p in known.get("candidate_pivots") or [] if p.get("kind") == "principal"]
+
+
+def test_domain_accounts_are_a_second_source_of_unseen_principals():
+    from tools.dair import _entity_principals
+    assert _entity_principals("the share listing shows CORP\\batch_svc owns archive.zip") == {"BATCH_SVC"}
+    assert _entity_principals("C:\\Users\\jdoe\\Desktop\\a.txt") == set()

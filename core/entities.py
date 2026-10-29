@@ -36,14 +36,59 @@ _FLAG_RE = re.compile(r"\b(?:flag|ctf|htb|thm|key)\{[^}]{2,}\}", re.IGNORECASE)
 # are the code span or quotation around it.
 _URL_RE = re.compile(r"\bhttps?://[^\s\"'<>)\]`”’»}]+", re.IGNORECASE)
 _EMAIL_RE = re.compile(r"\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b")
+# The first label must contain a letter, so version numbers ("3.14") and a
+# cut digits-only name ("624_4625.csv") stay out. A stem may hold dots ("setupapi.dev.log", "jquery.min.js"); the extension is
+# the last label, which _is_file_name checks against the extension list. A
+# label after a dot carries no hyphen, so a Prefetch name
+# ("ERASER.EXE-1A2B3C4D.pf") still yields the program it names.
+_FILENAME_STEM = r"\b(?=[\w#@$-]{0,63}[A-Za-z])[\w#@$-]{1,64}(?:\.[\w#@$]{1,64}){0,4}\."
+_FILENAME_SHAPE = _FILENAME_STEM + r"[A-Za-z0-9]{1,5}\b"
+_FILENAME_RE = re.compile(_FILENAME_SHAPE)
+
+# Extensions files actually carry — knowledge about file types, not about
+# any case. A bare "name.ext" token is a file only with one of these; a
+# path (see _path_entities) is a file whatever its extension. This is the
+# one list: core.ioc_catalog._KNOWN_FILE_EXT is this object. "com" is not
+# in it: a bare "name.com" is a web domain far more often than a DOS
+# program, and a path ending in .com stays a file through the path rule.
+# Ten entries are delegated top-level domains too (cab java md mov pf pl py
+# sh so zip); in forensic text they name files.
+FILE_EXTENSIONS = frozenset("""
+exe dll sys drv ocx cpl scr pif msi msp msu cab jar class apk ipa dmg pkg
+ps1 psm1 psd1 bat cmd vbs vbe js jse wsf wsh hta py pyc pyw rb pl sh bash zsh
+php asp aspx jsp lnk url inf reg hve hive dat evtx evt etl jrs pf db sqlite sqlite3 mdb
+zip rar 7z gz bz2 xz tar tgz iso img vhd vhdx vmdk e01 ex01 raw dd bin mem dmp
+doc docx docm xls xlsx xlsm ppt pptx pptm pdf rtf odt ods txt log csv tsv json
+jsonl xml yaml yml html htm eml msg pst ost dbx mbx mbox wab nk2 oab pab pem crt cer key p12 pfx cfg ini
+conf plist tmp bak old swp torrent lock
+jpg jpeg png gif bmp tif tiff webp heic svg ico psd mp3 mp4 m4a wav flac ogg avi mkv mov wmv webm
+pcap pcapng cap mft edb wal
+so dylib ko elf deb rpm phtml shtml cgi war
+md go ts css java
+""".split())
+
 # Windows paths: the directories a profile lives in carry spaces ("Documents
 # and Settings", "Program Files", "Application Data"), so a segment that is
 # followed by another backslash may contain any character Windows allows in a
 # name, spaces included; the final segment stops at whitespace, as prose
 # follows it. A path that stopped at the first space shattered into location
 # words ("data", "microsoft") that then looked like the artifacts a finding
-# was about.
-_WIN_SEGMENT = r"(?:[^\\/:*?\"<>|\r\n`]+?\\)*"
+# was about. The opposite failure: prose after a path ("x.exe was run by
+# CORP\user", "x.exe set HKLM\...") carries a later backslash, and a spaced
+# segment would run on to it, swallowing the file and the account behind
+# it. So a segment ends before a file name that whitespace follows: a token
+# of the file-name shape whose last label is a known extension (the test
+# _is_file_name applies). A directory is not named like a file, so the
+# token is the path's last element and the rest is prose. A dotted token
+# with any other last label ("ASP.NET Web Pages", "Tool v2.1 x64") stays
+# inside the segment. The same stop applies to registry keys, which compose
+# the same segment. Ceiling: a directory or key whose name holds a token
+# ending in a known extension before a space ("C:\nodejs\Node.js Tools\x")
+# is read as prose, and the path ends at that token ("C:\nodejs\Node.js").
+_KNOWN_EXT = "|".join(sorted(map(re.escape, FILE_EXTENSIONS), key=len, reverse=True))
+_FILE_NAME_BEFORE_SPACE = _FILENAME_STEM + r"(?i:" + _KNOWN_EXT + r")\s"
+_SEGMENT_CHAR = r"(?!" + _FILE_NAME_BEFORE_SPACE + r")[^\\/:*?\"<>|\r\n`]"
+_WIN_SEGMENT = r"(?:(?:" + _SEGMENT_CHAR + r")+?\\)*"
 _WIN_TAIL = r"[^\s\\/:*?\"'<>|,;`]*"
 _UNC_RE = re.compile(r"\\\\[\w.-]+\\" + _WIN_SEGMENT + _WIN_TAIL)
 _WIN_PATH_RE = re.compile(r"\b[A-Za-z]:\\" + _WIN_SEGMENT + _WIN_TAIL)
@@ -52,26 +97,37 @@ _REG_RE = re.compile(
     re.IGNORECASE)
 _UNIX_PATH_RE = re.compile(r"(?<![\w.])/(?:[\w.+-]+/)+[\w.+-]+")
 # A UTC offset lies within +-14:00; "22:21-22:26" is a time range, and its
-# second half must not be read as the first half's offset.
+# second half must not be read as the first half's offset. A range's second
+# half may be an early hour too ("10:16-10:48"), and the two cannot be told
+# apart by syntax ("10:00-11:00" is also the offset -11:00). So a negative
+# offset is accepted only after seconds, which machine logs write; a
+# minute-precision negative offset is read as a range, and its time is kept
+# as written, not shifted to UTC. After seconds, an offset is never followed
+# by ":" or a digit, so a seconds range ("10:16:00-10:48:00") keeps its
+# start time and drops no offset. "Z" and a positive offset read at either
+# precision.
 _TS_RE = re.compile(
-    r"\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?"
-    r"(?:Z|[+-](?:0\d|1[0-4]):?[0-5]\d)?\b")
-_IPV4_RE = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
+    r"\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}"
+    r"(?::\d{2}(?:\.\d+)?(?:(?:Z|[+-](?:0\d|1[0-4]):?[0-5]\d)(?![:\d]))?"
+    r"|(?:Z|\+(?:0\d|1[0-4]):?[0-5]\d)?)\b")
+# An IPv4 address, never the head of a longer dotted run: a digit and a dot
+# before it, or two more dotted numbers after it, make it part of an OID or
+# a version string ("1.3.6.1.4.1.311", "8086.0.0.0.0"). One trailing part
+# stays an address with its port, as tcpdump and ngrep print it.
+_IPV4_RE = re.compile(r"(?<!\d\.)\b\d{1,3}(?:\.\d{1,3}){3}\b(?!\.\d{1,5}\.\d)(?!\.\d{6})")
 _IPV6_CAND_RE = re.compile(r"\b[0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f]{0,4}){2,7}\b")
 _HEX_RE = re.compile(r"\b[0-9a-fA-F]{16,64}\b")
-# The first label must contain a letter, so version numbers ("3.14") and a
-# cut digits-only name ("624_4625.csv") stay out. A stem may hold dots ("setupapi.dev.log", "jquery.min.js"); the extension is
-# the last label, which _is_file_name checks against the extension list. A
-# label after a dot carries no hyphen, so a Prefetch name
-# ("ERASER.EXE-1A2B3C4D.pf") still yields the program it names.
-_FILENAME_RE = re.compile(
-    r"\b(?=[\w#@$-]{0,63}[A-Za-z])[\w#@$-]{1,64}(?:\.[\w#@$]{1,64}){0,4}\.[A-Za-z0-9]{1,5}\b")
 # DOMAIN\user — exactly two components (a trailing backslash means it is a
 # relative Windows path fragment, not an account). Still collides with prose
-# like "Windows\Temp"; harmless, since an entity only matters when BOTH texts
-# contain the same canonical form.
+# like "Windows\Temp" (and "NT AUTHORITY\SYSTEM" reads as authority/system);
+# harmless, since an entity only matters when BOTH texts contain the same
+# canonical form. A pair that follows a path separator is
+# two components inside a longer path ("ControlSet001\Control\Windows"), not
+# DOMAIN\user, so a separator before the first component also refuses it.
 _ACCOUNT_RE = re.compile(
-    r"\b([A-Za-z][\w-]{1,30})\\([A-Za-z][\w.$-]{1,30})\b(?!\\)")
+    r"(?<![\\/])\b([A-Za-z][\w-]{1,30})\\([A-Za-z][\w.$-]{1,30})\b(?!\\)")
+# A registry root key ("HKLM\Software") never reaches this pattern: _REG_RE
+# claims it first (_extractors order).
 
 _HASH_TYPE_BY_LEN = {32: "md5", 40: "sha1", 64: "sha256"}
 
@@ -178,28 +234,6 @@ def _extractors():
         (_ACCOUNT_RE, _account_entity),
     )
 
-
-# Extensions files actually carry — knowledge about file types, not about
-# any case. A bare "name.ext" token is a file only with one of these; a
-# path (see _path_entities) is a file whatever its extension. This is the
-# one list: core.ioc_catalog._KNOWN_FILE_EXT is this object. "com" is not
-# in it: a bare "name.com" is a web domain far more often than a DOS
-# program, and a path ending in .com stays a file through the path rule.
-# Ten entries are delegated top-level domains too (cab java md mov pf pl py
-# sh so zip); in forensic text they name files.
-FILE_EXTENSIONS = frozenset("""
-exe dll sys drv ocx cpl scr pif msi msp msu cab jar class apk ipa dmg pkg
-ps1 psm1 psd1 bat cmd vbs vbe js jse wsf wsh hta py pyc pyw rb pl sh bash zsh
-php asp aspx jsp lnk url inf reg hve hive dat evtx evt etl jrs pf db sqlite sqlite3 mdb
-zip rar 7z gz bz2 xz tar tgz iso img vhd vhdx vmdk e01 ex01 raw dd bin mem dmp
-doc docx docm xls xlsx xlsm ppt pptx pptm pdf rtf odt ods txt log csv tsv json
-jsonl xml yaml yml html htm eml msg pst ost dbx mbx mbox wab nk2 oab pab pem crt cer key p12 pfx cfg ini
-conf plist tmp bak old swp torrent lock
-jpg jpeg png gif bmp tif tiff webp heic svg ico psd mp3 mp4 m4a wav flac ogg avi mkv mov wmv webm
-pcap pcapng cap mft edb wal
-so dylib ko elf deb rpm phtml shtml cgi war
-md go ts css java
-""".split())
 
 # The file classes a request names by a head noun ("an executable", "the
 # documents", "the log file"), and the extensions of each: universal
@@ -438,6 +472,42 @@ def extract(text: str) -> set[str]:
                 found.update(entities)
                 consumed.append(span)
     return found
+
+
+# "Event ID 4624", "event 4624" and the analyst's shorthand "EID 4624": the
+# cue an event id stands after in prose. The same grammar the evidence
+# resolver's anchors and the audit read; defined once, here, beside the
+# other extractors.
+EVENT_ID_RE = re.compile(r"(?i)\b(?:event\s*(?:id)?|eid)\s*[:#]?\s*(\d{3,5})\b")
+# The same cue followed by a list ("event ids 4663 and 4656", "EIDs 4624/4625").
+EVENT_IDS_RE = re.compile(r"(?i)\b(?:event\s*(?:ids?)?|eids?)\s*[:#]?\s*"
+                          r"(\d{3,5}(?:\s*(?:,|/|&|and|or|und|oder)\s*\d{3,5})*)\b")
+
+
+def event_ids(text: str) -> list[str]:
+    """Every event id a text names after an event cue, lists included."""
+    out: list[str] = []
+    for m in EVENT_IDS_RE.finditer(text or ""):
+        out += re.findall(r"\d{3,5}", m.group(1))
+    return list(dict.fromkeys(out))
+
+
+def checkable_entities(text: str, hosts: Iterable[str] = ()) -> set[str]:
+    """The ``kind:value`` strings of ``text`` a tool output could show: the
+    discriminative entities of extract (file, url, email, account, the
+    hashes, hex, ip, minute timestamp), the domain names, the event ids
+    named after their cue (``eid:4624``) and the case hosts the text names
+    (``host:LABEL``, through core.forensic_citation.host_mentioned). One
+    function for the row test; the restatement check has its own names
+    comparison."""
+    text = str(text or "")
+    out = set(discriminative(extract(text)))
+    out |= {f"domain:{d}" for d in domains_in(text)}
+    out |= {f"eid:{m.group(1)}" for m in EVENT_ID_RE.finditer(text)}
+    if hosts:
+        from core.forensic_citation import host_mentioned
+        out |= {f"host:{h}" for h in hosts if h and host_mentioned(h, text)}
+    return out
 
 
 # Entity types distinctive enough that one shared value between two texts is
@@ -727,3 +797,213 @@ def relation(new: str, old: str, *, threshold: float, ignore_negation: bool = Fa
     if elaborates and cover_old >= threshold:
         return "elaborates", cover_old
     return None
+
+
+# ── the names comparison: does text B restate only names texts A state? ─────
+#
+# One restatement check for the program (the answer composer's sentence check
+# and the conclusion door's basis rule read it). It compares normalised
+# surface tokens, not span-consuming entities: recorded statements carry
+# JSON-doubled backslashes, paths are written with either slash, a count
+# with or without a thousands separator, a time with or without its seconds,
+# and a span-consuming extractor refused such copies. The names of a text
+# are a lexical shape, stated here as code-rules rule 2 asks: tokens that
+# carry a digit or an inner separator, the lexicon's own case names (built
+# by the caller from the current beliefs at run time), and the typed values
+# without spaces (addresses, hashes, e-mail, URL) by value.
+
+_NAME_TOKEN_RE = re.compile(r"[a-z0-9$][a-z0-9._:\\@$-]*[a-z0-9$]|[a-z0-9]")
+_NAME_SEPS = "._:-\\t "
+_NAME_TYPED = ("ip", "md5", "sha1", "sha256", "hex", "email", "url")
+_NAME_RANGE_RE = re.compile(
+    r"^(\d{1,2}:\d{2}(?::\d{2})?)-(\d{1,2}:\d{2}(?::\d{2})?)$|^(\d{4}-\d{2}-\d{2})-(\d{4}-\d{2}-\d{2})$")
+_NAME_DATED_RE = re.compile(r"^\d{4}-\d{2}-\d{2}|^\d{1,2}:\d{2}")
+_NAME_ISO_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})t(\d{2}:\d{2}(?::\d{2})?)")
+_NAME_TIME_RANGE_RE = re.compile(r"^\d{1,2}:\d{2}(?::\d{2})?-\d{1,2}:\d{2}")
+_NAME_INNER_SEP_RE = re.compile(r"[a-z0-9][._:\\@$][a-z0-9]")
+# A clock with a stated zone is one name as written, its zone part of the
+# value: a local time read as UTC is the classic timeline error. Zones are
+# Z, UTC, GMT and a numeric offset within +-14:00; a minus offset only after
+# a clock with seconds, the rule _TS_RE states: "10:16-12:00" and
+# "2031-03-04 20:26-20:27 UTC" are ranges, with or without their date.
+_ZONED_RE = re.compile(
+    r"(?<![\w:.+-])(?:(\d{4}-\d{2}-\d{2})[t ])?(\d{1,2}:\d{2}(?::\d{2})?)(?:\.\d+)?"
+    r"(?:\s?(z|utc|gmt)(?![a-z0-9])|([+-])(0\d|1[0-4]):?([0-5]\d)(?![\d:]))")
+_BARE_CLOCK_RE = re.compile(r"\d{1,2}:\d{2}(?::\d{2})?")
+
+
+def _zoned_match(m: "re.Match") -> tuple[str | None, str, int] | None:
+    """(date or None, clock as written, offset in minutes) of a zoned clock
+    match, None for a minus that is a range's dash."""
+    date, clock, named, sign, hh, mm = m.groups()
+    if named:
+        return date, clock, 0
+    if sign == "-" and clock.count(":") < 2:
+        return None
+    off = int(hh) * 60 + int(mm)
+    return date, clock, -off if sign == "-" else off
+
+
+def _zoned_parts(tok: str) -> tuple[str | None, str, int] | None:
+    m = _ZONED_RE.fullmatch(tok)
+    return _zoned_match(m) if m else None
+
+
+def _clock_covers(pool_clock: str, clock: str) -> bool:
+    """A clock covers itself and a less precise form of itself."""
+    return pool_clock == clock or pool_clock.startswith(clock + ":")
+
+
+def _instant(z: tuple[str | None, str, int], seconds: bool, dated: bool) -> int:
+    """The UTC moment of a zoned clock, in seconds: from the epoch of its
+    date when ``dated``, else the second of the day."""
+    date, clock, off = z
+    h, m, *rest = (int(x) for x in clock.split(":"))
+    sec = h * 3600 + m * 60 + (rest[0] if rest and seconds else 0) - off * 60
+    if dated and date:
+        import datetime as _dt
+        return _dt.date.fromisoformat(date).toordinal() * 86400 + sec
+    return sec % 86400
+
+
+def _names_norm(text: str) -> str:
+    """Lower case, JSON-doubled backslashes undone, slashes one way,
+    thousands separators dropped (53,760 -> 53760)."""
+    t = (text or "").replace("\\\\", "\\").lower().replace("/", "\\")
+    return re.sub(r"(?<=\d),(?=\d{3}\b)", "", t)
+
+
+def name_tokens(text: str) -> set[str]:
+    """The normalised tokens of a text; an ISO moment adds its date and its
+    clock, a hyphenated time range adds its two ends. A clock with a stated
+    zone is one token as written (its date added), never a bare clock."""
+    out: set[str] = set()
+    norm = _names_norm(text)
+    zoned = [m for m in _ZONED_RE.finditer(norm) if _zoned_match(m)]
+    for m in reversed(zoned):
+        out.add(" ".join(m.group(0).split()))
+        if m.group(1):
+            out.add(m.group(1))
+        norm = norm[:m.start()] + " " + norm[m.end():]
+    for tok in _NAME_TOKEN_RE.findall(norm):
+        tok = tok.strip(".:-\\")
+        if not tok:
+            continue
+        out.add(tok)
+        m = _NAME_ISO_RE.match(tok)
+        if m:
+            out.update(m.groups())
+        if _NAME_TIME_RANGE_RE.match(tok):
+            out.update(tok.split("-"))
+    return out
+
+
+def _is_name_token(tok: str, lexicon: frozenset[str] | set[str]) -> bool:
+    return bool(any(ch.isdigit() for ch in tok) or _NAME_INNER_SEP_RE.search(tok) or tok in lexicon)
+
+
+def names_in(text: str, lexicon: frozenset[str] | set[str] = frozenset()) -> set[str]:
+    """The names ``text`` uses, normalised. A compound joined by hyphens, or
+    by slashes without a drive or root, is judged by its pieces
+    ("<host>-centered", "copy/delete"); a whole account or host name of the
+    lexicon stays whole, so a hyphenated account is not read as two words;
+    a dash-joined time or date range stands for its two ends; typed values
+    without spaces come as ``kind=value``."""
+    lex = {str(x).lower() for x in lexicon}
+    body = str(text or "")
+    out: set[str] = set()
+    for t in name_tokens(body):
+        if t in lex or _zoned_parts(t):
+            out.add(t)
+            continue
+        dated = _NAME_DATED_RE.match(t)
+        rng = _NAME_RANGE_RE.match(t) if dated else None
+        if rng:
+            out.update(g for g in rng.groups() if g)
+            continue
+        if not dated and ("-" in t or ("\\" in t and ":" not in t)) and not t.startswith("\\"):
+            pieces = [p for p in re.split(r"[-\\]", t) if p]
+            if len(pieces) > 1:
+                out.update(p for p in pieces if _is_name_token(p, lex))
+                continue
+        if _is_name_token(t, lex):
+            out.add(t)
+    for e in extract(body):
+        kind, _, val = e.partition(":")
+        if kind in _NAME_TYPED and " " not in val:
+            out.add(kind + "=" + _names_norm(val))
+    return out
+
+
+class NamePool:
+    """What a set of texts states: their normalised tokens, every directory
+    of a path they name, the pieces of their hyphenated tokens, and the flat
+    text (for typed values)."""
+
+    def __init__(self, tokens: set[str], flat: str):
+        self.tokens = tokens
+        self.flat = flat
+        self.zoned = [z for z in map(_zoned_parts, tokens) if z]
+
+    @classmethod
+    def from_texts(cls, texts: Iterable[str]) -> "NamePool":
+        joined = "\n".join(str(t or "") for t in texts)
+        toks = name_tokens(joined)
+        extra: set[str] = set()
+        for t in toks:
+            if "\\" in t:
+                parts = t.split("\\")
+                for i in range(1, len(parts)):
+                    extra.add("\\".join(parts[:i]))
+                extra.update(p for p in parts if p)
+            if "-" in t and not _zoned_parts(t):
+                extra.update(p for p in t.split("-") if p)
+        return cls(toks | extra, _names_norm(joined))
+
+    def _covers_zoned(self, z: tuple[str | None, str, int]) -> bool:
+        """A zoned name: the same instant among the pool's zoned values (at
+        the name's precision; the date counts when both state one), or its
+        written clock (and date) in a text that states no zone."""
+        seconds = z[1].count(":") == 2
+        for p in self.zoned:
+            if seconds and p[1].count(":") < 2:
+                continue
+            dated = bool(z[0] and p[0])
+            if _instant(z, seconds, dated) == _instant(p, seconds, dated):
+                return True
+        clock_ok = any(_clock_covers(t, z[1]) for t in self.tokens if _BARE_CLOCK_RE.fullmatch(t))
+        return clock_ok and (not z[0] or self.covers(z[0]))
+
+    def covers(self, name: str) -> bool:
+        """A name is covered when it is a token of the pool, a shortened form
+        of one (a prefix at a separator: the directory of a cited path, a time
+        without its seconds), a date and time written as one token whose parts
+        are covered, a list joined by slashes made of covered tokens, or a
+        typed value present in the flat text."""
+        kind, eq, val = name.partition("=")
+        if eq and kind in _NAME_TYPED:
+            return val in self.flat
+        z = _zoned_parts(name)
+        if z:
+            return self._covers_zoned(z)
+        if name in self.tokens:
+            return True
+        if any(p.startswith(name) and len(p) > len(name) and p[len(name)] in _NAME_SEPS for p in self.tokens):
+            return True
+        m = _NAME_ISO_RE.match(name)
+        if m:
+            return all(self.covers(part) for part in m.groups())
+        if "\\" in name and ":" not in name and not name.startswith("\\"):
+            parts = [x for x in name.split("\\") if x]
+            return bool(parts) and all(x in self.tokens for x in parts)
+        # A bare clock states no zone: a zoned value written with that clock
+        # covers it.
+        if _BARE_CLOCK_RE.fullmatch(name):
+            return any(_clock_covers(p[1], name) for p in self.zoned)
+        return False
+
+
+def unstated(text: str, pool: NamePool, lexicon: frozenset[str] | set[str] = frozenset()) -> list[str]:
+    """The names of ``text`` the pool does not cover, sorted; empty when the
+    text restates only what the pool's texts state."""
+    return sorted(n for n in names_in(text, lexicon) if not pool.covers(n))

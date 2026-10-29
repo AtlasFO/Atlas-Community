@@ -18,7 +18,7 @@ investigation + report (immediate)
         ↓
 background Brain learning (non-blocking)
         ↓
-Dashboard → Brain Review  (when candidates appear)
+Dashboard → Brain → Inbox  (when candidates appear)
         ↓
 Approve / Edit / Reject
 ```
@@ -46,7 +46,7 @@ Investigators do **not** need to choose a special “learn” command. A finishe
 `atlas train` is **not** required for long-term Brain growth. Prefer `atlas run`
 for production work; use `atlas train` when you want the independent reviewer.
 
-After learning, open **Dashboard → Brain Review** when pending candidates
+After learning, open **Dashboard → Brain → Inbox** when pending candidates
 appear. Prefer rejecting mediocre lessons — quality over quantity.
 
 ---
@@ -80,7 +80,7 @@ LLM extracts ≤3 high-confidence reusable lessons
         ↓
 Quality gates (strict: confidence=high, triviality, residue, identifiers, novelty)
         ↓
-inbox/memory-candidates/  →  Dashboard Brain Review  →  approve/edit/reject
+inbox/memory-candidates/  →  Dashboard Brain Inbox  →  approve/edit/reject
         ↓
 wiki/… or memory/…
 ```
@@ -113,7 +113,7 @@ Disable with `ATLAS_NO_BRAIN_AUTO=1`.
 atlas run --case DIR               # investigate; learn in background
 atlas train --case DIR -q '…'      # + independent reviewer (labs)
 atlas brain learn --case DIR       # re-run learning synchronously
-# Dashboard → Brain Review
+# Dashboard → Brain → Inbox
 ```
 
 Disable: `ATLAS_NO_BRAIN=1` (all) · `ATLAS_NO_BRAIN_LEARN=1` (learn only) ·

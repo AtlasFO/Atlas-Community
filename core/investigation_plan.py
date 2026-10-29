@@ -204,7 +204,7 @@ def build_investigation_plan(
         from core.evidence_links import load_evidence_links, sync_evidence_links
         elinks = load_evidence_links(root)
         if not (elinks.get("entries") or []):
-            elinks = sync_evidence_links(root, persist=True)
+            elinks = sync_evidence_links(root, persist=persist)
         link_hosts = list(elinks.get("hosts") or [])
         link_paths = list(elinks.get("paths") or [])
         link_aliases = dict(elinks.get("aliases") or {})
@@ -411,6 +411,7 @@ def build_investigation_plan(
             messages=messages,
             model=model,
             provider=provider,
+            persist=persist,
         )
         plan["resources"] = resources
         budget = resources.get("context_budget") or {}
@@ -443,6 +444,14 @@ def build_investigation_plan(
                     if c.is_file() and c.suffix.lower() == ".evtx"
                 ][:200] if _P(p).is_dir() else []
                 if kids:
+                    from core.input_scale import shard_order_neutral_on
+                    if shard_order_neutral_on():
+                        # The plan keeps a ranked twelve; the total is recorded
+                        # so the cut is stated, not silent.
+                        total = sum(1 for c in _P(p).iterdir()
+                                    if c.is_file() and c.suffix.lower() == ".evtx")
+                        plan.setdefault("log_dirs", {})[p] = {
+                            "total": total, "kept": min(12, len(kids))}
                     for shard in rank_shards(kids, focus_text=focus_blob, cap=12):
                         sp = shard["path"]
                         if sp in seen:

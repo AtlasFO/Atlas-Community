@@ -46,6 +46,29 @@
   .obs-row:hover { background: var(--bg-3); }
   .obs-row .otxt { color: var(--fg-1); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
   .obs-row .oct { flex: none; color: var(--fg-2); font-size: var(--fs-label); font-variant-numeric: tabular-nums; }
+
+  /* ── Time: the findings by the first moment each states, a block per day.
+     A vertical list, so it reads the same on a phone. */
+  .day { margin: 0 0 14px; }
+  .day-h { font-weight: 650; font-size: var(--fs-body); padding: 8px 2px 6px; }
+  .trow {
+    display: grid; grid-template-columns: 68px minmax(0, 1fr); gap: 3px 12px;
+    padding: 8px 10px; border-top: 1px solid var(--border); cursor: pointer; font-size: var(--fs-small);
+  }
+  .trow:first-child { border-top: 0; }
+  .trow:hover { background: var(--bg-3); }
+  .trow:focus-visible { outline: none; box-shadow: inset 0 0 0 2px rgba(91,157,255,.6); }
+  .trow.selected { background: rgba(91,157,255,.1); }
+  .trow.gone { opacity: .55; }
+  .trow .tt { font-family: var(--mono); color: var(--fg-1); font-variant-numeric: tabular-nums; padding-top: 2px; }
+  .trow .tmeta { display: flex; gap: 6px 8px; flex-wrap: wrap; align-items: center; font-size: var(--fs-label); color: var(--fg-2); min-width: 0; }
+  .trow .tmeta .thost { color: var(--fg-1); font-weight: 600; overflow-wrap: anywhere; }
+  .trow .ttxt {
+    grid-column: 2; color: var(--fg-0); line-height: 1.45; overflow-wrap: anywhere;
+    display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+  }
+  .time-foot { color: var(--fg-2); font-size: var(--fs-small); padding: 6px 2px 10px; }
+  @media (max-width: 420px) { .trow { grid-template-columns: minmax(0, 1fr); } .trow .ttxt { grid-column: 1; } }
 </style>
 </head>
 <body>
@@ -68,6 +91,7 @@
 'use strict';
 const $app = () => document.getElementById('app');
 const esc = AtlasShell.esc;
+const t = AtlasShell.t;
 
 const TIERS = ['CONFIRMED', 'LIKELY', 'SUSPECTED', 'UNCONFIRMED'];
 const TIER_RANK = { CONFIRMED: 4, LIKELY: 3, SUSPECTED: 2, UNCONFIRMED: 1 };
@@ -88,14 +112,15 @@ const kindPill = (k) => `<span class="pill ${KIND_PILL[k] || 'neutral'}">${esc(K
 const SEVERAL = '*several*';   // never a real hostname   // lane key for beliefs that name more than one host
 const CHEVRON = '<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 5l7 7-7 7"/></svg>';
 
-// Board or list is a per-viewer convenience, so it lives in this browser only.
+// Board, list or time is a per-viewer convenience, so it lives in this browser only.
 const LS_LAYOUT = 'atlas.board.layout';
+const LAYOUTS = ['board', 'list', 'time'];
 let storedLayout = 'board';
-try { storedLayout = localStorage.getItem(LS_LAYOUT) === 'list' ? 'list' : 'board'; } catch (_e) { /* storage blocked */ }
+try { const v = localStorage.getItem(LS_LAYOUT); if (LAYOUTS.includes(v)) storedLayout = v; } catch (_e) { /* storage blocked */ }
 
 const State = {
   data: null, mtime: null, stopPoll: null,
-  layout: storedLayout,   // 'board' | 'list'
+  layout: storedLayout,   // 'board' | 'list' | 'time'
   sort: 'newest',         // list order: 'newest' | 'oldest' | 'confidence'
   view: 'all',            // 'all' | 'attention'
   search: '', confMin: 0,
@@ -295,6 +320,47 @@ function listHtml(rows, conflicts) {
     </div>`;
 }
 
+/* ── the time view ─────────────────────────────────────────────────────── */
+// The first moment a statement states (read_models.evidence_board), as
+// "YYYY-MM-DD HH:MM:SS"; "" when it states none.
+const momentOf = (n) => String(meta(n.id).t || '');
+
+function timeRowHtml(n, conflicts) {
+  const m = meta(n.id);
+  const kind = n.kind || 'claim';
+  const hosts = m.host ? [m.host] : (m.hosts || []);
+  const when = momentOf(n);
+  const pills = [kind !== 'claim' ? kindPill(kind) : '', confPill(n.confidence), statusPill(n),
+                 conflicts.has(n.id) ? '<span class="pill bad">in conflict</span>' : '', versionPill(n)].filter(Boolean);
+  return `
+    <div class="trow${m.gone ? ' gone' : ''}${State.selectedId === n.id ? ' selected' : ''}" data-id="${esc(n.id)}" role="button" tabindex="0">
+      <span class="tt" title="${esc(when)}">${esc(when.slice(11) || when)}</span>
+      <span class="tmeta">${hosts.length ? `<span class="thost">${esc(hosts.join(' · '))}</span>` : ''}${pills.join('')}<span class="mono">${esc(n.id)}</span></span>
+      <span class="ttxt">${esc(n.statement || n.summary || '(no statement)')}</span>
+    </div>`;
+}
+
+function timeHtml(rows, conflicts) {
+  const timed = rows.filter(n => momentOf(n))
+    .sort((x, y) => momentOf(x).localeCompare(momentOf(y)) || String(x.id).localeCompare(String(y.id)));
+  const untimed = rows.length - timed.length;
+  const foot = untimed ? `<div class="time-foot">${esc(t('claims.time.noMoment', { n: untimed }))}</div>` : '';
+  if (!timed.length) {
+    return `<div class="state-empty">${esc(t('claims.time.empty'))}<div class="hint">${esc(t('claims.time.emptyHint'))}</div></div>${foot}`;
+  }
+  const days = new Map();
+  for (const n of timed) {
+    const d = momentOf(n).slice(0, 10);
+    if (!days.has(d)) days.set(d, []);
+    days.get(d).push(n);
+  }
+  return [...days.entries()].map(([d, ns], i) => `
+    <section class="day" style="--d:${(i * 0.05).toFixed(2)}s">
+      <div class="day-h">${esc(d)}</div>
+      <div class="rows">${ns.map(n => timeRowHtml(n, conflicts)).join('')}</div>
+    </section>`).join('') + foot;
+}
+
 function bandHtml(counts, hosts) {
   const claimConf = (counts.confidence || {}).claim || {};
   const claims = (counts.kind || {}).claim || 0;
@@ -359,6 +425,7 @@ function toolsHtml(counts, laneKeys, shown, total) {
       <span class="seg">
         <button type="button" class="chip${State.layout === 'board' ? ' on' : ''}" data-layout="board" title="Lanes by host, columns by confidence">Board</button>
         <button type="button" class="chip${State.layout === 'list' ? ' on' : ''}" data-layout="list" title="Every belief and observation as one list">List</button>
+        <button type="button" class="chip${State.layout === 'time' ? ' on' : ''}" data-layout="time" title="${esc(t('claims.time.chipTitle'))}">${esc(t('claims.time.chip'))}</button>
       </span>
       ${State.layout === 'list' ? `<select class="chip" id="sort" title="Order of the list">
         <option value="newest"${State.sort === 'newest' ? ' selected' : ''}>Newest first</option>
@@ -430,6 +497,8 @@ function render() {
         : 'Widen the confidence floor, clear the search, or include superseded beliefs.'}</div></div>`;
   } else if (State.layout === 'list') {
     boardHtml = listHtml(sortList(visible), conflicts);
+  } else if (State.layout === 'time') {
+    boardHtml = timeHtml(visible, conflicts);
   } else {
     boardHtml = keys.map((k, i) => {
       const l = lanes.get(k);
@@ -440,7 +509,7 @@ function render() {
   const html = `
     <div class="hero">
       <h1 class="page-title">Case Findings</h1>
-      <span class="meta">${esc(cd)} · ${State.layout === 'list' ? 'every belief and observation, in one list' : 'what the case holds, by confidence and host'}</span>
+      <span class="meta">${esc(cd)} · ${State.layout === 'list' ? 'every belief and observation, in one list' : State.layout === 'time' ? esc(t('claims.time.meta')) : 'what the case holds, by confidence and host'}</span>
     </div>
     ${bandHtml(counts, hosts)}
     ${toolsHtml(counts, allLaneKeys, visible.length, all.length)}
@@ -503,7 +572,7 @@ function wire() {
     if (d.open) State.openDrawers.add(d.dataset.lane); else State.openDrawers.delete(d.dataset.lane);
   }));
   const open = (el) => { const id = el.dataset.id; if (id) openSheet(id); };
-  app.querySelectorAll('.bc, .obs-row, .lrow').forEach(el => {
+  app.querySelectorAll('.bc, .obs-row, .lrow, .trow').forEach(el => {
     el.addEventListener('click', () => open(el));
     el.addEventListener('keydown', (ev) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); open(el); } });
   });
@@ -524,15 +593,15 @@ function openSheet(id) {
   renderSheet();
   document.getElementById('sheet').classList.add('open');
   document.getElementById('scrim').classList.add('on');
-  $app().querySelectorAll('.bc.selected, .lrow.selected').forEach(el => el.classList.remove('selected'));
-  const card = $app().querySelector(`.bc[data-id="${CSS.escape(id)}"], .lrow[data-id="${CSS.escape(id)}"]`);
+  $app().querySelectorAll('.bc.selected, .lrow.selected, .trow.selected').forEach(el => el.classList.remove('selected'));
+  const card = $app().querySelector(`.bc[data-id="${CSS.escape(id)}"], .lrow[data-id="${CSS.escape(id)}"], .trow[data-id="${CSS.escape(id)}"]`);
   if (card) card.classList.add('selected');
 }
 function closeSheet() {
   State.selectedId = null;
   document.getElementById('sheet').classList.remove('open');
   document.getElementById('scrim').classList.remove('on');
-  $app().querySelectorAll('.bc.selected, .lrow.selected').forEach(el => el.classList.remove('selected'));
+  $app().querySelectorAll('.bc.selected, .lrow.selected, .trow.selected').forEach(el => el.classList.remove('selected'));
 }
 function renderSheet() {
   const n = nodes()[State.selectedId];

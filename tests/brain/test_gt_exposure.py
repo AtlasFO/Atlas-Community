@@ -18,14 +18,14 @@ def _finding(cid, desc, conf="LIKELY"):
 GT = {
     "case_id": "EXPO-01",
     "expected_findings": [
-        {"id": "G1", "description": "Beacon to 10.11.11.128 from PC01",
+        {"id": "G1", "description": "Beacon to 10.0.12.128 from PC01",
          "confidence_min": "LIKELY"},
         {"id": "G2", "description": "Dropper C:\\Users\\Public\\svc.exe",
          "confidence_min": "LIKELY"},
         {"id": "G3", "description": "Attacker moved laterally with intent",
          "confidence_min": "SUSPECTED"},
-        {"id": "G4", "description": "Exfil staged to mega.io account "
-                                    "leak.hoarder@mega.io",
+        {"id": "G4", "description": "Exfil staged to share.example.net account "
+                                    "leak.hoarder@share.example.net",
          "confidence_min": "LIKELY"},
     ],
 }
@@ -35,10 +35,10 @@ class TestAuditClassification:
     def test_four_way_split(self):
         entries = [
             # G1 surfaced AND reported
-            _tool_call(1, "TCP 10.11.11.128:443 ESTABLISHED"),
+            _tool_call(1, "TCP 10.0.12.128:443 ESTABLISHED"),
             # G2 surfaced only (tool saw the path, never became a finding)
             _tool_call(2, r"amcache entry c:\users\public\svc.exe run count 3"),
-            _finding(3, "Repeated callbacks to 10.11.11.128 observed"),
+            _finding(3, "Repeated callbacks to 10.0.12.128 observed"),
         ]
         result = gt_exposure.audit(GT, entries)
         by_id = {i["id"]: i for i in result["items"]}
@@ -94,8 +94,8 @@ class TestAuditCase:
 
         (tmp_path / "ground_truth.json").write_text(json.dumps(GT))
         trace = {"entries": [
-            _tool_call(1, "TCP 10.11.11.128:443"),
-            _finding(2, "Callbacks to 10.11.11.128"),
+            _tool_call(1, "TCP 10.0.12.128:443"),
+            _finding(2, "Callbacks to 10.0.12.128"),
         ]}
         result = gt_exposure.audit_case(tmp_path, trace)
         assert result is not None
@@ -118,8 +118,8 @@ class TestSurfaceCorpus:
         entries = [
             {"type": "investigation_narration", "call_id": 1,
              "content": "Investigation opened on 1 alert(s): beacon to "
-                        "10.11.11.128 detected"},
-            _finding(3, "Beacon to 10.11.11.128 confirmed from PC01"),
+                        "10.0.12.128 detected"},
+            _finding(3, "Beacon to 10.0.12.128 confirmed from PC01"),
         ]
         result = gt_exposure.audit(GT, entries)
         g1 = {i["id"]: i for i in result["items"]}["G1"]
@@ -133,9 +133,9 @@ class TestSurfaceCorpus:
         by naming the entity in a grep. Only tool OUTPUT counts."""
         entries = [
             {"type": "tool_call", "call_id": 1, "mcp_tool": "strings_grep",
-             "cmd": "grep -i 10.11.11.128 /mnt/img",   # entity only in cmd
+             "cmd": "grep -i 10.0.12.128 /mnt/img",   # entity only in cmd
              "stdout_excerpt": "no matches found", "stderr": ""},
-            _finding(2, "Beacon to 10.11.11.128 from PC01"),
+            _finding(2, "Beacon to 10.0.12.128 from PC01"),
         ]
         result = gt_exposure.audit(GT, entries)
         g1 = {i["id"]: i for i in result["items"]}["G1"]
@@ -148,8 +148,8 @@ class TestSurfaceCorpus:
         entries = [
             {"type": "tool_call", "call_id": 1, "mcp_tool": "strings_grep",
              "cmd": "grep -i beacon /mnt/img",
-             "stdout_excerpt": "TCP 10.11.11.128:443 ESTABLISHED", "stderr": ""},
-            _finding(2, "Beacon to 10.11.11.128 from PC01"),
+             "stdout_excerpt": "TCP 10.0.12.128:443 ESTABLISHED", "stderr": ""},
+            _finding(2, "Beacon to 10.0.12.128 from PC01"),
         ]
         summary = gt_exposure.integrity_summary(gt_exposure.audit(GT, entries))
         assert summary["parroted"] == []
@@ -160,8 +160,8 @@ class TestSurfaceCorpus:
         entries = [
             _tool_call(1, "nothing relevant here"),
             {"type": "investigation_narration", "call_id": 2,
-             "content": "I suspect a beacon to 10.11.11.128"},
-            _finding(3, "Beacon to 10.11.11.128 confirmed from PC01"),
+             "content": "I suspect a beacon to 10.0.12.128"},
+            _finding(3, "Beacon to 10.0.12.128 confirmed from PC01"),
         ]
         result = gt_exposure.audit(GT, entries)
         g1 = {i["id"]: i for i in result["items"]}["G1"]
@@ -172,8 +172,8 @@ class TestSurfaceCorpus:
 class TestIntegritySummary:
     def test_parroted_derivation(self):
         entries = [
-            _tool_call(1, "TCP 10.11.11.128:443 ESTABLISHED"),
-            _finding(2, "Beacon to 10.11.11.128 from PC01"),           # G1 ok
+            _tool_call(1, "TCP 10.0.12.128:443 ESTABLISHED"),
+            _finding(2, "Beacon to 10.0.12.128 from PC01"),           # G1 ok
             _finding(3, "Dropper C:\\Users\\Public\\svc.exe planted"),  # G2 parroted
         ]
         summary = gt_exposure.integrity_summary(gt_exposure.audit(GT, entries))
@@ -213,8 +213,8 @@ class TestAuditRunDir:
         run_dir = tmp_path / "bench" / "run-1"
         (run_dir / "analysis").mkdir(parents=True)
         (run_dir / "analysis" / "X_trace.json").write_text(json.dumps(
-            {"entries": [_tool_call(1, "TCP 10.11.11.128:443"),
-                         _finding(2, "Beacon to 10.11.11.128 from PC01")]}))
+            {"entries": [_tool_call(1, "TCP 10.0.12.128:443"),
+                         _finding(2, "Beacon to 10.0.12.128 from PC01")]}))
         result = gt_exposure.audit_run_dir(gt_dir, run_dir)
         assert result is not None
         assert (run_dir / "analysis" / "gt_exposure.json").is_file()
@@ -232,14 +232,14 @@ class TestAuditRunDir:
 class TestBundledClassification:
     def test_fact_inside_a_credited_finding_is_reported_bundled(self):
         gt = {"case_id": "EXPO-02", "expected_findings": [
-            {"id": "G1", "description": "Beacon to 10.11.11.128 from PC01",
+            {"id": "G1", "description": "Beacon to 10.0.12.128 from PC01",
              "confidence_min": "LIKELY"},
             {"id": "G2", "description": "Dropper C:\\Users\\Public\\svc.exe",
              "confidence_min": "LIKELY"},
         ]}
         entries = [
             _tool_call(1, r"amcache entry c:\users\public\svc.exe run count 3"),
-            _finding(2, "Repeated callbacks to 10.11.11.128 observed from PC01. "
+            _finding(2, "Repeated callbacks to 10.0.12.128 observed from PC01. "
                         r"The dropper C:\Users\Public\svc.exe started them."),
         ]
         result = gt_exposure.audit(gt, entries)

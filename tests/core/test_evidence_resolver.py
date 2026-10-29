@@ -328,7 +328,7 @@ def test_timeline_tsv_record_ref_fallback(tmp_path: Path):
 
 
 def test_evidence_dir_basename_resolves_direct(tmp_path: Path):
-    """I5: artifacts under evidence/ must resolve (not analysis-only rglob)."""
+    """Artifacts under evidence/ must resolve (not analysis-only rglob)."""
     case = _case(tmp_path)
     csv = case / "evidence" / "edr_lateral_20310205.csv"
     csv.write_text(
@@ -355,7 +355,7 @@ def test_evidence_dir_basename_resolves_direct(tmp_path: Path):
 
 
 def test_compound_artifact_plus_split(tmp_path: Path):
-    """I5: ``A.csv + B.csv`` opens both evidence files."""
+    """``A.csv + B.csv`` opens both evidence files."""
     case = _case(tmp_path)
     a = case / "evidence" / "vpn_auth.csv"
     b = case / "evidence" / "edr_lateral_20310205.csv"
@@ -386,7 +386,7 @@ def test_compound_artifact_plus_split(tmp_path: Path):
 
 
 def test_supporting_evidence_prose_beats_correlated_flood(tmp_path: Path):
-    """I5: failed call_id + prose citation must not dump correlated RAW EVENTs."""
+    """Failed call_id + prose citation must not dump correlated RAW EVENTs."""
     case = _case(tmp_path)
     # Timeline that would match host/IP correlation
     ev = {
@@ -430,7 +430,7 @@ def test_supporting_evidence_prose_beats_correlated_flood(tmp_path: Path):
 
 
 def test_claim_mirror_persists_evidence_paths(tmp_path: Path):
-    """I5: upsert_claim_from_finding stores resolvable evidence/ paths."""
+    """upsert_claim_from_finding stores resolvable evidence/ paths."""
     from core.claim_graph import upsert_claim_from_finding, load_graph
 
     case = _case(tmp_path)
@@ -482,3 +482,86 @@ def test_a_machine_added_citation_is_rendered_without_its_mark(tmp_path: Path):
     assert cited in texts
     assert not any(MACHINE_CITATION_MARK in t for t in texts)
     assert MACHINE_CITATION_MARK not in format_evidence_markdown(pack)
+
+
+def test_an_indexed_result_envelope_is_cited_by_its_rows_and_carries_no_time(tmp_path: Path):
+    """A Python tool's JSON result in the index is Atlas's own writing: the
+    rows inside it are the events, and the window's event_time (the
+    carver's start time here) reaches none of them."""
+    case = _case(tmp_path)
+    import sqlite3
+    db = case / "analysis" / "evidence_index.db"
+    conn = sqlite3.connect(str(db))
+    conn.executescript("""
+    CREATE TABLE sources (
+        source_id INTEGER PRIMARY KEY, call_id INTEGER, tool TEXT,
+        source_path TEXT, source_hash TEXT, line_count INTEGER,
+        byte_count INTEGER, truncated INTEGER, ingested_at TEXT);
+    CREATE TABLE windows (
+        window_id INTEGER PRIMARY KEY, source_id INTEGER,
+        line_start INTEGER, line_end INTEGER, event_time TEXT, raw_text TEXT);
+    """)
+    conn.execute("INSERT INTO sources VALUES (1, 65, 'strings_read_text', '', 'h', 1, 300, 0, 't')")
+    envelope = ('{"success": true, "path": "exports/carve/audit.txt", "encoding": "utf-8", "lines": '
+                '["Carver version 1.0", "Carver started at Wed Jun 04 09:00:00 2031", '
+                '"0: 00001.ole 31 KB at offset 4096"]}')
+    conn.execute("INSERT INTO windows VALUES (1, 1, 1, 1, '2031-06-04T09:00:00', ?)", (envelope,))
+    conn.commit()
+    conn.close()
+    node = {"id": "C0004", "statement": "A carved document (00001.ole, offset 4096) holds a text note",
+            "evidence": [{"artifact": "trace_call", "locator": "call_id=65", "call_id": 65}],
+            "input_call_ids": [65]}
+    pack = resolve_claim_evidence(case, node)
+    assert pack.events and all(e.timestamp == "" for e in pack.events)
+    assert all(not e.text.startswith("{") for e in pack.events)
+    assert any("00001.ole" in e.text for e in pack.events)
+
+
+def test_an_envelope_with_no_row_list_or_cut_short_stays_one_untimed_event(tmp_path: Path):
+    """A hash result or a status envelope carries no rows, and an excerpt
+    may cut an envelope: each stays one event, its raw text, with no time,
+    so a finding that cites a hash call keeps its evidence row."""
+    case = _case(tmp_path)
+    import sqlite3
+    db = case / "analysis" / "evidence_index.db"
+    conn = sqlite3.connect(str(db))
+    conn.executescript("""
+    CREATE TABLE sources (
+        source_id INTEGER PRIMARY KEY, call_id INTEGER, tool TEXT,
+        source_path TEXT, source_hash TEXT, line_count INTEGER,
+        byte_count INTEGER, truncated INTEGER, ingested_at TEXT);
+    CREATE TABLE windows (
+        window_id INTEGER PRIMARY KEY, source_id INTEGER,
+        line_start INTEGER, line_end INTEGER, event_time TEXT, raw_text TEXT);
+    """)
+    conn.execute("INSERT INTO sources VALUES (1, 70, 'hash_file', '', 'h', 1, 200, 0, 't')")
+    conn.execute("INSERT INTO sources VALUES (2, 71, 'strings_grep', '', 'h', 1, 200, 1, 't')")
+    hashed = ('{"success": true, "path": "evidence/corp-ws01.raw", "sha256": '
+              '"0000000000000000000000000000000000000000000000000000000000000001", "size": 4096}')
+    cut = '{"success": true, "file": "evidence/corp-ws01.raw", "matches": [{"line": 3, "text": "USER jane'
+    conn.execute("INSERT INTO windows VALUES (1, 1, 1, 1, '2031-06-04T09:00:00', ?)", (hashed,))
+    conn.execute("INSERT INTO windows VALUES (2, 2, 1, 1, '2031-06-04T09:00:41', ?)", (cut,))
+    conn.commit()
+    conn.close()
+    for cid, text in ((70, hashed), (71, cut)):
+        node = {"id": f"C{cid}", "statement": "The image's hash was recorded",
+                "evidence": [{"artifact": "trace_call", "locator": f"call_id={cid}", "call_id": cid}],
+                "input_call_ids": [cid]}
+        pack = resolve_claim_evidence(case, node)
+        assert len(pack.events) == 1 and pack.events[0].text == text and pack.events[0].timestamp == ""
+
+
+def test_a_cut_envelope_in_the_trace_excerpt_stays_one_untimed_event(tmp_path: Path):
+    """No index window: the trace's stdout_excerpt holds a cut envelope. It
+    is one event of its raw text with no time, not zero events."""
+    import json
+    case = _case(tmp_path)
+    cut = '{"success": true, "file": "evidence/corp-ws01.raw", "matches": [{"line": 3, "text": "USER jane'
+    (case / "analysis" / "CASE_trace.json").write_text(json.dumps({"entries": [
+        {"call_id": 72, "type": "tool_call", "cmd": "<py>:strings_grep", "success": True,
+         "stdout_excerpt": cut}]}), encoding="utf-8")
+    node = {"id": "C0072", "statement": "The image's user rows were searched",
+            "evidence": [{"artifact": "trace_call", "locator": "call_id=72", "call_id": 72}],
+            "input_call_ids": [72]}
+    pack = resolve_claim_evidence(case, node)
+    assert len(pack.events) == 1 and pack.events[0].text == cut and pack.events[0].timestamp == ""

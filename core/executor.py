@@ -78,6 +78,33 @@ def _cmd_verb(cmd: Any) -> str:
     return ""
 
 
+def _lane() -> str:
+    """The background lane the current call runs in ("" for the item
+    thread's own calls): core.execution_log.call_source."""
+    try:
+        from core.execution_log import call_source
+        return call_source.get()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _child_preexec():
+    """The child's preexec: the memory cap (_memguard_preexec), and for a
+    call of a background lane the lowest CPU priority."""
+    cap = _memguard_preexec()
+    if not _lane():
+        return cap
+
+    def _apply():  # pragma: no cover - runs in the forked child
+        try:
+            os.nice(19)
+        except OSError:
+            pass
+        if cap is not None:
+            cap()
+    return _apply
+
+
 def _memguard_preexec():
     """Return a preexec_fn that caps the child's address space, or None.
 
@@ -557,6 +584,28 @@ def _collect_stdout(result: dict, stdout_sink, line_cap: int | None,
     result["stdout"] = stdout_filter(stdout) if stdout_filter else stdout
 
 
+def capped_output(path: str, line_cap: int | None = MAX_TOOL_OUTPUT_LINES) -> tuple[str, bool]:
+    """(stdout, truncated) of a full output kept in a file, cut as a run
+    of the tool cuts it (_collect_stdout): the byte cap, then the line cap
+    with the omitted lines counted. A stored answer read back never floods
+    the model's context more than the call it stands for."""
+    with open(path, "rb") as fh:
+        head = fh.read(OUTPUT_CAP)
+        omitted, more = 0, False
+        while True:
+            chunk = fh.read(_CHUNK)
+            if not chunk:
+                break
+            more = True
+            omitted += chunk.count(b"\n")
+    text = head.decode("utf-8", errors="replace")
+    truncated = more
+    if line_cap is not None:
+        text, cut = _apply_line_cap(text, line_cap, extra_omitted=omitted)
+        truncated = truncated or cut
+    return text, truncated
+
+
 def _timeout_message(timeout, cmd: list[str], result: dict, stdout_sink) -> str:
     """The timeout as the model should read it: the budget ran out, and what
     the tool had written by then is in the result, not lost. The leading
@@ -665,22 +714,13 @@ def _retain_full_stdout(result: dict) -> str:
     return path
 
 
-# Programs whose *silent* exit 1 is an answer rather than an error: nothing on
-# stdout, nothing on stderr, status 1. mmls does this for an image with no
-# partition table (a superfloppy volume, a reformatted key) — the correct
-# reading is "open it as a single filesystem", and a bare failure carrying no
-# text gives the model nothing to act on. Only the silent shape qualifies:
-# these programs write their genuine errors to stderr.
-_SILENT_EXIT1_ANSWERS: dict[str, str] = {
-    "mmls": ("no partition table: the image carries no volume system. Read "
-             "it as a single filesystem — tsk.fsstat / tsk.fls on the image "
-             "without an offset."),
-}
-
 
 def _apply_exit_conventions(result: dict) -> None:
     """Turn a program's documented exit-code convention into the result it
-    stands for, before the entry is logged and returned. Mutates in place."""
+    stands for, before the entry is logged and returned. Mutates in place.
+    mmls's silent exit 1 is no such answer: it means either "no volume
+    system" or "nothing The Sleuth Kit reads", and only a look at the first
+    sector tells which (tools.sleuthkit.tsk_mmls), so it stays a failure."""
     if result.get("success") or result.get("exit_code") != 1:
         return
     if (result.get("stderr") or "").strip():
@@ -695,15 +735,22 @@ def _apply_exit_conventions(result: dict) -> None:
         result["answer_from_exit_code"] = True
         if not (result.get("stdout") or "").strip():
             result["stdout"] = f"{verb}: no match"
-        return
-    if (result.get("stdout") or "").strip():
-        return
-    answer = _SILENT_EXIT1_ANSWERS.get(verb)
-    if not answer:
-        return
-    result["success"] = True
-    result["stdout"] = answer
-    result["answer_from_exit_code"] = True
+
+
+def _user_fuse_refusal(cmd: list[str], cwd: str | None = None) -> dict | None:
+    """The result refusing a command that would run as root on a FUSE mount
+    of this user (a raw view of a disk container): root cannot read it."""
+    try:
+        from core.raw_views import sudo_refusal
+        refusal = sudo_refusal(cmd, cwd)
+    except Exception:  # noqa: BLE001 - the command runs without the check
+        return None
+    if refusal is None:
+        return None
+    return {"success": False, "stdout": "", "stderr": refusal["error"], "error": refusal["error"],
+            "gate": refusal["gate"], "failure_class": refusal["failure_class"], "exit_code": -1,
+            "elapsed_seconds": 0.0, "truncated": False, "cmd": " ".join(cmd), "retries": 0,
+            "progress_lines": []}
 
 
 def _log_tool(result: dict) -> None:
@@ -787,11 +834,19 @@ def _index_output_best_effort(result: dict, call_id: int) -> None:
         if spill and os.path.isfile(spill):
             with open(spill, "r", encoding="utf-8", errors="replace") as f:
                 text = f.read(evidence_index.MAX_INDEXED_BYTES + 1)
+        # A yearless form in the output (a syslog line, a listing row) is
+        # dated by the evidence files the command names, never by the run.
+        try:
+            import shlex
+            tokens = shlex.split(str(result.get("cmd") or ""))
+        except ValueError:
+            tokens = str(result.get("cmd") or "").split()
         evidence_index.index_output(
             call_id=call_id,
             tool=_cmd_verb(result.get("cmd")) or "tool",
             text=text,
             source_path=spill,
+            reference_year=evidence_index.evidence_date(tokens),
         )
     except Exception as e:
         import sys
@@ -913,6 +968,10 @@ def run(
         return result
 
     if needs_sudo and cmd[0] != "sudo":
+        _fuse = _user_fuse_refusal(cmd, cwd)
+        if _fuse is not None:
+            _log_tool(_fuse)
+            return _fuse
         # Fail fast when sudo cannot run non-interactively. Password prompts
         # otherwise hang until the full tool timeout.
         _sudo_block = _sudo_auth_preflight(cmd)
@@ -978,6 +1037,15 @@ def run(
     except Exception:  # noqa: BLE001
         _ev_before = None
 
+    # A call is running: the background lanes pause while a mark of the
+    # item thread's calls stands (core.memory_batch); a lane's own calls
+    # carry the lane's name and pause nothing.
+    try:
+        from core.memory_batch import mark_busy
+        from core.paths import active_case_dir
+        _busy = mark_busy(active_case_dir(), lane=_lane())
+    except Exception:  # noqa: BLE001
+        _busy = None
     start = time.perf_counter()
     stdout_sink = _CappedStdout(cap=OUTPUT_CAP, cmd0=cmd[0] if cmd else "tool")
     stderr_acc = _StderrAccumulator()
@@ -997,7 +1065,7 @@ def run(
             stderr=subprocess.PIPE,
             env=env,
             cwd=cwd,
-            preexec_fn=_memguard_preexec(),
+            preexec_fn=_child_preexec(),
             start_new_session=True,
         ), cmd)
         _track_child(proc)
@@ -1064,6 +1132,11 @@ def run(
         stdout_sink.close()
         if stdin_fh is not None:
             stdin_fh.close()
+        try:
+            from core.memory_batch import unmark_busy
+            unmark_busy(_busy)
+        except Exception:  # noqa: BLE001
+            pass
 
     result["elapsed_seconds"] = round(time.perf_counter() - start, 1)
 
@@ -1134,6 +1207,13 @@ async def run_with_progress(
         "progress_lines": [],
     }
 
+    # A call is running (core.memory_batch), as in run().
+    try:
+        from core.memory_batch import mark_busy
+        from core.paths import active_case_dir
+        _busy = mark_busy(active_case_dir(), lane=_lane())
+    except Exception:  # noqa: BLE001
+        _busy = None
     start = time.perf_counter()
     stdout_sink = _CappedStdout(cap=OUTPUT_CAP, cmd0=cmd[0] if cmd else "tool")
     stderr_acc = _StderrAccumulator()
@@ -1144,7 +1224,7 @@ async def run_with_progress(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            preexec_fn=_memguard_preexec(),
+            preexec_fn=_child_preexec(),
             start_new_session=True,
         ), cmd)
         _track_child(proc)
@@ -1244,6 +1324,11 @@ async def run_with_progress(
         if proc is not None:
             _untrack_child(proc)
         stdout_sink.close()
+        try:
+            from core.memory_batch import unmark_busy
+            unmark_busy(_busy)
+        except Exception:  # noqa: BLE001
+            pass
 
     result["elapsed_seconds"] = round(time.perf_counter() - start, 1)
     _annotate_vmdk_snapshot(result, cmd)
@@ -1315,6 +1400,10 @@ def run_with_output_file(
         cmd = shlex.split(cmd)
     cmd = [os.path.expanduser(a) if a.startswith("~") else a for a in cmd]
     if needs_sudo and cmd[0] != "sudo":
+        _fuse = _user_fuse_refusal(cmd, cwd)
+        if _fuse is not None:
+            _log_tool(_fuse)
+            return _fuse
         cmd = ["sudo"] + cmd
 
     # Remote-SIFT: stream the remote tool's stdout back into the LOCAL output
@@ -1341,8 +1430,8 @@ def run_with_output_file(
 
     start = time.perf_counter()
     # Write beside the target and move into place only on success: a
-    # failed icat (wrong offset) used to leave a 0-byte file where a good
-    # extraction had been.
+    # failed icat (wrong offset) must not leave a 0-byte file where a good
+    # extraction was.
     tmp_path = f"{output_path}.part-{os.getpid()}"
     stop_incomplete = False
 
@@ -1354,7 +1443,7 @@ def run_with_output_file(
                 stderr=subprocess.PIPE,
                 env=env,
                 cwd=cwd,
-                preexec_fn=_memguard_preexec(),
+                preexec_fn=_child_preexec(),
                 start_new_session=True,
             ), cmd)
             _track_child(proc)

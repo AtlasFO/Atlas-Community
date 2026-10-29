@@ -34,8 +34,10 @@ save_secret_value()) to land as one atomic unit.
 from __future__ import annotations
 
 import fcntl
+import io
 import os
 import re
+import unicodedata
 import subprocess
 import threading
 from pathlib import Path
@@ -43,6 +45,30 @@ from pathlib import Path
 # KEY=value, optionally commented out, leading whitespace tolerated. Deliberately
 # not a full dotenv parser — this only has to recognise the line it will replace.
 _ASSIGN = re.compile(r"^[ \t]*(?P<commented>#[ \t]*)?(?P<key>[A-Za-z_][A-Za-z0-9_]*)[ \t]*=")
+_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def unsafe_value(value: str) -> str | None:
+    """Why ``value`` cannot be one line of the env file, or None. A line is
+    read with str.splitlines, here and by python-dotenv's reader, which
+    breaks on more than CR and LF: every character of Unicode category Cc
+    (C0, DEL, C1, U+0085 among them), Zl (U+2028) or Zp (U+2029). A value
+    holding one would come back as a second assignment."""
+    for ch in str(value):
+        if unicodedata.category(ch) in ("Cc", "Zl", "Zp"):
+            return f"it holds the control or line-break character U+{ord(ch):04X}"
+    return None
+
+
+def _check_updates(updates: dict[str, str | None]) -> None:
+    for key, value in updates.items():
+        if not _KEY.match(str(key)):
+            raise ValueError(f"{key!r} is not a variable name; nothing was written")
+        if value is None:
+            continue                      # a removal writes nothing
+        why = unsafe_value(value)
+        if why:
+            raise ValueError(f"{key}: {why}; nothing was written")
 
 # Reentrant so a caller holding lock() across several calls (set_values() then
 # save_secret_value(), say) doesn't deadlock when those calls take the lock
@@ -64,13 +90,13 @@ def resolve(repo_root: str | os.PathLike) -> Path:
 
 
 def read_values(path: str | os.PathLike) -> dict[str, str]:
-    """Active (uncommented) assignments, last one winning as dotenv does."""
-    values: dict[str, str] = {}
-    for line in Path(path).read_text(encoding="utf-8").splitlines():
-        match = _ASSIGN.match(line)
-        if match and not match.group("commented"):
-            values[match.group("key")] = line.split("=", 1)[1]
-    return values
+    """Active (uncommented) assignments as the env loader (python-dotenv)
+    reads them at a start: quotes and their escapes undone, a trailing
+    comment cut, the last assignment winning; no variable is expanded."""
+    from dotenv import dotenv_values
+    text = Path(path).read_text(encoding="utf-8")
+    return {key: value for key, value in dotenv_values(stream=io.StringIO(text), interpolate=False).items()
+            if value is not None}
 
 
 def _strip_inline_comment(raw: str) -> str:
@@ -99,6 +125,23 @@ def env_int(name: str, default: int) -> int:
         return default
 
 
+def env_flag(name: str, default: bool = True) -> bool:
+    """A behaviour switch read at call time: "0", "false", "no" and "off"
+    (any case, inline comment allowed) turn it off, "1", "true", "yes" and
+    "on" turn it on, anything else or an unset variable gives `default`.
+    Read where the behaviour branches, never at import, so a test or an
+    operator can flip it for one call."""
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    value = _strip_inline_comment(raw).strip().lower()
+    if value in ("0", "false", "no", "off"):
+        return False
+    if value in ("1", "true", "yes", "on"):
+        return True
+    return default
+
+
 def env_float(name: str, default: float) -> float:
     """Same contract as env_int(), for float-valued settings."""
     raw = os.environ.get(name)
@@ -119,14 +162,35 @@ def env_str(name: str, default: str = "") -> str:
     return _strip_inline_comment(raw) or default
 
 
-def set_values(path: str | os.PathLike, updates: dict[str, str]) -> None:
+def _line(key: str, value: str) -> str:
+    """``key=value`` as every reader of the env file reads it back:
+    python-dotenv (the CLI, and the dashboard at its start), systemd's
+    EnvironmentFile and docker compose's env_file. A value the plain form
+    would change goes in double quotes: whitespace at either end (stripped:
+    an auth prefix "Token " would load as "Token"), a quote at the start
+    (read as quoting), a '#' after whitespace (read as a comment). Inside,
+    only backslash and double quote are escaped, the two escapes all three
+    readers decode alike; the escaped backslash also keeps python-dotenv from
+    decoding a backslash sequence of the value (n, t) as a control character.
+    Not single quotes: systemd and compose read them literally, while
+    python-dotenv decodes two escapes in them."""
+    if value == value.strip() and value[:1] not in ("'", '"') and not re.search(r"\s#", value):
+        return f"{key}={value}"
+    return f'{key}="' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def set_values(path: str | os.PathLike, updates: dict[str, str | None]) -> None:
     """Apply `updates` to the env file, replacing in place where the key exists.
 
     Keys not present are appended in the order given. Duplicate assignments of a
-    replaced key are removed, so exactly one live line remains per key.
+    replaced key are removed, so exactly one live line remains per key. A value
+    of None removes every assignment of its key (a commented one too, which
+    may hold an old secret) and appends nothing.
     """
     if not updates:
         return
+    # Every value is one line, refused before the file is opened.
+    _check_updates(updates)
     target = Path(path)
     with _write_lock:
         # threading.RLock above only serializes writers inside this one
@@ -153,15 +217,15 @@ def set_values(path: str | os.PathLike, updates: dict[str, str]) -> None:
                     match = _ASSIGN.match(line)
                     key = match.group("key") if match else None
                     if key is not None and key in updates:
-                        if key not in written:
-                            out.append(f"{key}={updates[key]}")
+                        if updates[key] is not None and key not in written:
+                            out.append(_line(key, updates[key]))
                             written.add(key)
                         continue  # later copies of the same key are dropped
                     out.append(line)
 
                 for key, value in updates.items():
-                    if key not in written:
-                        out.append(f"{key}={value}")
+                    if key not in written and value is not None:
+                        out.append(_line(key, value))
 
                 body = "\n".join(out)
                 if ends_clean or body:
@@ -189,7 +253,13 @@ def save_secret_value(repo_root: str | os.PathLike, env_path: str | os.PathLike,
     set_values(), which takes lock() internally — callers don't need to hold
     anything themselves unless this call is part of a larger multi-call
     atomic sequence (see lock()'s docstring).
+
+    Whitespace at either end of ``value`` is a paste's, never the key's: it
+    is dropped, and a value of whitespace only stores nothing.
     """
+    value = value.strip()
+    if not value:
+        return {"stored": "skip"}
     if store_in == "keyring":
         secret_script = str(Path(repo_root) / "bin" / "atlas-secret")
         try:

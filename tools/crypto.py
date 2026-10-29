@@ -49,22 +49,6 @@ _KEY_ENCODINGS = ("utf8", "hex", "base64")
 _GCM_TAG_LEN = 16
 
 
-def _record_marker(tool_name: str, success: bool, summary: dict) -> None:
-    """Log an in-process tool call to the execution trace, mirroring
-    tools/deobfuscation.py so the audit story stays complete."""
-    try:
-        import json
-        from core.execution_log import log
-        log.record_tool_call(
-            cmd=f"<py>:{tool_name}",
-            success=success, truncated=False, retries=0,
-            exit_code=0 if success else 1, stderr="", elapsed_seconds=0.0,
-            stdout_excerpt=json.dumps(summary, sort_keys=True)[:600],
-        )
-    except Exception:
-        pass
-
-
 def _printable_ratio(data: bytes) -> float:
     if not data:
         return 0.0
@@ -311,8 +295,6 @@ def _decrypt_one(
             except Exception:
                 # InvalidTag — authentication failed; this is a hard, unambiguous
                 # "wrong key/nonce/tag/AAD" signal, so fail loudly (no garbage).
-                _record_marker("crypto_decrypt", False,
-                               {"algo": "aes", "mode": "gcm", "auth": "failed"})
                 return _err(
                     "AES-GCM authentication failed — the ciphertext is not "
                     "authentic under this key/nonce/tag/AAD.",
@@ -390,9 +372,6 @@ def _decrypt_one(
             "IV, or mode is probably wrong. Verify the key material and "
             "key_encoding, and try a different mode "
             f"({', '.join(m for m in _AES_MODES if m != mode_l)}).")
-    _record_marker("crypto_decrypt", True, {
-        "algo": algo_l, "mode": result["mode"], "bytes": len(plaintext),
-        "likely_wrong_key": likely_wrong, "detected_type": detected})
     return result
 
 

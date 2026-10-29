@@ -169,6 +169,106 @@ def _evtx_magic_ok(path: str) -> bool:
         return False
 
 
+# Parsers that take any bytes and "succeed": analyzeMFT writes rows for a
+# file that is no MFT, mactime prints its header for a file that is no
+# bodyfile. Each input is judged by its own content. The signatures are the
+# formats' public definitions: an MFT is a run of file records, each opening
+# with "FILE" (or "BAAD" for a record NTFS marked bad); a bodyfile line is
+# eleven "|"-separated fields (The Sleuth Kit's body format 3).
+_MFT_RECORD_MAGICS = (b"FILE", b"BAAD")
+_MFT_PROBE_BYTES = 65536
+_BODYFILE_FIELDS = 11
+
+
+def _wrong_kind(path: str, what: str, fix: str) -> dict[str, Any]:
+    return {"success": False, "failure_class": FAILURE_CLASS, "path": path,
+            "error": f"{path!r} is not {what}, so the parser's output would mean nothing; {fix}."}
+
+
+def refuse_non_mft(path: str) -> Optional[dict[str, Any]]:
+    """The refusal for a file that does not open with an MFT file record,
+    None for one that does (or that cannot be read: the parser says why)."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(_MFT_PROBE_BYTES)
+    except OSError:
+        return None
+    # Any record start at the 1024-byte stride (1 KiB and 4 KiB records alike)
+    # counts: record 0 of a wiped, carved or partly extracted MFT may be gone.
+    if any(head[o:o + 4] in _MFT_RECORD_MAGICS for o in range(0, len(head), 1024)):
+        return None
+    return _wrong_kind(path, f"an MFT (no FILE record in its first {len(head)} bytes; it begins with bytes "
+                             f"{head[:4].hex() or 'none'})",
+                       "extract the $MFT (inode 0 of an NTFS volume) and pass that")
+
+
+_BODYFILE_FIX = "tsk.tsk_fls with bodyfile=True writes one"
+
+
+def refuse_non_bodyfile(path: str) -> Optional[dict[str, Any]]:
+    """The refusal for a file whose first line is no bodyfile line, None
+    for a bodyfile, an empty file (no entries) or one that cannot be read."""
+    head = read_text_head(path, 65536) if _looks_like_text_file(path) else None
+    if head is None:
+        try:
+            if os.path.getsize(path) == 0:
+                return None
+        except OSError:
+            return None
+        return _wrong_kind(path, "a bodyfile (it is binary, a bodyfile is text)", _BODYFILE_FIX)
+    first = next((ln for ln in head.splitlines() if ln.strip()), "")
+    if not first or first.count("|") + 1 >= _BODYFILE_FIELDS:
+        return None
+    return _wrong_kind(path, f"a bodyfile (its first line has {first.count('|') + 1} '|'-separated field(s), "
+                             f"a bodyfile line {_BODYFILE_FIELDS})", _BODYFILE_FIX)
+
+
+# A memory image by its name, when nothing else says what an input is.
+_MEMORY_NAME_RE = re.compile(r"\.(?:mem|vmem|dmp|lime)$", re.IGNORECASE)
+
+
+# The memory format's readers per registry read (the registry is read once
+# per process): the readers table is built over every registered tool, too
+# dear to build again for each file a folder holds.
+_MEMORY_READERS: list = [None, ()]          # [the registry list it was built from, readers]
+
+
+def _memory_reader(tool: str) -> bool:
+    """A reader of the memory image format (its plugins, by the readers
+    table: tools.tool_capabilities.MEMORY_FORMAT)."""
+    try:
+        from tools.tool_capabilities import MEMORY_FORMAT, readers_by_format, registered_tool_schemas
+        schemas = registered_tool_schemas()
+        if _MEMORY_READERS[0] is not schemas:
+            _MEMORY_READERS[:] = [schemas, tuple(readers_by_format(schemas).get(MEMORY_FORMAT) or [])]
+        mem = _MEMORY_READERS[1]
+    except Exception:  # noqa: BLE001
+        return False
+    norm = str(tool or "").replace(".", "_")
+    return any(norm.endswith(m.replace(".", "_").split("_", 1)[-1]) and norm.split("_", 1)[0] == m.split(".", 1)[0]
+               for m in mem)
+
+
+def reads_kind(tool_name: str, path: str, kind: str = "") -> Optional[bool]:
+    """Whether a parser takes this file when run over a folder that holds
+    it: an event-log parser only event logs, a hive parser only hives (by
+    their header), a memory plugin only a memory image (``kind``, the
+    evidence item's kind, when known, else its name); None for a tool this
+    registry does not know."""
+    tool = str(tool_name or "")
+    if _memory_reader(tool):
+        if kind:
+            return kind == "memory"
+        # Without the item's kind only a memory name says yes; any other
+        # name (.raw, .img hold either) says nothing.
+        return True if _MEMORY_NAME_RE.search(str(path)) else None
+    if _EVTX_TOOL_RE.search(tool):
+        return str(path).lower().endswith(".evtx")
+    if _HIVE_TOOL_RE.search(tool):
+        return os.path.isfile(path) and _hive_magic_ok(path)
+    return None
+
+
 def _with_gate(payload: dict[str, Any]) -> dict[str, Any]:
     out = dict(payload)
     out.setdefault("gate", GATE)
@@ -695,6 +795,25 @@ def check_tool_input_kind(
     Caller turns that into ToolError + PROTOCOL_MARKER (TOOL INFO).
     """
     name = tool_name or ""
+    try:
+        from tools.tool_capabilities import generic_text_refusal, is_generic_text_tool
+        if is_generic_text_tool(name):
+            for key in _RAW_SCAN_PARAMS:
+                val = args.get(key)
+                # is_text is known only for a file here; a handle or an inner
+                # path is None, which the media-type rule never refuses.
+                why = (generic_text_refusal(name, val, pattern=str(args.get("pattern") or ""),
+                                            is_text=_looks_like_text_file(val) if os.path.isfile(val) else None)
+                       if isinstance(val, str) and val.strip() else "")
+                if why:
+                    _label_readers = why.rsplit(": ", 1)[-1]
+                    raise ValueError(json.dumps(_with_gate({
+                        "success": False, "error": f"{name} refused: {why}.", "param": key, "path": val,
+                        "use_instead": _label_readers}), ensure_ascii=False))
+    except ValueError:
+        raise
+    except Exception:  # noqa: BLE001 - the routing check never breaks a call on its own
+        pass
     if _EVTX_TOOL_RE.search(name):
         params = _EVTX_PARAMS
     elif _HIVE_TOOL_RE.search(name):

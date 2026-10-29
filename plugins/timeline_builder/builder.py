@@ -26,6 +26,7 @@ class TimelineBuilder:
         self.events_path = self.build_dir / _EVENTS_FILE
         self.master_timeline_path = self.output_dir / _MASTER_TIMELINE
         self._events: list[NormalizedTimelineEvent] = []
+        self._keys: set[tuple] = set()          # dedupe_key of every held event
         self._loaded = False
 
     @classmethod
@@ -52,18 +53,25 @@ class TimelineBuilder:
                 self._events.append(NormalizedTimelineEvent.from_json(json.loads(line)))
         except (OSError, json.JSONDecodeError, ValueError):
             pass
+        self._keys = {ev.dedupe_key() for ev in self._events}
 
-    def append(self, event: NormalizedTimelineEvent) -> None:
+    def append(self, event: NormalizedTimelineEvent) -> bool:
+        """Hold the event; False, and nothing stored, when an event with its
+        dedupe key is held already. Every call that names a table maps the
+        table's rows again (dispatch reads the artifact path each time), so
+        without this each read of a table stored its events once more, in
+        memory and in events.jsonl, until the final merge dropped them."""
         self._ensure_loaded()
+        key = event.dedupe_key()
+        if key in self._keys:
+            return False
+        self._keys.add(key)
         self._events.append(event)
         self._persist_one(event)
+        return True
 
     def append_many(self, events: list[NormalizedTimelineEvent]) -> int:
-        n = 0
-        for ev in events:
-            self.append(ev)
-            n += 1
-        return n
+        return sum(1 for ev in events if self.append(ev))
 
     def _persist_one(self, event: NormalizedTimelineEvent) -> None:
         self.build_dir.mkdir(parents=True, exist_ok=True)
@@ -92,6 +100,7 @@ class TimelineBuilder:
             key = os.path.abspath(str(self.case_dir))
             _INSTANCES.pop(key, None)
         self._events.clear()
+        self._keys.clear()
         try:
             if self.events_path.is_file():
                 self.events_path.unlink()

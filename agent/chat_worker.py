@@ -44,7 +44,7 @@ def deny_for_role(role: str):
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="atlas-chat-worker")
     parser.add_argument("--case", required=True, help="case directory")
-    parser.add_argument("--model", default="", help="override LLMHUB_MODEL")
+    parser.add_argument("--model", default="", help="override the analyst provider's model")
     args = parser.parse_args(argv)
 
     # The real stdout is the protocol channel. Point sys.stdout at stderr for

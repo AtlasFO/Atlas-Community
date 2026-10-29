@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 
 from core.envfile import env_float
@@ -35,8 +36,8 @@ SCHEMA_VERSION = "1.0"
 # It has a hard floor: Atlas's own assembled system prompt (hub/ENTRY.md +
 # hub/playbook/*.md + case seed) measures ~25k tokens, so a window whose
 # send budget lands under that makes the very first turn unfittable and
-# every probe-failure run dies before it starts. 32k was tried and did
-# exactly that. 128k leaves ~96k of send budget — roughly 4x the playbook —
+# every probe-failure run dies before it starts. 128k leaves ~96k of send
+# budget — roughly 4x the playbook —
 # and is at or below the real context of every mainstream model Atlas
 # targets. Operators on genuinely smaller local models set
 # ATLAS_MODEL_CONTEXT_TOKENS. Guarded by
@@ -50,15 +51,19 @@ _probed_meta: dict[str, Any] = {}
 _LogFn = Callable[[str], None]
 
 # Common OpenAI-compatible / gateway field names — probed from live JSON only.
+# The window's own names first. max_tokens comes last: next to a window field
+# it is the output cap (Anthropic lists max_input_tokens and max_tokens), and
+# only a list that states nothing else is read for it.
 _CONTEXT_KEYS = (
     "context_length",
     "context_window",
+    "max_context_length",
     "max_model_len",
+    "max_input_tokens",
+    "input_token_limit",
     "max_sequence_length",
     "max_position_embeddings",
     "max_tokens",
-    "max_input_tokens",
-    "input_token_limit",
 )
 
 
@@ -237,12 +242,36 @@ def match_model_entry(
             return scored[0][1]
         return candidates[0]
 
+    # An alias the list names only by its dated snapshots (Anthropic lists
+    # "claude-haiku-4-5-20251001" for "claude-haiku-4-5"): the newest one.
+    dated = re.compile(re.escape(want) + r"-(\d{4}-?\d{2}-?\d{2})")
+    snapshots = sorted(mid for mid in by_id if dated.fullmatch(mid))
+    if snapshots:
+        return by_id[snapshots[-1]]
+
     # Case-insensitive fallback
     want_l = want.casefold()
     for mid, e in by_id.items():
         if mid.casefold() == want_l:
             return e
     return None
+
+
+def listed_model(entries: list[dict[str, Any]], model_id: str) -> str | None:
+    """The id to store for ``model_id`` when a provider's list holds it by
+    the one alias rule (match_model_entry), None when it does not. The id as
+    typed, except a match by case alone, which stores the list's own
+    spelling (a vendor may refuse another case); an alias the list names by
+    a variant (":free") or a dated snapshot is kept as typed, since the
+    vendor takes it."""
+    hit = match_model_entry(entries, model_id)
+    if hit is None:
+        return None
+    listed = str(hit.get("id") or "")
+    want = (model_id or "").strip()
+    if listed != want and listed.casefold() == want.casefold():
+        return listed
+    return want
 
 
 @dataclass
@@ -313,24 +342,19 @@ def fetch_models_payload(
     base_url: str,
     headers: dict[str, str],
     timeout: float = 20.0,
+    paging: str = "none",
 ) -> list[dict[str, Any]]:
-    """GET /models and return the ``data`` list (empty if malformed)."""
-    import httpx
+    """GET /models, every page, and return the entries (``data``, or a bare
+    list)."""
     from core import llmhub
 
     url = llmhub.build_models_url(base_url)
-    resp = httpx.get(url, headers=headers, timeout=timeout)
+    resp, entries = llmhub.get_models(base_url, headers, paging=paging, timeout=timeout)
     if resp.status_code >= 400:
         raise RuntimeError(f"HTTP {resp.status_code} from {url}: {resp.text[:240]}")
-    body = resp.json()
-    data = body.get("data") if isinstance(body, dict) else None
-    if not isinstance(data, list):
-        # Some servers return a bare list
-        if isinstance(body, list):
-            data = body
-        else:
-            raise RuntimeError(f"unexpected /models body from {url}")
-    return [e for e in data if isinstance(e, dict)]
+    if entries is None:
+        raise RuntimeError(f"unexpected /models body from {url}")
+    return entries
 
 
 def derived_context_chars(window_tokens: int) -> int:
@@ -340,6 +364,36 @@ def derived_context_chars(window_tokens: int) -> int:
     """
     from core.llm_check import limits_for_window
     return limits_for_window(window_tokens).context_chars
+
+
+# The share of the evaluator's window a finding's statement and its evidence
+# (the analyst's text and the cited rows Atlas attaches) may take in its
+# request; the rest is its instructions and its reply.
+EVIDENCE_SHARE = 0.25
+
+
+def evaluator_chars() -> int:
+    """The evaluator role's window in characters: ATLAS_MODEL_CONTEXT_TOKENS,
+    else the window probed for the reason role's model (this module's cache,
+    by base URL and model); the session's window is the fallback when
+    neither is known."""
+    try:
+        explicit = (os.environ.get("ATLAS_MODEL_CONTEXT_TOKENS") or "").strip()
+        if explicit:
+            return derived_context_chars(int(explicit))
+        from core.providers import resolve, role_name
+        provider = resolve(role_name("REASON_BACKEND"))
+        model = (os.environ.get("REASON_MODEL") or "").strip() or provider.model
+        tokens, _src = _read_cache_entry(provider.base_url, model)
+        if tokens:
+            return derived_context_chars(int(tokens))
+    except Exception:  # noqa: BLE001 - not configured or not probed: the fallback
+        pass
+    try:
+        from agent.loop import context_char_budget   # lazy: core never imports agent at load
+        return context_char_budget()
+    except Exception:  # noqa: BLE001
+        return 96000
 
 
 def adapt_agent_context_chars(
@@ -424,6 +478,7 @@ def probe_model_context(
     timeout: float | None = None,
     persist_cache: bool = True,
     use_cache_on_failure: bool = True,
+    paging: str = "none",
 ) -> ProbeResult:
     """Network probe for one model. Fail-open with optional cache fallback."""
     model = (model or "").strip()
@@ -469,7 +524,7 @@ def probe_model_context(
 
     try:
         entries = fetch_models_payload(
-            base_url=base_url, headers=headers, timeout=timeout)
+            base_url=base_url, headers=headers, timeout=timeout, paging=paging)
         entry = match_model_entry(entries, model)
         if entry is None:
             return ProbeResult(
@@ -539,6 +594,8 @@ def probe_and_apply(
     base_url = getattr(provider, "base_url", "") or ""
     headers = {}
     try:
+        # The provider's own headers with its auth: a vendor's native model
+        # list (Anthropic's) answers only with them.
         headers = dict(provider.headers())
     except Exception:
         headers = {"Content-Type": "application/json"}
@@ -549,6 +606,7 @@ def probe_and_apply(
         headers=headers,
         model=model or getattr(provider, "model", "") or "",
         provider=prov_name,
+        paging=getattr(provider, "models_paging", "none") or "none",
     )
     if result.success and result.window_tokens:
         applied = apply_window(

@@ -4,8 +4,8 @@ from core.candidates import candidates
 
 
 def test_a_string_is_one_candidate_and_a_list_is_taken_in_order():
-    assert candidates("gator") == ["gator"]
-    assert candidates(["gator", "monkey", "gator"]) == ["gator", "monkey"]
+    assert candidates("sunrise") == ["sunrise"]
+    assert candidates(["sunrise", "harbor", "sunrise"]) == ["sunrise", "harbor"]
     assert candidates(None) == []
 
 

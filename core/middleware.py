@@ -96,6 +96,16 @@ SOLUTION_GATE_ALLOWLIST = frozenset({
 })
 
 
+def _solution_gate_allowlist() -> frozenset:
+    """The tools exempt from the solution-material gate: none while the
+    grader is hidden from the analyst (ATLAS_HIDE_GRADER, default on), so a
+    grader call reaching the server through any path is refused the answer
+    key as well; the reviewer scores a run by importing the module, outside
+    the server. Off restores the allowlist above."""
+    from core.envfile import env_flag
+    return frozenset() if env_flag("ATLAS_HIDE_GRADER", True) else SOLUTION_GATE_ALLOWLIST
+
+
 # Argument keys that carry command/script text rather than prose. Only these
 # get the substring scan (contains_solution_reference) on top of the
 # path-shape check — a finding description that merely *mentions*
@@ -187,10 +197,12 @@ def _resolve_case_paths(tool_name: str, args: dict) -> dict | None:
     known — failing loudly beats silently writing into the server's CWD.
     """
     from core.paths import CASE_PATH_PARAM_NAMES
+    from core.stack import population_word
     rel = {
         k: v.strip() for k, v in args.items()
         if k in CASE_PATH_PARAM_NAMES and isinstance(v, str) and v.strip()
         and not os.path.isabs(os.path.expanduser(v.strip()))
+        and not population_word(tool_name, k, v)
     }
     if not rel:
         return None
@@ -302,61 +314,7 @@ FORENSIC_BINARY_PATTERNS = (
     r"(?<![\w-])(?:openpyxl|xlsx2csv|in2csv)\b",
 )
 
-MCP_WRAPPER_HINTS = {
-    "vol": "vol.vol_* (e.g. vol.vol_pslist, vol.vol_netscan)",
-    "RECmd": "ez.ez_recmd_hive / ez.ez_recmd_batch",
-    "MFTECmd": "ez.ez_mftecmd",
-    "EvtxECmd": "ez.ez_evtxecmd",
-    "PECmd": "ez.ez_pecmd",
-    "JLECmd": "ez.ez_jlecmd",
-    "LECmd": "ez.ez_lecmd",
-    "SBECmd": "ez.ez_sbecmd",
-    "AmcacheParser": "ez.ez_amcacheparser",
-    "AppCompatCacheParser": "ez.ez_appcompatcacheparser",
-    "WxTCmd": "ez.ez_wxtcmd",
-    "SQLECmd": "ez.ez_sqlecmd",
-    "RBCmd": "ez.ez_rbcmd",
-    "RLA": "ez.ez_rla",
-    "fls": "tsk.tsk_fls",
-    "icat": "tsk.tsk_icat",
-    "istat": "tsk.tsk_istat",
-    "ils": "tsk.tsk_ils",
-    "blkls": "tsk.tsk_blkls",
-    "mactime": "tsk.tsk_mactime",
-    "tsk_recover": "tsk.tsk_recover",
-    "sigfind": "tsk.tsk_sigfind",
-    "sorter": "tsk.tsk_sorter",
-    "jls": "tsk.tsk_jls",
-    "jcat": "tsk.tsk_jcat",
-    "mmls": "tsk.tsk_mmls",
-    "fsstat": "tsk.tsk_fsstat",
-    "hexdump": "strings.strings_hexdump",
-    "xxd": "strings.strings_xxd_dump",
-    "exiftool": "strings.strings_exiftool_metadata / strings.strings_exiftool_batch",
-    "ssdeep": "hash.hash_ssdeep_hash / hash.hash_ssdeep_compare",
-    "hashdeep": "hash.hash_hashdeep_compute / hash.hash_hashdeep_audit",
-    "md5deep": "hash.hash_md5deep_scan",
-    "log2timeline.py": "plaso.plaso_create_timeline / plaso.plaso_create_targeted",
-    "psort.py": "plaso.plaso_export_csv / plaso.plaso_export_json / plaso.plaso_filter_incident_window",
-    "pinfo.py": "plaso.plaso_info / plaso.plaso_list_parsers",
-    "yara": "yara.yara_scan_file / yara.yara_scan_directory / yara.yara_scan_memory_image",
-    "bulk_extractor": "carve.carve_bulk_extractor_scan",
-    "foremost": "carve.carve_foremost_carve",
-    "scalpel": "carve.carve_scalpel_carve",
-    "photorec": "img.img_photorec_carve",
-    "ewfmount": "ewf.ewf_ewf_mount / ewf.ewf_mount_full_image",
-    "ewfinfo": "ewf.ewf_ewf_info",
-    "ewfverify": "ewf.ewf_ewf_verify",
-    "vshadowmount": "img.img_vshadow_mount",
-    "bdemount": "img.img_bde_mount",
-    "xmount": "img.img_xmount_image",
-    "tcpdump": "net.net_tcpdump_read / net.net_tcpdump_extract_http / net.net_tcpdump_extract_dns",
-    "clamscan": "misc.misc_clamscan_file / misc.misc_clamscan_directory",
-    "rip.pl": "misc.misc_regripper_hive",
-    "openpyxl": "table.table_schema / table.table_query (typed xlsx access)",
-    "xlsx2csv": "table.table_schema / table.table_query",
-    "in2csv": "table.table_schema / table.table_query",
-}
+from core.wrapper_hints import MCP_WRAPPER_HINTS  # noqa: E402 - the table lives apart, importable without fastmcp
 
 # Binaries that are allowed through batch_run (no hard redirect — shell text
 # processing is legitimate in small doses) but have a typed equivalent the
@@ -440,9 +398,9 @@ def dair_window_used(log=None) -> tuple[int, int]:
     return 0, DAIR_WINDOW
 
 
-# A batch that begins inside the DAIR window runs to completion. The window
-# used to be checked per call: a batch of eight with five actions of room lost
-# three calls to deferred intents, then a bare dair_assess turn, then the same
+# A batch that begins inside the DAIR window runs to completion. Checking the
+# window per call would lose a batch of eight with five actions of room three
+# calls to deferred intents, then a bare dair_assess turn, then the same
 # three calls again — a large share of the turns of a long run. The next batch
 # still needs dair_assess first; nothing about the protocol moves except
 # where the boundary falls. ATLAS_DAIR_BATCH_GRACE=0 restores per-call checks.
@@ -476,6 +434,14 @@ def end_batch() -> None:
 
 def _gate_decision() -> tuple[bool, str]:
     """Return (should_block, reason). Fail-open on gate errors, but log them."""
+    try:
+        from core.deferred_intents import dair_no_defer_on
+        if dair_no_defer_on():
+            # No deferral (ATLAS_DAIR_NO_DEFER), before the latch: a resumed
+            # trace's old intents must not block a forensic call either.
+            return False, "no deferral"
+    except Exception:  # noqa: BLE001
+        pass
     try:
         from core.execution_log import log
         entries = log._entries
@@ -598,6 +564,12 @@ def _validation_envelope(tool_name: str, exc: Exception) -> str:
         errors = [{"loc": (), "msg": str(exc)[:300],
                    "type": type(exc).__name__}]
     n = len(errors)
+    # A call that carried no arguments at all: the missing fields are the
+    # whole message (a model that sent {} needs the names, not a listing).
+    if errors and all(e.get("type") == "missing" and e.get("input") == {} for e in errors):
+        needs = ", ".join(".".join(str(p) for p in e.get("loc", ())) or "<arguments>" for e in errors)
+        return (f"{tool_name} was called with no arguments; the tool did not run. "
+                f"It needs: {needs}. Call it again with them.")
     lines = [f"{tool_name}: invalid arguments — {n} validation "
              f"error{'s' if n != 1 else ''}; the tool did not run."]
     for err in errors:
@@ -698,18 +670,41 @@ def _extract_evidence_ref(args: dict) -> str:
     and tool calls can be attributed per host at report time. Purely a
     path-shape heuristic over string args — no per-wrapper changes.
     """
-    for v in args.values():
+    from core.paths import is_path_param
+    for k, v in args.items():
         if not isinstance(v, str) or len(v) > 1024:
             continue
         m = _EVIDENCE_REF_RE.search(v)
         if m:
+            # A path parameter holds one path: a space in it is part of it,
+            # and it is kept whole up to the 1024 characters read here (a cut
+            # path names a shorter one). Other arguments keep the cut match.
+            if is_path_param(k) and "\n" not in v:
+                return v[m.start():].strip()
             return m.group(0)[:256]
     return ""
 
 
-def _result_text(result) -> str:
+# Arguments and result fields that carry secret material a tool takes (a
+# decryption key and its IV and tag, the key a candidate list resolved to):
+# the trace, its spill and the evidence index never hold them; the model's
+# own call and result keep them.
+_TRACE_WITHHELD: dict[str, frozenset[str]] = {
+    "crypto_decrypt": frozenset({"key", "iv", "tag", "key_used"}),
+}
+
+
+def _traced(tool_name: str, fields: dict | None) -> dict | None:
+    """``fields`` without the names the tool's trace withholds."""
+    drop = _TRACE_WITHHELD.get(tool_name)
+    if not drop or not isinstance(fields, dict):
+        return fields
+    return {k: v for k, v in fields.items() if k not in drop}
+
+
+def _result_text(result, tool_name: str = "") -> str:
     """The tool's result as text, for the trace excerpt and the spill."""
-    payload = _result_payload(result)
+    payload = _traced(tool_name, _result_payload(result))
     if payload:
         try:
             return json.dumps(payload, ensure_ascii=False, default=str)
@@ -734,7 +729,7 @@ def _spill_result_text(text: str, tool_name: str) -> str:
 def _trace_success_baseline(tool_name: str, elapsed: float,
                              entries_before: int | None,
                              result=None, evidence_ref: str = "",
-                             args: dict | None = None) -> None:
+                             args: dict | None = None, action_id: int | None = None) -> None:
     """Write a baseline tool_call entry if the tool didn't self-log.
 
     Subprocess tools self-log via core.executor._log_tool. reason_*/dair_*
@@ -742,7 +737,11 @@ def _trace_success_baseline(tool_name: str, elapsed: float,
     (correlate_*, accuracy_*, etc.) don't — this baseline makes them visible.
     Self-logging is detected by whether log._entries grew during the call.
     The baseline reflects app-level failures reported in the return payload
-    (see _app_level_failure) so gate refusals are visible in the trace.
+    (see _app_level_failure) so gate refusals are visible in the trace. A
+    failure the tool returns that is no entry of its own (a refusal after a
+    sub-command that succeeded, a wrapped failure without its stamp) gets
+    the entry too, once: a refusal never leaves the trace. The entry carries
+    the call's action id.
     """
     if entries_before is None:
         return
@@ -757,12 +756,35 @@ def _trace_success_baseline(tool_name: str, elapsed: float,
         own_reviews = (not tool_name.startswith(("reason_", "dair_"))
                        and bool(added)
                        and all(e.get("type") == "reason_call" for e in added))
-        if not added or own_reviews:
-            failure = _app_level_failure(result)
+        # An allow-listed row tool (strings_grep) runs its program through
+        # the executor, whose entries hold the raw output and not the
+        # matches dict the model reads; the dict gets a baseline entry of
+        # its own, with the executor entries as its inputs, so a cited line
+        # is in the cited entry's text (ATLAS_RESULT_CALL_ID).
+        executor_inputs: list[int] = []
+        try:
+            from core.envfile import env_flag
+            from core.tool_result_view import ROW_VIEW_TOOLS
+            if (tool_name in ROW_VIEW_TOOLS and added and env_flag("ATLAS_RESULT_CALL_ID")
+                    and all(e.get("type") == "tool_call"
+                            and not str(e.get("cmd") or "").startswith("<py>:") for e in added)):
+                executor_inputs = [int(e["call_id"]) for e in added if e.get("call_id")]
+        except Exception:  # noqa: BLE001
+            executor_inputs = []
+        failure = _app_level_failure(result)
+        # The entry the returned result already is (an executor's failure
+        # handed back as is carries its own entry's id), or None.
+        stamp = _result_payload(result).get("_atlas_call_id")
+        own = {int(e["call_id"]) for e in added if e.get("type") == "tool_call" and e.get("call_id")}
+        try:
+            stamp = int(stamp) if stamp is not None else None
+        except (TypeError, ValueError):
+            stamp = None
+        if not added or own_reviews or executor_inputs or (failure is not None and stamp not in own):
             # The result text itself: without it the trace held only row
             # counts for table queries, and no finding quoting an address
             # or a time from one could ever be cited.
-            text = _result_text(result)
+            text = _result_text(result, tool_name)
             cid = log.record_tool_call(
                 cmd=f"<py>:{tool_name}",
                 success=failure is None,
@@ -772,32 +794,163 @@ def _trace_success_baseline(tool_name: str, elapsed: float,
                 stderr=failure[0] if failure else "",
                 elapsed_seconds=elapsed,
                 stdout_excerpt=text,
-                input_call_ids=_parent_cids(),
+                input_call_ids=executor_inputs or sorted(own) or _parent_cids(),
                 stdout_file=_spill_result_text(text, tool_name),
                 failure_class=failure[1] if failure else "",
+                # A watchdog timeout (core.timeout.with_tool_timeout) is the
+                # host's fact, not the file's: the entry carries the mark the
+                # executor's subprocess path records for its own timeouts.
+                timed_out=bool(_result_payload(result).get("timed_out")),
                 evidence_ref=evidence_ref,
+                action_id=action_id,
             )
-            # How much of the result the caller could see: a finding that
-            # generalises over "all rows" is checked against these counts
-            # (tools/_gates/universal_from_truncated.py).
-            meta = _result_meta(result)
-            if meta and cid:
-                log.annotate_tool_call(int(cid), result_meta=meta)
-            # The arguments are what a later check needs to know what a
-            # call was *about* (a grep for "winevt" is a winevt attempt).
-            if cid and args:
-                try:
-                    log.annotate_tool_call(
-                        int(cid), args=json.dumps(args, default=str, sort_keys=True)[:400])
-                except Exception:  # noqa: BLE001
-                    pass
+            # A call that handed its work to a background job instead of
+            # doing it read nothing yet: the job's outcome is its read
+            # (core.coverage_ledger.resolved_entry).
+            handed = _result_payload(result)
+            if cid and handed.get("deferred") is True and handed.get("job_id"):
+                log.annotate_tool_call(int(cid), deferred_to_job=str(handed["job_id"]))
+            # The full-output index holds what this call returned, so a
+            # later check can find a value in any evidence call's output,
+            # the in-process tools' included. Own-words tools and lookups
+            # pass through the same writer and are never indexed, so an
+            # index search cannot surface them.
+            # Stamped first: the evidence index dates a result by the paths
+            # the call names (its arguments included).
+            _stamp_call(log, [cid] if cid else [], result, args, tool_name)
+            _index_evidence_result(cid, tool_name, text)
+            if cid and failure is not None and tool_name.endswith("record_finding"):
+                _keep_refused_finding(log, int(cid), _result_payload(result), args)
+        else:
+            # The tool logged its own entry (every executor tool, every
+            # in-process reader): that entry is the call's record and gets the
+            # same arguments and result counts, or a later reader of the
+            # trace sees a command line only. The entry the result names, else
+            # the entries carrying this call's action id (an entry of another
+            # writer can land in the same window; one without an id is left
+            # unstamped).
+            mine = [stamp] if stamp in own else sorted(
+                int(e["call_id"]) for e in added
+                if e.get("type") == "tool_call" and e.get("call_id")
+                and action_id is not None and e.get("action_id") == action_id)
+            _stamp_call(log, mine, result, args, tool_name)
     except Exception as err:
         print(f"[Atlas WARN] success-baseline log failed for {tool_name}: "
               f"{err!r}", file=sys.stderr)
 
 
+def _keep_refused_finding(log, cid: int, payload: dict, args: dict | None) -> None:
+    """A refused finding's whole description (bounded), the gates that
+    objected and the sentences they named, on its refusal entry: the trace
+    cuts the arguments at 400 characters, and the open work keeps a refused
+    finding on the table until it is recorded or withdrawn
+    (core.work_order.refused_findings)."""
+    desc = str((args or {}).get("description") or payload.get("description") or "")
+    if not desc or not payload.get("gate"):
+        return
+    gates = [payload.get("detail_gate") or payload.get("gate")] + [
+        o.get("detail_gate") or o.get("gate") for o in payload.get("also_refused_by") or [] if isinstance(o, dict)]
+    steps = [{"gate": str(s.get("gate") or "")[:80], "step": " ".join(str(s.get("step") or "").split())[:600]}
+             for s in payload.get("gate_steps") or [] if isinstance(s, dict)][:8]
+    log.annotate_tool_call(cid, refused_description=desc[:4000],
+                           refused_gates=[str(g) for g in dict.fromkeys(gates) if g],
+                           objected_sentences=[str(s)[:1000] for s in payload.get("objected_sentences") or []][:20],
+                           gate_steps=steps)
+
+
+def _stamp_call(log, cids: list, result, args: dict | None, tool_name: str = "") -> None:
+    """Stamp a call's record entries with how much of the result the caller
+    could see (a finding that generalises over "all rows" is checked against
+    these counts, tools/_gates/universal_from_truncated.py) and with its
+    arguments (what a later check needs to know what the call was about; a
+    grep for "winevt" is a winevt attempt). The argument text is cut at 400
+    characters; its readers parse it leniently (core.indicators._parsed_args).
+    The names the tool's trace withholds (_TRACE_WITHHELD) are never stamped,
+    on its own entry or on an entry it logged itself."""
+    meta = _result_meta(result)
+    args = _traced(tool_name, args)
+    text = ""
+    if args:
+        try:
+            text = json.dumps(args, default=str, sort_keys=True)[:400]
+        except Exception:  # noqa: BLE001
+            text = ""
+    for cid in cids:
+        if meta:
+            log.annotate_tool_call(int(cid), result_meta=meta)
+        if text:
+            log.annotate_tool_call(int(cid), args=text)
+
+
+def _index_evidence_result(cid: int | None, tool_name: str, text: str) -> None:
+    """Feed a Python tool's result to the evidence index when the call's
+    output is evidence (core.forensic_citation.citation_class). Best effort:
+    indexing never fails a tool call."""
+    if not cid or not text:
+        return
+    try:
+        from core import evidence_index
+        from core.envfile import env_flag
+        from core.execution_log import log
+        from core.forensic_citation import citation_class
+        if not env_flag("ATLAS_IOC_SIGHTINGS") and not env_flag("ATLAS_IOC_ECHO_FREE"):
+            return
+        entry = (log.index().by_call_id or {}).get(int(cid))
+        if not isinstance(entry, dict) or citation_class(entry) != "evidence":
+            return
+        # A yearless form in the result (a syslog line, a listing row) is
+        # dated by the evidence files the call read, never by the run.
+        from core.provenance import path_tokens
+        evidence_index.index_output(call_id=int(cid), tool=tool_name, text=text,
+                                    source_path=str(entry.get("stdout_file") or ""),
+                                    reference_year=evidence_index.evidence_date(path_tokens(entry)))
+    except Exception as err:  # noqa: BLE001
+        print(f"[Atlas WARN] evidence indexing failed for {tool_name}: {err!r}", file=sys.stderr)
+
+
+def _output_snapshot_safe():
+    """The output tree's stat snapshot for the attribution ledger
+    (core.provenance), or None when no case is active; never raises."""
+    try:
+        from core.envfile import env_flag
+        from core.execution_log import log as _log
+        from core.provenance import output_snapshot
+        if not env_flag("ATLAS_IOC_SIGHTINGS") and not env_flag("ATLAS_IOC_ECHO_FREE"):
+            return None
+        case = _log.case_dir()
+        return output_snapshot(case) if case else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _attribute_outputs(before, entries_before: int | None) -> None:
+    """Record every file the call wrote under the output tree with the call
+    that produced it and that call's class (core.provenance.record_outputs),
+    so a later read of the file knows whether it is a parser's table or the
+    run's own material. The producing calls are the tool_call entries the
+    call left in the trace (several for a batch run). Never raises."""
+    if before is None or entries_before is None:
+        return
+    try:
+        from core.execution_log import log as _log
+        from core.provenance import output_snapshot, record_outputs
+        case = _log.case_dir()
+        if not case:
+            return
+        added = [e for e in _log._entries[entries_before:] if e.get("type") == "tool_call"]
+        if not added:
+            return
+        after = output_snapshot(case)
+        record_outputs(case, added, before, after)
+    except Exception as err:  # noqa: BLE001
+        print(f"[Atlas WARN] output attribution failed: {err!r}", file=sys.stderr)
+
+
 _RESULT_META_KEYS = ("matched_rows", "returned_rows", "hit_count", "max_hits",
-                     "scanned_rows", "row_count", "truncated", "scan_capped")
+                     "scanned_rows", "row_count", "truncated", "scan_capped",
+                     "matched_rows_all")
+# A windowed search's period, for the gates' "searched only ... to ..." line.
+_RESULT_META_TEXT_KEYS = ("time_start", "time_end")
 
 
 def _result_payload(result) -> dict:
@@ -829,6 +982,10 @@ def _result_meta(result) -> dict:
         v = payload.get(k)
         if isinstance(v, bool) or isinstance(v, int):
             out[k] = v
+    for k in _RESULT_META_TEXT_KEYS:
+        v = payload.get(k)
+        if isinstance(v, str) and v:
+            out[k] = v[:40]
     return out
 
 
@@ -956,7 +1113,7 @@ class NarrationMiddleware(Middleware):
                 pass
             raise ToolError(_tlp_reason)
 
-        if tool_name not in SOLUTION_GATE_ALLOWLIST:
+        if tool_name not in _solution_gate_allowlist():
             hit = _find_solution_arg(args)
             if hit:
                 from core.paths import SOLUTION_BLOCK_MESSAGE
@@ -1016,8 +1173,7 @@ class NarrationMiddleware(Middleware):
                     pass
             # Repeat-call: same bulk fingerprint after a prior success/artifact.
             try:
-                from core.deferred_intents import args_fingerprint
-                fp = args_fingerprint(tool_name, args)
+                fp = _iscale.repeat_fingerprint(tool_name, args)
                 prior = getattr(_elog, "_scale_success_fps", None) or {}
                 hit = prior.get(fp) if isinstance(prior, dict) else None
                 if hit and _iscale.is_bulk_parse_tool(tool_name):
@@ -1110,6 +1266,7 @@ class NarrationMiddleware(Middleware):
                     tool_name,
                     f"wrong-input-kind gate: {msg[:300]}",
                     input_call_ids=_parent_cids(),
+                    args=_traced(tool_name, args),
                 )
             except Exception:
                 pass
@@ -1208,6 +1365,7 @@ class NarrationMiddleware(Middleware):
                         tool_name,
                         f"evidence-compat gate: {_refusal.get('error', '')[:300]}",
                         input_call_ids=_parent_cids(),
+                    args=_traced(tool_name, args),
                     )
                 except Exception:
                     pass
@@ -1258,6 +1416,7 @@ class NarrationMiddleware(Middleware):
         except Exception:
             entries_before = None
 
+        _outputs_before = _output_snapshot_safe()
         start = time.perf_counter()
 
         # Stamp the invoking MCP tool onto any tool_call the body self-logs
@@ -1269,7 +1428,8 @@ class NarrationMiddleware(Middleware):
         _eref = _extract_evidence_ref(args)
         _tok = current_mcp_tool.set(tool_name)
         _eref_tok = current_evidence_ref.set(_eref or None)
-        _aid_tok = current_action_id.set(next_action_id())
+        _aid = next_action_id()
+        _aid_tok = current_action_id.set(_aid)
 
         try:
             result = await call_next(context)
@@ -1308,10 +1468,12 @@ class NarrationMiddleware(Middleware):
         except Exception:
             pass
 
-        # Runs after the contextvar reset — pass the ref explicitly.
+        # Runs after the contextvar reset — pass the ref and the call's id
+        # explicitly: the result entry belongs to the call it records.
         _trace_success_baseline(tool_name, round(time.perf_counter() - start, 2),
                                 entries_before, result, evidence_ref=_eref,
-                                args=args)
+                                args=args, action_id=_aid)
+        _attribute_outputs(_outputs_before, entries_before)
 
         # Proactive Brain wiki: once per forensic topic per run, append a
         # short cross-case lesson block when notes exist (token-capped).

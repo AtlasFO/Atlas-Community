@@ -17,6 +17,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from core.state_files import BRAIN_AUTO_TOPICS
+
 # topic_id → (search query, human label)
 # Matched against the MCP tool name (underscored). First hit wins.
 _TOPIC_RULES: list[tuple[re.Pattern[str], str, str]] = [
@@ -54,7 +56,7 @@ _SKIP_TOOLS = re.compile(
     re.I,
 )
 
-_TOPICS_STATE = "analysis/brain_auto_topics.json"
+_TOPICS_STATE = f"analysis/{BRAIN_AUTO_TOPICS}"
 _MAX_NOTES = 2
 _MAX_BODY = 500
 _MAX_BLOCK = 1800

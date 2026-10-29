@@ -77,7 +77,8 @@ def process_tool_result(
     evidence_ref: str = "",
     call_id: str = "",
 ) -> int:
-    """Map one tool invocation. Returns count of events appended."""
+    """Map one tool invocation. Returns the count of events appended (the
+    events held already, from an earlier read of the same rows, are not)."""
     if _should_skip_tool(tool_name):
         return 0
     payload = extract_payload(result)
@@ -111,13 +112,7 @@ def process_tool_result(
         for rec in reader_cls.read_rows(path, max_rows=config.max_rows_per_artifact):
             ev = map_record(rec, ctx, config)
             if ev:
-                if isinstance(ev, list):
-                    for item in ev:
-                        builder.append(item)
-                        count += 1
-                else:
-                    builder.append(ev)
-                    count += 1
+                count += builder.append_many(ev if isinstance(ev, list) else [ev])
 
     inline = rows_from_json_payload(payload)
     if inline:
@@ -125,13 +120,7 @@ def process_tool_result(
         for rec in read_inline_rows(inline, artifact_path=ap):
             ev = map_record(rec, ctx, config)
             if ev:
-                if isinstance(ev, list):
-                    for item in ev:
-                        builder.append(item)
-                        count += 1
-                else:
-                    builder.append(ev)
-                    count += 1
+                count += builder.append_many(ev if isinstance(ev, list) else [ev])
 
     return count
 

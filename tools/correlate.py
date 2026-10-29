@@ -49,7 +49,7 @@ def _recent_tool_stdouts(tool_substring: str, max_entries: int = 50) -> list[dic
     return list(reversed(matches))
 
 
-# ── Process ↔ File correlation ──────────────────────────────────────────────
+# ── Process <-> File correlation ──────────────────────────────────────────────
 
 _PID_LINE_RE = re.compile(r"\b(?:PID|Pid)[:=]?\s*(\d+)\b")
 # Windows path or absolute Linux path with at least 2 segments. The Linux side
@@ -158,7 +158,7 @@ def process_to_file(pid: Optional[int] = None, path_substring: Optional[str] = N
     }
 
 
-# ── Network ↔ Process correlation ───────────────────────────────────────────
+# ── Network <-> Process correlation ───────────────────────────────────────────
 
 _IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 _PORT_RE = re.compile(r":(\d{1,5})\b")
@@ -229,7 +229,7 @@ def network_to_process(ip: Optional[str] = None, port: Optional[int] = None) -> 
     }
 
 
-# ── Finding ↔ MITRE ATT&CK mapping ──────────────────────────────────────────
+# ── Finding <-> MITRE ATT&CK mapping ──────────────────────────────────────────
 
 @mcp.tool()
 def mitre_map(finding_text: str, top_n: int = 5,
@@ -417,30 +417,19 @@ def _finding_techniques(entry: dict, infer_unlabeled: bool,
 def killchain_timeline(table_path: Optional[str] = None,
                        infer_unlabeled: bool = True) -> dict:
     """
-    Order the investigation's recorded findings along the attack kill chain.
-
-    Reads every `finding` entry from the execution log, maps each to its MITRE
-    ATT&CK technique/tactic (preferring the gate-validated techniques already
-    stamped on the finding; otherwise keyword-inferring one when
-    infer_unlabeled), and arranges them along the ATT&CK tactic sequence — which
-    also rolls up to coarse Lockheed-Martin kill-chain phases. Each finding is
-    tied back to the tool call that produced it (linked_call_id), yielding an
-    evidence → tool → finding → attack-stage dependency chain.
+    Order the investigation's recorded findings along the attack kill chain:
+    each finding mapped to its ATT&CK technique and tactic (the gate-validated
+    technique on the finding, else inferred by keyword when infer_unlabeled),
+    arranged in tactic order (rolled up to coarse kill-chain phases) and tied
+    to the call that produced it (evidence, tool, finding, stage).
+    Returns stages (per tactic: killchain_phase, order, findings with ts,
+    confidence, technique, source_tool and source_call_id), timeline (flat,
+    by tactic order and time), per_host (only when findings carry host=; the
+    estate report's per-host table), unmapped (findings with no technique)
+    and stats.
 
     table_path: override the default ATT&CK reference path.
     infer_unlabeled: keyword-map findings that carry no validated technique.
-
-    Returns:
-      stages: kill-chain-ordered list of {tactic, killchain_phase, order,
-              findings:[...]}; each finding row carries ts, confidence,
-              technique, and its source_tool/source_call_id lineage.
-      timeline: findings flattened, sorted by (tactic order, timestamp).
-      per_host: timeline rows bucketed by the findings' host tag (multi-host
-              cases; untagged findings land in "unattributed"). Only present
-              when at least one finding carries host= — this is the data
-              source for the estate report's per-host disposition table.
-      unmapped: findings with no technique (need MITRE tagging).
-      stats: counts.
     """
     from core.claim_graph import asserted_finding_entries
     from core.execution_log import log

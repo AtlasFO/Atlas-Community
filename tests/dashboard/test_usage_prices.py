@@ -111,7 +111,7 @@ class TestRelabel:
         payload = up.sync()
         assert [m["key"] for m in payload["models"]] == ["gw|m1"]
         # a zero price does not win over a real one for the same model
-        assert payload["prices"]["gw|m1"] == {"input": 1.5, "cached": 0.2, "output": 3.5}
+        assert payload["prices"]["gw|m1"] == {"input": 1.5, "cached": 0.2, "cache_write": None, "output": 3.5}
         assert {r["provider"] for r in ledger.daily_rows("2000-01-01")} == {"gw"}
 
     def test_a_real_price_on_the_provider_row_stays(self, llm):
@@ -143,3 +143,49 @@ class TestSave:
         payload = up.sync()
         assert payload["currency"] == "USD" and payload["autoremove"] is True
         assert payload["prices"]["gw|m1"]["cached"] is None
+
+
+class TestCacheWriteAndLongPromptPrices:
+    def test_cache_write_and_a_long_prompt_price_are_kept(self, llm):
+        up.save({"prices": {"gw|m1": {"input": 0.1, "cached": 0.01, "cache_write": 0.125, "output": 0.5,
+                                      "long_over": "100000", "long_input": 0.5, "long_cached": None,
+                                      "long_cache_write": 0.625, "long_output": 2.5}}})
+        saved = up.sync()["prices"]["gw|m1"]
+        assert saved["cache_write"] == 0.125 and saved["long_over"] == 100_000
+        assert saved["long_input"] == 0.5 and saved["long_cached"] is None
+
+    @pytest.mark.parametrize("entry", [
+        {"long_input": 0.5, "long_output": 2.5},                              # no length
+        {"long_over": 100000},                                                # no long prices
+        {"long_over": 100000.5, "long_input": 0.5, "long_output": 2.5},       # not a whole number
+        {"long_over": 0, "long_input": 0.5, "long_output": 2.5},
+        {"cache_write": -1}])
+    def test_a_long_prompt_price_needs_its_length_and_both_prices(self, llm, entry):
+        with pytest.raises(up.PriceError):
+            up.save({"prices": {"gw|m1": {"input": 0.1, "output": 0.5, **entry}}})
+
+
+def test_the_export_prices_each_day_row_and_lists_cache_writes(monkeypatch):
+    import csv
+    import io
+    from dashboard import app
+    up.save({"prices": {"hub|m1": {"input": 1.0, "cache_write": 2.0, "output": 1.0,
+                                   "long_over": 1000, "long_input": 10.0, "long_output": 10.0}}})
+    ledger.configure(case_id="C1", run_id="R1", command="run")
+    ledger.record(role="agent", provider="hub", model="m1", input_tokens=1000, output_tokens=0,
+                  cache_write_tokens=1000)
+    ledger.record(role="agent", provider="hub", model="m1", input_tokens=2000, output_tokens=0)
+    ledger.reset()
+    resp = app._get_config_usage_export(None, None, {"period": "month", "months": "1"})
+    rows = list(csv.DictReader(io.StringIO(resp.body.decode())))
+    assert len(rows) == 1 and rows[0]["cache_write_tokens"] == "1000" and rows[0]["input_tokens"] == "3000"
+    assert float(rows[0]["cost"]) == pytest.approx((1000 * 2.0 + 2000 * 10.0) / 1e6)
+
+
+def test_the_spend_is_labelled_usd_unless_changed(llm):
+    """Vendors publish their prices in USD; the label converts nothing."""
+    assert up.sync()["currency"] == "USD"
+    up.save({"prices": {"gw|m1": {"input": 2.0, "output": 10.0}}})
+    up.save({"currency": "EUR"})
+    payload = up.sync()
+    assert payload["currency"] == "EUR" and payload["prices"]["gw|m1"]["input"] == 2.0

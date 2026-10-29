@@ -1,13 +1,13 @@
 """Tests for dashboard/config_llm.py — the Config page's provider save handler.
 
-Regression coverage for a 401 after a Config-page save:
-dashboard/config.html has no auth_prefix input at all, so every Config-page
-save submits a payload without that key. save_provider() used to collapse
+Guards the 401 failure class after a Config-page save:
+dashboard/config.html sends auth_prefix only for the Other profile, so most
+Config-page saves submit a payload without that key. save_provider() must not collapse
 that "field omitted" None into "" (`auth_prefix or ""`) before handing it to
-core.llm_setup.SetupChoice — but "" there is a distinct, deliberate choice
+core.llm_setup.SetupChoice — "" there is a distinct, deliberate choice
 ("send the bare token, no Bearer") that core.llm_setup.register_provider_updates()
-writes to .env, while None means "leave AUTH_PREFIX alone". The coercion made
-every provider saved through the Config page get an
+writes to .env, while None means "leave AUTH_PREFIX alone". The coercion would
+make every provider saved through the Config page get an
 ATLAS_PROVIDER_<NAME>_AUTH_PREFIX= line it never asked for, which any
 OpenAI-compatible gateway (OpenRouter included) rejects outright — the
 request goes out as `Authorization: <token>` instead of
@@ -55,7 +55,9 @@ class TestSaveProviderAuthPrefix:
         assert "AUTH_PREFIX" not in (repo / ".env").read_text()
 
     def test_explicit_empty_auth_prefix_is_not_written(self, repo, monkeypatch):
-        """Blank prefix is 'use the default', not 'write AUTH_PREFIX='."""
+        """Blank prefix is 'use the default', not 'write AUTH_PREFIX=': the
+        emptied field removes a prefix the file held."""
+        (repo / ".env").write_text("ATLAS_PROVIDER_TESTGW2_AUTH_PREFIX=Token \n", encoding="utf-8")
         result = config_llm.save_provider({
             "preset_id": "custom", "name": "testgw2",
             "base_url": "https://gw.example/v1", "model": "m1",
@@ -63,7 +65,7 @@ class TestSaveProviderAuthPrefix:
         })
         _forget(monkeypatch, result["updates"])
 
-        assert "ATLAS_PROVIDER_TESTGW2_AUTH_PREFIX" not in result["updates"]
+        assert result["updates"].get("ATLAS_PROVIDER_TESTGW2_AUTH_PREFIX") is None
         assert "AUTH_PREFIX" not in (repo / ".env").read_text()
 
     def test_admin_is_rejected_as_a_model_id(self, repo, monkeypatch):
@@ -171,9 +173,11 @@ class TestDeleteProvider:
             "roles": [], "skip_probe": True,
         })
 
+        monkeypatch.setattr("core.secrets.keyring_has", lambda k: False)
         result = config_llm.delete_provider("gone")
 
-        assert result == {"success": True, "removed": "gone"}
+        assert result["success"] is True and result["removed"] == "gone"
+        assert "key_left_in_keyring" not in result and "left_unusable" not in result
         assert "gone" not in config_llm.providers.declared()
         assert "gone" not in (repo / ".env").read_text().split("ATLAS_PROVIDERS=")[1].splitlines()[0]
         _forget(monkeypatch, saved["updates"])
@@ -195,7 +199,7 @@ class TestDeleteProvider:
         monkeypatch.delenv("ATLAS_AGENT_PROVIDER", raising=False)
 
     def test_refuses_to_delete_the_builtin_default(self, repo):
-        with pytest.raises(config_llm.ConfigError, match="Hub"):
+        with pytest.raises(config_llm.ConfigError, match="built in"):
             config_llm.delete_provider("llmhub")
 
     def test_refuses_to_delete_an_unknown_provider(self, repo):
@@ -329,3 +333,68 @@ class TestThinkingSetting:
                 "base_url": "https://gw.example/v1", "model": "m1",
                 "roles": [], "skip_probe": True, "thinking": "max",
             })
+
+
+class TestSaveProbeGate:
+    """A save makes no model call. GET /models vouches for the model, or a
+    Test connection that got an answer from it for these same base URL,
+    model and profile does (the form's ``tested``): a vendor whose listing
+    speaks another dialect, or lists only part of its catalogue, saves after
+    that test."""
+
+    def _fake(self, monkeypatch, *, listing_ok, models=(), answered):
+        from core import llm_setup as ls
+
+        def fake_probe(base_url, api_key, **kw):
+            return ls.ProbeResult(ok=listing_ok, status=200 if listing_ok else 400,
+                                  url=base_url + "/models", models=list(models),
+                                  error="" if listing_ok else "version header required")
+
+        def fake_caps(base_url, api_key, model, **kw):
+            raise AssertionError("a save made a model call")
+
+        monkeypatch.setattr(ls, "probe", fake_probe)
+        monkeypatch.setattr(ls, "probe_capabilities", fake_caps)
+
+    def _save(self, model="m1", tested=None):
+        return config_llm.save_provider({
+            "preset_id": "custom", "name": "gatetest",
+            "base_url": "https://gw.example/v1", "model": model,
+            "roles": [], "api_key": "k-test", "store_key_in": "env",
+            **({"tested": tested} if tested else {}),
+        })
+
+    TESTED = {"base_url": "https://gw.example/v1", "model": "m1", "profile": "custom"}
+
+    def test_failed_listing_saves_after_a_test_of_these_values(self, repo, monkeypatch):
+        self._fake(monkeypatch, listing_ok=False, answered=True)
+        with pytest.raises(config_llm.ConfigError, match="press Test connection"):
+            self._save()
+        assert (repo / ".env").read_text() == ""
+        result = self._save(tested=self.TESTED)
+        _forget(monkeypatch, result["updates"])
+        assert result["success"]
+        assert "GATETEST" in (repo / ".env").read_text()
+
+    def test_unlisted_model_saves_after_a_test_of_these_values(self, repo, monkeypatch):
+        self._fake(monkeypatch, listing_ok=True, models=["other-a", "other-b"],
+                   answered=True)
+        with pytest.raises(config_llm.ConfigError):
+            self._save()
+        result = self._save(tested=self.TESTED)
+        _forget(monkeypatch, result["updates"])
+        assert result["success"]
+
+    def test_a_test_of_other_values_vouches_for_nothing(self, repo, monkeypatch):
+        self._fake(monkeypatch, listing_ok=False, answered=False)
+        for other in ({**self.TESTED, "base_url": "https://other.example/v1"}, {**self.TESTED, "model": "m2"},
+                      {**self.TESTED, "profile": "openrouter"}):
+            with pytest.raises(config_llm.ConfigError):
+                self._save(tested=other)
+        assert (repo / ".env").read_text() == ""
+
+    def test_listed_model_saves_without_a_chat_call(self, repo, monkeypatch):
+        self._fake(monkeypatch, listing_ok=True, models=["m1"], answered=False)
+        result = self._save()
+        _forget(monkeypatch, result["updates"])
+        assert result["success"]

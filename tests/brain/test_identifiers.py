@@ -86,9 +86,9 @@ _HOST_NEGATIVE = [
     "staged as 2031-02-04-0900-case-a-train",
     "see case-a-workflow-retry-the-app-a1b2c3.md",
     "vendor-plc-protocol-function-code-forensics-0a1b2c",
-    # Case ids already carried by approved public notes.
+    # Case ids in the shapes public notes carry.
     "reviewed on CASE-A and CASE-E-COMPROMISE",
-    "NITROBA-2008, SCHARDT-2002, MEMLABS-LAB2, M57-JEAN",
+    "SAMPLE-2031, EXAMPLE-2002, DEMOLAB-LAB2, X57-JANE",
     # Dotted non-hosts.
     "host01.raw and hyperv.raw are the same host",
     "image.vmdk converted to raw; snapshot.db untouched",

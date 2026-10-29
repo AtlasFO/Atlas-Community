@@ -280,8 +280,28 @@ class TestSweep:
         assert cs.citation_supports(stmt, [by[sweep_call]], tool_calls=list(by.values())) is False
         assert cs.citation_supports(stmt, [by[swept.seen]], tool_calls=list(by.values())) is True
         row = {"type": "ip", "value": "203.0.113.7", "side": "attacker"}
-        assert I.validate([row], call_ids=[sweep_call], case_dir=None)["kept"] == []
-        assert I.validate([row], call_ids=[swept.seen], case_dir=None)["kept"]
+        # The sweep call shows nothing; the reading call is found run-wide
+        # and the row is kept marked as not cited by this finding.
+        kept = I.validate([row], call_ids=[sweep_call], case_dir=None)["kept"]
+        assert [s["call"] for s in kept[0]["sightings"]] == [swept.seen] and kept[0]["sightings"][0]["cited"] is False
+        assert I.validate([row], call_ids=[swept.seen], case_dir=None)["kept"][0]["sightings"][0]["cited"] is True
+
+    def test_sweep_sees_in_process_outputs(self, swept):
+        """A table tool's result, spilled by the middleware and indexed, is a
+        hit the sweep names; a lookup echo never is."""
+        from core import evidence_index as ei
+        filler = "filler line about nothing in particular\n" * 20
+        table = swept.log.record_tool_call("<py>:table_table_grep", True, False, 0, 0,
+                                           stdout_excerpt=json.dumps({"pattern": "198.51.100.99", "hits": [
+                                               {"ts": "2031-03-04 10:16:00", "dst": "198.51.100.99"}]}))
+        ei.index_output(call_id=table, tool="table_table_grep",
+                        text=json.dumps({"pattern": "198.51.100.99", "hits": [
+                            {"ts": "2031-03-04 10:16:00", "dst": "198.51.100.99"}]}) + "\n" + filler)
+        res = tc.sweep(swept.case)
+        by = {r["value"]: r for r in res["rows"]}
+        assert [h["source_call_id"] for h in by["198.51.100.99"]["hits"]] == [table]
+        assert by["198.51.100.99"]["hits"][0]["first"] == "2031-03-04 10:16:00"
+        assert [h["source_call_id"] for h in by["203.0.113.7"]["hits"]] == [swept.seen]
 
 
 def _gate_ctx(case, description, tier, cited):

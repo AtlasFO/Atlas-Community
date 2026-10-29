@@ -26,7 +26,7 @@ class _Client:
         self._responses = list(responses)
         self.calls = 0
 
-    def chat(self, messages, tools=None):
+    def chat(self, messages, tools=None, role=None):
         self.calls += 1
         return self._responses.pop(0)
 
@@ -192,13 +192,13 @@ def test_recovers_atlas_load_namespaces_list_form():
 
 class _EndlessPseudoClient:
     """Always answers with a *recoverable* pseudo tool call and never with a
-    plain answer — the shape that used to loop forever when
+    plain answer — the shape that would loop forever when
     ATLAS_CHAT_MAX_TOOL_ROUNDS is 0 (the default)."""
 
     def __init__(self):
         self.calls = 0
 
-    def chat(self, messages, tools=None):
+    def chat(self, messages, tools=None, role=None):
         self.calls += 1
         return _Resp(content="<tool_call>hash_hash_file(path=x)</tool_call>")
 
@@ -291,3 +291,19 @@ def test_repeated_empty_replies_end_in_a_visible_error():
     assert client.calls == n + 1
     assert [e["type"] for e in events] == ["error"]
     assert "empty" in events[0]["message"] and "empty" in out
+
+
+# ── a provider's decline is shown, never asked again ──────────────────────
+
+def test_a_declined_request_is_shown_where_the_answer_would_be():
+    class _Declined(_Resp):
+        refusal = {"category": "cyber", "explanation": "The request was declined."}
+
+    client = _Client([_Declined(), _Resp(content="never asked")])
+    a = _agent(client, _Toolbox())
+    events = []
+    out = a.run_chat_turn("go", on_event=events.append)
+    assert client.calls == 1
+    assert out == "The provider declined this request (category: cyber): The request was declined."
+    assert [e["type"] for e in events] == ["error"] and events[0]["message"] == out
+    assert [m["role"] for m in a.messages] == ["system", "user"]

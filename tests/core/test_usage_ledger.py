@@ -162,7 +162,7 @@ class TestTransport:
         monkeypatch.setattr(client, "_send", send)
         client.chat([{"role": "user", "content": "hi"}], role="dair")
         assert ledger.daily_rows("2000-01-01")[0]["provider"] == "gw"
-        # the label is the ledger's only: the request is shaped as before
+        # the label is the ledger's only: the request is shaped as without it
         assert shaped_for == [""]
 
 
@@ -221,3 +221,55 @@ class TestRoleLabels:
                              text=True, timeout=180, cwd=Path(__file__).resolve().parents[2])
         assert out.stdout.strip().splitlines()[-1].split() == [
             "openai-compat", "llmhub", "openai-compat", "llmhub"], out.stderr[-2000:]
+
+
+class TestCacheWritesAndLongPrompts:
+    """Cache writes have a column and a price of their own; a model priced
+    higher for long prompts has its long requests grouped and priced apart."""
+
+    def test_a_ledger_from_before_the_column_is_migrated_and_reads_zero(self):
+        import sqlite3
+        path = ledger.db_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        old = sqlite3.connect(str(path))
+        old.executescript(ledger._SCHEMA.replace(
+            ",\n    cache_write_tokens INTEGER NOT NULL DEFAULT 0", ""))
+        old.execute("INSERT INTO llm_usage (ts, case_id, run_id, command, started_by, role, provider, model, "
+                    "input_tokens, output_tokens, cached_tokens, reasoning_tokens, usage_reported, status) "
+                    "VALUES ('2031-03-01T10:00:00.000+00:00', 'C1', 'R0', 'run', '', 'agent', 'hub', 'm1', "
+                    "500, 5, 0, 0, 1, 'ok')")
+        old.commit()
+        old.close()
+        assert [r["cache_write"] for r in ledger.daily_rows("2000-01-01")] == [0]     # a reader migrates
+        ledger.configure(case_id="C1", run_id="R1", command="run")
+        _row(cache_write_tokens=300)
+        assert sorted(r["cache_write"] for r in ledger.daily_rows("2000-01-01")) == [0, 300]
+
+    def test_cache_writes_are_priced_at_their_own_rate_or_the_input_rate(self):
+        prices = {"hub|m1": {"input": 2.0, "cached": 0.1, "cache_write": 2.5, "output": 10.0}}
+        row = {"provider": "hub", "model": "m1", "input": 1_000_000, "cached": 800_000,
+               "cache_write": 150_000, "output": 10_000}
+        assert ledger.row_cost(row, prices) == pytest.approx(
+            (50_000 * 2.0 + 800_000 * 0.1 + 150_000 * 2.5 + 10_000 * 10.0) / 1e6)
+        prices["hub|m1"]["cache_write"] = None
+        assert ledger.row_cost(row, prices) == pytest.approx(
+            (50_000 * 2.0 + 800_000 * 0.1 + 150_000 * 2.0 + 10_000 * 10.0) / 1e6)
+
+    def test_long_prompts_group_apart_and_take_the_long_prices(self):
+        """The line counts the whole prompt, cache reads and writes included,
+        and each request is priced on its own."""
+        ledger.configure(case_id="C1", run_id="R1", command="run")
+        _row(model="m1", input_tokens=100_000, output_tokens=10, cached_tokens=90_000)      # at the line
+        _row(model="m1", input_tokens=100_001, output_tokens=10, cached_tokens=90_000)      # over it
+        _row(model="m2", input_tokens=500_000, output_tokens=10)                            # no long price
+        prices = {"hub|m1": {"input": 0.1, "cached": 0.01, "cache_write": 0.125, "output": 0.5,
+                             "long_over": 100_000, "long_input": 0.5, "long_cached": 0.05,
+                             "long_cache_write": 0.625, "long_output": 2.5}}
+        rows = ledger.daily_rows("2000-01-01", ledger.long_over(prices))
+        assert sorted((r["model"], r["long"], r["calls"]) for r in rows) == [
+            ("m1", 0, 1), ("m1", 1, 1), ("m2", 0, 1)]
+        long_row = next(r for r in rows if r["long"])
+        assert ledger.row_cost(long_row, prices) == pytest.approx((10_001 * 0.5 + 90_000 * 0.05 + 10 * 2.5) / 1e6)
+        agg = ledger.aggregate(rows, "month", prices)
+        assert agg["total"]["calls"] == 3 and agg["unpriced_models"] == ["hub|m2"]
+        assert ledger.daily_rows("2000-01-01")[0]["long"] == 0                              # no tier asked

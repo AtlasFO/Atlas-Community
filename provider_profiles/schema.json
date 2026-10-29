@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://atlas.invalid/provider_profiles/schema.json",
+  "title": "Atlas provider profile",
+  "description": "What Atlas knows about one provider type. Validated after a user file is merged over the shipped file of the same id.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "id", "label"],
+  "properties": {
+    "schema": {"const": 1, "description": "Format version of this file."},
+    "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$",
+           "description": "Equals the file name without .toml; lower case."},
+    "order": {"type": "integer", "description": "Position in the setup menu."},
+    "label": {"type": "string", "minLength": 1},
+    "description": {"type": "string"},
+    "notes": {"type": "string"},
+    "evidence": {"enum": ["live", "docs", ""],
+                 "description": "How the facts were checked: against a running endpoint, the vendor's documentation only, or not at all."},
+    "dialect": {"enum": ["chat", "responses", "messages"],
+                "description": "Wire format: OpenAI Chat Completions, OpenAI Responses or Anthropic Messages."},
+    "implicit": {"type": "boolean",
+                 "description": "Selectable without ATLAS_PROVIDERS, under the variables in [env]. Shipped files only."},
+    "needs_api_key": {"type": "boolean"},
+    "disabled": {"type": "boolean", "description": "Hides the profile from menus and refuses instances bound to it."},
+    "connection": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "base_url": {"type": "string", "description": "Default base URL; empty when the operator must supply one."},
+        "default_model": {"type": "string"},
+        "models_paging": {"enum": ["none", "after_id"],
+                          "description": "How the model list pages: none, or after_id (limit, after_id, has_more and last_id, as Anthropic's list pages)."}
+      }
+    },
+    "auth": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "header": {"type": "string", "pattern": "^[A-Za-z0-9-]+$",
+                   "description": "Header that carries the key (default Authorization)."},
+        "prefix": {"type": "string", "description": "Text before the key (default 'Bearer ' on Authorization, none on another header)."}
+      }
+    },
+    "env": {
+      "type": "object", "additionalProperties": false,
+      "description": "Variable names of an implicit instance. Shipped files only.",
+      "properties": {
+        "base_url": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]*_BASE_URL$"},
+        "model": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]*_MODEL$"},
+        "api_key": {"type": "array", "minItems": 1,
+                    "items": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]*_(API_)?KEY$"}},
+        "thinking": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]*_THINKING$"},
+        "api": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]*_API$"}
+      }
+    },
+    "headers": {
+      "type": "object",
+      "description": "Static headers sent on every request to this provider. Never the key.",
+      "propertyNames": {"pattern": "^[A-Za-z0-9-]+$"},
+      "additionalProperties": {"type": "string"}
+    },
+    "request": {"$ref": "#/$defs/request"},
+    "reasoning": {"$ref": "#/$defs/reasoning"},
+    "models": {
+      "type": "object",
+      "description": "Rules for the model ids a glob matches (fnmatch, case-sensitive): request and reasoning settings that differ for them.",
+      "additionalProperties": {
+        "type": "object", "additionalProperties": false,
+        "properties": {"request": {"$ref": "#/$defs/request"}, "reasoning": {"$ref": "#/$defs/reasoning"}}
+      }
+    }
+  },
+  "$defs": {
+    "request": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "temperature": {"type": "boolean", "description": "False where the vendor refuses a sampling temperature."},
+        "tool_choice_rejected": {"type": "array", "uniqueItems": true, "items": {"enum": ["required", "none"]},
+                                 "description": "tool_choice values the vendor refuses; auto is sent instead."},
+        "max_tools": {"type": "integer", "minimum": 1,
+                      "description": "How many tool schemas one request may carry. Above Atlas's common 128, bounded by the window (one schema per 2,000 tokens); when it holds every tool, an analysis run lists them all from the first turn and the list never changes."},
+        "rate_limit_counts_cache_reads": {"type": "boolean",
+                                          "description": "False where the vendor's input-tokens-per-minute limit does not count tokens read from its prompt cache: Atlas's own pacing then leaves them out too."}
+      }
+    },
+    "reasoning": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "control": {"enum": ["reasoning_effort", "reasoning_object", "thinking_type", "enable_thinking",
+                             "output_config", "none"],
+                    "description": "How a thinking level is spelled on the wire."},
+        "levels": {"type": "object",
+                   "description": "The levels the vendor takes, each mapped to its value on the wire.",
+                   "propertyNames": {"enum": ["none", "minimal", "low", "medium", "high", "xhigh", "max"]},
+                   "additionalProperties": {"type": "string"}},
+        "echo_fields": {"type": "array", "items": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"},
+                        "description": "Reply fields the vendor wants back in the history on later turns."}
+      }
+    }
+  }
+}

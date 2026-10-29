@@ -1,0 +1,34 @@
+#:schema ./schema.json
+# Atlas provider profile: what Atlas knows about one kind of LLM provider.
+# Every field: docs/llm.md, "Provider profiles", and provider_profiles/schema.json.
+# To change a field, put a file of the same name in provider_profiles.local/
+# (`atlas provider profile init <id>` copies this one there) and keep only the
+# lines you change: the rest, and later fixes to them, come from this file.
+# A file there fails when its id is not its file name, when it sets [env] or
+# implicit, or when it is named custom.toml (the fallback cannot be changed).
+# Format version of this file; leave it at 1.
+schema = 1
+# Must equal the file name without .toml.
+id = "openrouter"
+# Position in the setup menu; lower comes first.
+order = 30
+# Name shown in the setup menu and on the Settings page.
+label = "OpenRouter"
+# One line shown under the label in the menu.
+description = "openrouter.ai — OpenAI-compatible catalogue of hosted models."
+# Shown when this profile is chosen: what to know before saving.
+notes = """\
+Model ids look like openai/gpt-4o-mini or anthropic/claude-sonnet-4, not a username or dashboard \
+role. Use Test connection to list live ids."""
+# How these facts were checked: "live", "docs" (vendor documentation only) or "" (no fixed endpoint).
+evidence = "live"
+# Wire format: "chat" (Chat Completions), "responses" (OpenAI Responses) or "messages" (Anthropic Messages).
+dialect = "chat"
+
+[connection]
+# Prefills the base URL field; a provider uses the URL saved with it.
+base_url = "https://openrouter.ai/api/v1"
+
+[reasoning]
+# How a thinking level is sent: reasoning_effort, reasoning_object, thinking_type, enable_thinking, output_config or none.
+control = "reasoning_object"

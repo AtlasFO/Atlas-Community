@@ -9,6 +9,9 @@ VMDK / encrypted / ambiguous formats stay plan-only.
 """
 from __future__ import annotations
 
+import contextlib
+import fcntl
+import functools
 import hashlib
 import json
 import os
@@ -26,6 +29,9 @@ _E01_RE = re.compile(r"\.(e01|ex01)$", re.I)
 _EWF_IMAGE_RE = re.compile(r"\.(?:e01|ex01|l01|lx01|s01)$", re.I)
 _VMDK_RE = re.compile(r"\.(vmdk)$", re.I)
 _RAW_RE = re.compile(r"\.(raw|dd|img|iso|vhd|vhdx)$", re.I)
+# Disk containers a raw view reads (core.raw_views): typed by their header,
+# not by these names, once the plan probes them.
+_CONTAINER_RE = re.compile(r"\.(vmdk|vhd|vhdx|qcow2?|vdi|img)$", re.I)
 _BITLOCKER_HINT = re.compile(r"(?i)bitlocker|bde|fve")
 
 
@@ -56,16 +62,43 @@ def load_mount_plan(case_dir: str | os.PathLike) -> dict[str, Any]:
 
 
 def save_mount_plan(case_dir: str | os.PathLike, plan: dict[str, Any]) -> Path:
+    """Write the plan whole or not at all (a temp file beside it, then a
+    rename): readers in other processes (a run, a dashboard chat, the copy
+    tool) load it while views record their daemons, and a truncated plan
+    read there was saved back empty."""
+    from core.store_lock import write_atomic
     path = mount_plan_path(case_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     plan = dict(plan)
     plan["schema_version"] = SCHEMA_VERSION
     plan["updated_at"] = _utcnow()
-    path.write_text(
-        json.dumps(plan, indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
+    write_atomic(path, json.dumps(plan, indent=2, ensure_ascii=False) + "\n")
     return path
+
+
+@contextlib.contextmanager
+def _plan_lock(case_dir: str | os.PathLike):
+    """The plan's lock (.atlas/mount_plan.lock), held for one
+    load-modify-save, so a writer in another process cannot save over an
+    update it never loaded."""
+    path = mount_plan_path(case_dir).with_name("mount_plan.lock")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
+def _plan_writer(fn):
+    """Run a load-modify-save of the plan, called on the read path, under
+    the plan's lock. Never nested: a locked writer calls no other."""
+    @functools.wraps(fn)
+    def wrapper(case_dir, *args, **kwargs):
+        with _plan_lock(case_dir):
+            return fn(case_dir, *args, **kwargs)
+    return wrapper
 
 
 def _classify_image(path: Path) -> dict[str, Any]:
@@ -171,7 +204,8 @@ def _recorded_mount_stem(root: Path, entry: dict[str, Any]) -> str:
     mnt/<X>/ewf/ewf1 under this case."""
     mr = entry.get("mount_result") or {}
     mnt = os.path.realpath(str(root / "mnt"))
-    for key, tail in (("mount_point", ("fs",)), ("ewf_device", ("ewf", "ewf1"))):
+    for key, tail in (("mount_point", ("fs",)), ("ewf_device", ("ewf", "ewf1")),
+                      ("raw_view", ("disk",))):
         rec = str(mr.get(key) or "")
         if not rec:
             continue
@@ -310,7 +344,7 @@ def _merge_prior_images(
 ) -> list[dict[str, Any]]:
     """Merge prior export/open records into a freshly scanned image list.
 
-    Plane A rebuilds from evidence/ profile and previously dropped
+    Plane A rebuilds from evidence/ profile and drops
     ``origin=export_raw`` analysis paths — keep those handoffs unless the
     backing file is gone (caller invalidates separately).
     """
@@ -339,7 +373,7 @@ def _merge_prior_images(
             cur = by_key[k]
             for field in (
                 "status", "origin", "source", "mount_result",
-                "opened_tool", "opened_at", "access_error",
+                "opened_tool", "opened_at", "access_error", "container",
             ):
                 if old.get(field) and not cur.get(field):
                     cur[field] = old[field]
@@ -361,6 +395,7 @@ def _merge_prior_images(
     return list(by_key.values())
 
 
+@_plan_writer
 def invalidate_missing_media(
     case_dir: str | os.PathLike,
     *,
@@ -408,6 +443,7 @@ def invalidate_missing_media(
     return {"success": True, "changed": changed, "images": kept}
 
 
+@_plan_writer
 def mark_image_opened(
     case_dir: str | os.PathLike,
     image_path: str | os.PathLike,
@@ -453,6 +489,7 @@ def mark_image_opened(
     return plan
 
 
+@_plan_writer
 def mark_image_access_failed(
     case_dir: str | os.PathLike,
     image_path: str | os.PathLike,
@@ -497,7 +534,7 @@ def plane_a_auto_mount_allowed() -> tuple[bool, str]:
       - ``auto`` (default) — only when passwordless sudo is available
 
     Auto-mount is an architecture choice (privileged Plane A), not a silent
-    convenience — see Max Q3b / architecture-case-driven.md.
+    convenience — see docs/architecture-case-driven.md.
     """
     raw = (os.environ.get("ATLAS_PLANE_A_AUTO_MOUNT") or "auto").strip().lower()
     if raw in ("0", "false", "no", "off"):
@@ -618,8 +655,14 @@ def mounted_volumes(case_dir: str | os.PathLike) -> list[dict[str, Any]]:
         result = img.get("mount_result") or {}
         point = str(result.get("mount_point") or "")
         live_fs = bool(result.get("success")) and bool(point) and _path_is_mounted(point)
-        device = str(result.get("ewf_device") or "")
-        live_dev = bool(device) and _path_is_mounted(os.path.dirname(device))
+        device = str(result.get("ewf_device") or result.get("raw_view") or "")
+        if result.get("raw_view") and not result.get("ewf_device"):
+            # A view is a FUSE file mounted on itself; a stale one stays in
+            # the mount table and answers no read.
+            from core.raw_views import view_state
+            live_dev = view_state(device) == "live"
+        else:
+            live_dev = bool(device) and _path_is_mounted(os.path.dirname(device))
         if not live_fs and not live_dev:
             continue
         key = point if live_fs else device
@@ -726,7 +769,8 @@ def build_mount_plan(
             for p in sorted(ev.rglob("*")):
                 if not p.is_file():
                     continue
-                if _E01_RE.search(p.name) or _VMDK_RE.search(p.name) or _RAW_RE.search(p.name):
+                if (_E01_RE.search(p.name) or _VMDK_RE.search(p.name) or _RAW_RE.search(p.name)
+                        or _CONTAINER_RE.search(p.name)):
                     if str(p) in seen:
                         continue
                     seen.add(str(p))
@@ -741,6 +785,7 @@ def build_mount_plan(
     # Preserve export/open handoffs that evidence/ scans miss.
     images = _merge_prior_images(images, prior)
     _assign_mount_stems(root, images)
+    _classify_containers(root, images)
 
     mounted: list[dict[str, Any]] = []
     errors: list[str] = []
@@ -795,6 +840,7 @@ def build_mount_plan(
                     "reused": True,
                     "mount_point": fs_mp,
                     "ewf_device": str(root / "mnt" / stem / "ewf" / "ewf1"),
+                    "volume_offset_sectors": mounted_volume(fs_mp),
                 }
                 mounted.append(entry)
                 soft_notes.append(f"reused_mount:{entry.get('basename')}")
@@ -811,6 +857,9 @@ def build_mount_plan(
                     # The raw device stays exposed even when the filesystem
                     # mount failed (a non-NTFS volume): TSK reads it there.
                     "ewf_device": result.get("ewf_device"),
+                    # The mounted volume, so a read through the mount names
+                    # that volume's entries (core.evidence_identity).
+                    "volume_offset_sectors": result.get("volume_offset_sectors"),
                 }
                 if result.get("success"):
                     entry["status"] = "mounted"
@@ -870,6 +919,39 @@ def build_mount_plan(
     return plan
 
 
+# Beside a mount Atlas made (mnt/<stem>/), the volume it mounted: a plan
+# built again over a mount that survived (a resume, a rerun) cannot ask the
+# mount which volume it is.
+MOUNTED_VOLUME_FILE = "mounted_volume.json"
+
+
+def _record_mounted_volume(fs_mount_point: str, offset_sectors: Any) -> None:
+    """Write the volume a mount proved beside it; with none proved, remove
+    an earlier record, which may name another volume."""
+    path = os.path.join(os.path.dirname(fs_mount_point.rstrip("/")), MOUNTED_VOLUME_FILE)
+    try:
+        if offset_sectors is None:
+            if os.path.isfile(path):
+                os.remove(path)
+            return
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({"volume_offset_sectors": int(offset_sectors)}, fh)
+    except (OSError, TypeError, ValueError):
+        pass
+
+
+def mounted_volume(fs_mount_point: str) -> Optional[int]:
+    """The volume offset (sectors) recorded beside a mount Atlas made, None
+    when none was recorded."""
+    try:
+        with open(os.path.join(os.path.dirname(str(fs_mount_point).rstrip("/")), MOUNTED_VOLUME_FILE),
+                  encoding="utf-8") as fh:
+            off = json.load(fh).get("volume_offset_sectors")
+        return int(off) if off is not None else None
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
+
+
 def _auto_mount_e01(case_dir: Path, entry: dict[str, Any]) -> dict[str, Any]:
     """Mount one E01 under case/mnt/<mount_stem>/{ewf,fs}/ using
     ewf.mount_full_image.
@@ -891,6 +973,7 @@ def _auto_mount_e01(case_dir: Path, entry: dict[str, Any]) -> dict[str, Any]:
         if result.get("success"):
             result["mount_point"] = str(fs_mp)
             result["ntfs_mount"] = str(fs_mp)
+            _record_mounted_volume(str(fs_mp), result.get("volume_offset_sectors"))
         result["hash_preflight"] = hash_preflight
         return result
     except Exception as e:
@@ -927,6 +1010,7 @@ def find_export_for_source(
     return None
 
 
+@_plan_writer
 def register_exported_image(
     case_dir: str | os.PathLike,
     image_path: str | os.PathLike,
@@ -1005,6 +1089,7 @@ def _image_key_path(image_path: str | os.PathLike) -> str:
     return os.path.realpath(os.path.expanduser(str(image_path)))
 
 
+@_plan_writer
 def note_volume_offset(case_dir: str | os.PathLike, image_path: str | os.PathLike,
                        offset_sectors: int) -> bool:
     """Remember the partition offset at which a filesystem tool succeeded on
@@ -1035,3 +1120,246 @@ def volume_offset(case_dir: str | os.PathLike | None, image_path: str | os.PathL
         return None
     val = (plan.get("volume_offsets") or {}).get(_image_key_path(image_path))
     return int(val) if val is not None else None
+
+
+# ── disk containers read through raw views (core.raw_views) ─────────────
+
+# Version of the stored container probe: a probe written by another rule set
+# is probed again.
+_PROBE_VERSION = 2
+_NOT_CONTAINERS = ("ewf", "ewf_segment", "non_disk_artifact", "iso")
+
+
+def _container_candidate(img: dict[str, Any]) -> bool:
+    path = str(img.get("path") or "")
+    return (bool(path) and img.get("media_role", "disk") == "disk"
+            and img.get("image_type") not in _NOT_CONTAINERS
+            and img.get("origin") != "export_raw" and bool(_CONTAINER_RE.search(path))
+            and os.path.isfile(path))
+
+
+def _classify_containers(root: Path, images: list[dict[str, Any]]) -> None:
+    """Give every disk container of the plan (VMDK, VHD, VHDX, QCOW2, VDI; a
+    QCOW2 under an .img name) its raw view, its refusal or its place in
+    another image's chain, from a probe repeated only when one of its files
+    changed. An extent of another image is skipped (read through that
+    image); a backing file is an earlier state of the image built on it,
+    readable on demand through its own view and not listed at intake. The
+    route each entry names follows the host: without FUSE views it is the
+    copy (img.vmdk_export_raw)."""
+    from core import raw_views as rv
+    if not rv.views_on():
+        return
+    cands = [img for img in images if isinstance(img, dict) and _container_candidate(img)]
+    if not cands:
+        return
+    support = rv.host_support()
+    if support:
+        for img in cands:
+            fmt, _why = rv.pinned_format(str(img["path"]))
+            if fmt and fmt != "raw":
+                _describe_without_views(img, fmt, support)
+        return
+    for img in cands:
+        c = img.get("container") or {}
+        if not (c.get("v") == _PROBE_VERSION and rv.probe_is_current(c)):
+            c = rv.probe(str(img["path"]))
+            c["v"] = _PROBE_VERSION
+            img["container"] = c
+    real = {os.path.realpath(str(img["path"])): img for img in cands}
+    part_of: dict[str, dict] = {}
+    bases: set[str] = set()
+    for img in cands:
+        c = img["container"]
+        for p in c.get("parts") or []:
+            part_of.setdefault(p, img)
+        bases.update(n["path"] for n in (c.get("chain") or [])[1:])
+    tops = [img for r, img in real.items() if r not in bases and r not in part_of]
+    base_of: dict[str, dict] = {}
+    for img in tops:
+        for n in (img["container"].get("chain") or [])[1:]:
+            base_of.setdefault(n["path"], img)
+    for r, img in real.items():
+        img.pop("earlier_state_of", None)
+        if r in part_of:
+            if img.get("opened_tool") == "raw_view":
+                for key in ("status", "access_error", "opened_tool", "opened_at"):
+                    img.pop(key, None)
+            img["action"] = "skip"
+            img["recommended_tool"] = None
+            img["reason"] = (f"part of {_case_rel(root, part_of[r]['path'])}: read through that "
+                             "image's raw view")
+            continue
+        top = base_of.get(r)
+        if top is not None:
+            img["earlier_state_of"] = _case_rel(root, top["path"])
+        _describe_container(root, img)
+
+
+def _case_rel(root: Path, path: str) -> str:
+    try:
+        return Path(path).resolve().relative_to(root.resolve()).as_posix()
+    except (ValueError, OSError):
+        return str(path)
+
+
+def _describe_without_views(img: dict[str, Any], fmt: str, support: str) -> None:
+    from core.raw_views import LABELS
+    label = LABELS.get(fmt, fmt.upper())
+    # The readers find the container by this record and say the copy is the
+    # way on this host (core.raw_views.read_refusal), instead of handing the
+    # container to a tool that cannot read it.
+    img["container"] = {"format": fmt, "chain": [], "no_views": support, "files": {},
+                        "v": _PROBE_VERSION}
+    if fmt == "vmdk":
+        img["recommended_tool"] = "img.vmdk_chain_info"
+        img["reason"] = ("VMDK — chain check then img.vmdk_export_raw → tsk.*/ez.* "
+                         f"(this host serves no raw views: {support})")
+    else:
+        img["recommended_tool"] = "img.vmdk_export_raw"
+        img["reason"] = (f"{label} container: img.vmdk_export_raw copies it to a raw image "
+                         f"for tsk.* (this host serves no raw views: {support})")
+
+
+def _describe_container(root: Path, img: dict[str, Any]) -> None:
+    from core import raw_views as rv
+    c = img["container"]
+    fmt = str(c.get("format") or "")
+    ext = os.path.splitext(str(img["path"]))[1].lower()
+    ours = img.get("opened_tool") == "raw_view" and img.get("status") == "access_failed"
+    if c.get("refused"):
+        img.update(status="access_failed", access_error=str(c["refused"])[:400],
+                   opened_tool="raw_view", opened_at=img.get("opened_at") or _utcnow(),
+                   recommended_tool=None, image_type=fmt or img.get("image_type"))
+        img["reason"] = (f"{rv.LABELS.get(fmt, ext.lstrip('.').upper())} container not opened: "
+                         f"{c['refused']}")
+        return
+    if ours:
+        for key in ("status", "access_error", "opened_tool", "opened_at"):
+            img.pop(key, None)
+    if fmt == "raw":
+        what = {".vhd": "a fixed VHD: the disk's bytes and a footer",
+                ".vmdk": "a flat extent: the disk's bytes"}.get(ext, "no container header")
+        img["image_type"] = "raw_or_container"
+        img["recommended_tool"] = "tsk.mmls"
+        img["reason"] = f"raw disk bytes under a {ext} name ({what}): tsk.mmls reads it as it is"
+        return
+    img["image_type"] = fmt
+    if c.get("unsupported"):
+        img["recommended_tool"] = "img.vmdk_export_raw"
+        img["reason"] = (f"{c['unsupported']}; img.vmdk_export_raw copies it to a raw image "
+                         "the Sleuth Kit reads")
+        return
+    view = _case_rel(root, rv.view_path(root, img))
+    reason = (f"{rv.LABELS.get(fmt, fmt.upper())} container: tsk.*, plaso and the contents index read "
+              f"it through its read-only raw view {view}")
+    if img.get("earlier_state_of"):
+        reason += (f"; an earlier state of {img['earlier_state_of']} (a snapshot that image builds "
+                   "on): read on demand, not listed at intake")
+    for note in c.get("notes") or []:
+        reason += f"; {note}"
+    img["recommended_tool"] = "tsk.mmls"
+    img["reason"] = reason
+
+
+@_plan_writer
+def update_image(case_dir: str | os.PathLike, image_path: str | os.PathLike, *,
+                 mount_result: Optional[dict] = None, drop: tuple = (), **fields: Any) -> bool:
+    """Write fields of one image's plan entry, found by its path."""
+    root = Path(case_dir).resolve()
+    plan = load_mount_plan(root)
+    target = os.path.abspath(os.path.expanduser(str(image_path)))
+    for img in plan.get("images") or []:
+        if isinstance(img, dict) and img.get("path") \
+                and os.path.abspath(os.path.expanduser(str(img["path"]))) == target:
+            if mount_result is not None:
+                img["mount_result"] = mount_result
+            img.update(fields)
+            for key in drop:
+                img.pop(key, None)
+            save_mount_plan(root, plan)
+            return True
+    return False
+
+
+def _container_entry(case_dir: str | os.PathLike, image_path: str | os.PathLike
+                     ) -> Optional[dict[str, Any]]:
+    """The plan entry of the container ``image_path`` names: the container
+    itself, or its raw view (mnt/<stem>/disk, live or not: a reader hands
+    back the path a result named)."""
+    root = Path(case_dir)
+    target = os.path.abspath(os.path.expanduser(str(image_path)))
+    real = os.path.realpath(target) if os.path.basename(target) != "disk" else ""
+    view_dir = os.path.realpath(os.path.dirname(target)) if os.path.basename(target) == "disk" else ""
+    try:
+        images = [i for i in load_mount_plan(root).get("images") or [] if isinstance(i, dict)]
+    except Exception:  # noqa: BLE001
+        return None
+    for img in images:
+        c = img.get("container") or {}
+        if not c.get("format") or c.get("format") == "raw" or not img.get("path"):
+            continue
+        ip = os.path.abspath(os.path.expanduser(str(img["path"])))
+        if ip == target or (real and os.path.realpath(ip) == real):
+            return img
+        if view_dir and os.path.realpath(mount_dir_for(root, ip, img)) == view_dir:
+            return img
+    return None
+
+
+def raw_device_for(case_dir: str | os.PathLike | None, image_path: str | os.PathLike
+                   ) -> tuple[Optional[str], str]:
+    """The raw view a reader reads for a disk container (or for the view's
+    own path), started when it is not up: ``(view, "")``; ``(None, why)``
+    when the container has none (refused, or no views on this host);
+    ``(None, "")`` for anything read as it is. An Expert Witness image is
+    the EWF device's business (ewf_device_for)."""
+    if not case_dir or not image_path or is_ewf_image(image_path):
+        return None, ""
+    from core import raw_views as rv
+    if not rv.views_on():
+        return None, ""
+    entry = _container_entry(case_dir, image_path)
+    if entry is None:
+        return None, ""
+    return rv.ensure(Path(case_dir), entry)
+
+
+def ensure_raw_views(case_dir: str | os.PathLike) -> dict[str, str]:
+    """Start the raw view of every container the intake lists (not the
+    earlier states, read on demand), outside any tool call: {image: view or
+    why not}."""
+    from core import raw_views as rv
+    if not rv.views_on() or rv.host_support():
+        return {}
+    root = Path(case_dir).resolve()
+    out: dict[str, str] = {}
+    for img in load_mount_plan(root).get("images") or []:
+        if (not isinstance(img, dict) or img.get("action") == "skip" or img.get("earlier_state_of")
+                or not (img.get("container") or {}).get("chain")):
+            continue
+        view, why = rv.ensure(root, img)
+        out[_case_rel(root, str(img["path"]))] = _case_rel(root, view) if view else f"no view: {why}"
+    return out
+
+
+def live_raw_view(case_dir: str | os.PathLike | None, image_path: str | os.PathLike) -> str:
+    """The container's raw view when it is up now, "" otherwise (nothing is
+    started)."""
+    if not case_dir:
+        return ""
+    entry = _container_entry(case_dir, image_path)
+    mr = (entry or {}).get("mount_result") or {}
+    view = str(mr.get("raw_view") or "")
+    if not view:
+        return ""
+    from core.raw_views import _alive, view_state
+    chain = ((entry or {}).get("container") or {}).get("chain") or []
+    same = bool(chain) and mr.get("raw_view_source") == chain[0]["path"]
+    try:
+        pid = int(mr.get("raw_view_pid") or 0)
+    except (TypeError, ValueError):
+        pid = 0
+    # Its daemon alive too: a stat is answered from cache for a while after
+    # the daemon died.
+    return view if same and pid > 1 and _alive(pid) and view_state(view) == "live" else ""

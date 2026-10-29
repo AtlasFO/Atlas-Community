@@ -72,6 +72,10 @@ def check(ctx) -> Optional[dict]:
     linked = getattr(ctx, "linked_call_id", 0)
     if linked and linked not in cids:
         cids.append(linked)
+    # The calls Atlas located beside the citation name artifacts too.
+    for cid in getattr(ctx, "located_call_ids", None) or []:
+        if cid not in cids:
+            cids.append(cid)
     by_call_id = getattr(getattr(ctx, "idx", None), "by_call_id", None) or {}
 
     cited: set[str] = set()
@@ -88,6 +92,17 @@ def check(ctx) -> Optional[dict]:
         return None
     if described & cited:
         return None
+    # The calls the trace holds about the described artifacts would pass the
+    # citation once (the earlier repair put them in place of the cited ids):
+    # the refusal rate stays what it was, and a finding that passes only
+    # through them is disclosed as not shown by its citation status.
+    try:
+        from tools.misc import _LINEAGE_LOOKBACK, _calls_about
+        lookback = list(getattr(getattr(ctx, "log", None), "_entries", None) or [])[-_LINEAGE_LOOKBACK:]
+        if _calls_about(lookback, described):
+            return None
+    except Exception:  # noqa: BLE001
+        pass
 
     return {
         "success": False,

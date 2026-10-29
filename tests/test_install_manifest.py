@@ -1,4 +1,4 @@
-"""install.sh's manifest and INDXParse step, run as install.sh runs them.
+"""install.sh's manifest, INDXParse and ccl_chromium_reader steps, run as install.sh runs them.
 
 uninstall.sh removes only what `.install-manifest.json` lists. The file has to
 hold what every install run added — a rerun's steps find their tools present
@@ -43,6 +43,7 @@ def _functions(stale: str = STALE) -> str:
         _block(r"^_manifest_on_exit\(\) \{\n.*?^\}$"),
         _block(r"^install_indxparse\(\) \{\n.*?^\}$"),
         _block(r"^remove_unrunnable_indxparse\(\) \{\n.*?^\}$").replace(STALE, stale),
+        _block(r"^install_ccl_chromium_reader\(\) \{\n.*?^\}$"),
     ])
 
 
@@ -534,3 +535,113 @@ def test_the_dotnet_step_looks_before_it_installs():
     assert INSTALL_SH.index("\npkg_installed() {") < snapshot
     for attempt in ("if _install_dotnet9_ubuntu24 &>", "if _install_dotnet9_msrepo &>"):
         assert INSTALL_SH.index(attempt) > snapshot, attempt
+
+
+# ── ccl_chromium_reader (the library pyhindsight imports at start) ───────────
+
+def _ccl_pins() -> tuple[str, str]:
+    text = VERSIONS_FILE.read_text()
+    refs = [re.search(rf"^{name}=([0-9a-f]{{40}})$", text, re.M)
+            for name in ("CCL_CHROMIUM_READER_REF", "CCL_SIMPLESNAPPY_REF")]
+    assert all(refs), "install-versions.env pins both ccl packages to a full commit"
+    return refs[0].group(1), refs[1].group(1)
+
+
+CCL_PIP = """#!/bin/sh
+echo "$*" >> "$PIP_LOG"
+case "$*" in *--no-deps*) exit ${PIP_RC1:-0} ;; *) exit ${PIP_RC2:-0} ;; esac
+"""
+
+# The venv python answers the two questions the step asks: which commits pip
+# recorded (the direct_url one-liner) and whether pyhindsight's Chrome module
+# imports.
+CCL_PYTHON = """#!/bin/sh
+case "$*" in
+  *direct_url*) echo "$AT" ;;
+  *pyhindsight*) exit ${IMPORT_RC:-0} ;;
+esac
+"""
+
+
+def _ccl_venv(tmp_path: Path, **env) -> dict:
+    bin_dir = tmp_path / ".venv" / "bin"
+    bin_dir.mkdir(parents=True)
+    for name, text in (("python", CCL_PYTHON), ("pip", CCL_PIP)):
+        (bin_dir / name).write_text(text)
+        (bin_dir / name).chmod(0o755)
+    return {**os.environ, "PIP_LOG": str(tmp_path / "pip.log"), **env}
+
+
+CCL_STEP = 'if install_ccl_chromium_reader; then echo "step=0"; else echo "step=1"; fi'
+
+
+def test_the_ccl_pins_are_installed_without_dependencies_then_the_pypi_libraries(tmp_path):
+    reader, snappy = _ccl_pins()
+    res = _run(tmp_path, CCL_STEP, env=_ccl_venv(tmp_path, AT=f"{OTHER_COMMIT} {OTHER_COMMIT}"))
+    assert "step=0" in res.stdout and "OK: Installed ccl_chromium_reader" in res.stdout, res.stdout
+    base = "git+https://github.com/cclgroupltd"
+    assert _pip_calls(tmp_path) == [
+        f"install --force-reinstall --no-deps ccl_simplesnappy @ {base}/ccl_simplesnappy@{snappy} "
+        f"ccl_chromium_reader @ {base}/ccl_chromium_reader@{reader}",
+        "install Brotli>=1.0.9,<=1.2.0 zstd==1.5.7.2"]
+
+
+def test_ccl_at_the_pins_that_imports_runs_pip_not_at_all(tmp_path):
+    reader, snappy = _ccl_pins()
+    res = _run(tmp_path, CCL_STEP, env=_ccl_venv(tmp_path, AT=f"{reader} {snappy}"))
+    assert "step=0" in res.stdout and "already installed" in res.stdout
+    assert _pip_calls(tmp_path) == []
+
+
+def test_ccl_at_the_pins_that_does_not_import_is_installed_again(tmp_path):
+    reader, snappy = _ccl_pins()
+    res = _run(tmp_path, CCL_STEP, env=_ccl_venv(tmp_path, AT=f"{reader} {snappy}", IMPORT_RC="1"))
+    assert len(_pip_calls(tmp_path)) == 2
+    assert "step=1" in res.stdout and "does not import" in res.stdout
+
+
+def test_a_failed_ccl_fetch_is_a_warning_and_stops_before_the_pypi_libraries(tmp_path):
+    res = _run(tmp_path, CCL_STEP, env=_ccl_venv(tmp_path, AT="", PIP_RC1="1"))
+    assert "step=1" in res.stdout and "WARN: Could not install ccl_chromium_reader" in res.stdout
+    assert "misc.hindsight_chrome reports the missing module" in res.stdout
+    assert len(_pip_calls(tmp_path)) == 1
+
+
+def test_failed_pypi_libraries_are_a_warning_too(tmp_path):
+    res = _run(tmp_path, CCL_STEP, env=_ccl_venv(tmp_path, AT="", PIP_RC2="1"))
+    assert "step=1" in res.stdout and "WARN: Could not install ccl_chromium_reader" in res.stdout
+    assert len(_pip_calls(tmp_path)) == 2
+
+
+def test_the_ccl_pin_check_reads_the_commits_pip_recorded(tmp_path):
+    """The step's own python one-liner, run for real against two dist-infos."""
+    reader, snappy = _ccl_pins()
+    env = _ccl_venv(tmp_path)
+    site = tmp_path / "site"
+    for name, version, commit in (("ccl_chromium_reader", "0.3.18", reader),
+                                  ("ccl_simplesnappy", "0.4", snappy)):
+        info = site / f"{name}-{version}.dist-info"
+        info.mkdir(parents=True)
+        (info / "METADATA").write_text(f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n")
+        (info / "direct_url.json").write_text(json.dumps({
+            "url": f"https://github.com/cclgroupltd/{name}",
+            "vcs_info": {"vcs": "git", "commit_id": commit, "requested_revision": commit}}))
+    # pyhindsight's Chrome module only has to import.
+    chrome = site / "pyhindsight" / "browsers"
+    chrome.mkdir(parents=True)
+    for init in (site / "pyhindsight" / "__init__.py", chrome / "__init__.py", chrome / "chrome.py"):
+        init.write_text("")
+    (tmp_path / ".venv" / "bin" / "python").write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n')
+    env = {**env, "PYTHONPATH": str(site)}
+    res = _run(tmp_path, CCL_STEP, env=env)
+    assert "already installed" in res.stdout and _pip_calls(tmp_path) == [], res.stdout
+    shutil.rmtree(site / "ccl_simplesnappy-0.4.dist-info")
+    _run(tmp_path, CCL_STEP, env=env)
+    assert _pip_calls(tmp_path)[0].startswith("install --force-reinstall --no-deps"), \
+        "one distribution off its pin installs both again"
+
+
+def test_the_ccl_step_runs_after_the_requirements_and_is_optional():
+    step = INSTALL_SH.index("\ninstall_ccl_chromium_reader || true\n")
+    requirements = INSTALL_SH.index('"$VENV_DIR/bin/pip" install -r "$ATLAS_DIR/requirements.txt"')
+    assert requirements < step, "pyhindsight is installed before the library it imports"

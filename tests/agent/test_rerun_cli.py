@@ -104,6 +104,27 @@ def test_a_stopped_session_records_its_status_like_a_run(tmp_path):
     assert status["finish_status"] == "interrupted"
 
 
+def test_a_rerun_with_a_stable_list_gets_the_stable_namespace_note(tmp_path):
+    """The rerun's system prompt carries the stable wording when the agent's
+    toolbox lists every tool for the whole run."""
+    from agent import cli as cli_mod
+    from agent.prompts import _NAMESPACE_NOTE, _STABLE_NAMESPACE_NOTE
+    case = _case(tmp_path)
+    agent = SimpleNamespace(
+        ui=MagicMock(), stats=None, interactive=False,
+        toolbox=SimpleNamespace(namespace_summary=lambda: "ns", stable=lambda: True),
+        run=MagicMock(side_effect=KeyboardInterrupt),
+    )
+    with patch.object(cli_mod, "_make_agent", return_value=agent), \
+         patch.object(cli_mod, "_teardown_local_mounts"), \
+         patch("core.paths.register_answer_keys"), \
+         patch("core.evidence_inventory_gate.clear_inventory_stamp"), \
+         pytest.raises(KeyboardInterrupt):
+        cli_mod._run_plane_b(_args(), case, _plane(True), "markdown")
+    sent = " ".join(str(a) for a in list(agent.run.call_args.args) + list(agent.run.call_args.kwargs.values()))
+    assert _STABLE_NAMESPACE_NOTE in sent and _NAMESPACE_NOTE not in sent
+
+
 def test_rerun_objective_prefers_the_open_questions(tmp_path):
     from agent.prompts import rerun_objective
     from core.investigation_tasks import reconcile_case_md
@@ -207,15 +228,16 @@ def test_the_intake_record_reports_progress_and_yields_to_a_session(tmp_path, ca
     assert _status(case)["turns"] == 3
 
 
-def test_a_stop_during_the_evidence_stage_is_recorded_as_a_stop(tmp_path):
+def test_a_stop_during_the_evidence_stage_is_recorded_as_a_stop(tmp_path, monkeypatch):
     """The dashboard's Stop sends SIGTERM. During the evidence stage no
     session exists yet; routed through an interrupt, the stop still ends in
-    a record that says it was stopped, not in a 'running' record of a dead
-    process."""
+    a record that says it was stopped on request, not in a 'running' record
+    of a dead process, and not as a Ctrl+C."""
     import os
     import signal
     import time
     from agent import cli as cli_mod
+    monkeypatch.setattr(cli_mod, "_STOP_REQUESTED", False)
     case = _case(tmp_path)
     (case / ".atlas" / "run_status.json").write_text(PRIOR, encoding="utf-8")
 
@@ -235,4 +257,4 @@ def test_a_stop_during_the_evidence_stage_is_recorded_as_a_stop(tmp_path):
     finally:
         signal.signal(signal.SIGTERM, before)
     st = _status(case)
-    assert st["stopped_reason"] == "keyboard_interrupt" and st["finish_status"] == "interrupted"
+    assert st["stopped_reason"] == "stop_requested" and st["finish_status"] == "interrupted"

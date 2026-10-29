@@ -37,7 +37,7 @@ def test_new_note_unknown_type(brain):
 
 
 def test_run_type_uses_run_summary_template(brain):
-    path = notes.new_note("run", "2026-07-07 nitroba train")
+    path = notes.new_note("run", "2031-07-07 case-a train")
     assert path.parent.name == "runs"
     assert "## Findings by Tier" in path.read_text()
 

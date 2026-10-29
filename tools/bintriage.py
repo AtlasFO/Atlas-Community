@@ -12,6 +12,8 @@ import shutil
 from typing import Optional
 
 from fastmcp import FastMCP
+
+from tools import media_types as MT
 from core import run, output_safe
 from core.paths import assert_output_safe
 
@@ -61,7 +63,12 @@ def binwalk_extract(file_path: str, output_dir: str) -> dict:
                timeout=300, output_dir=output_dir)
 
 
-@mcp.tool()
+# The executable images the binary triage programs read (their own docs:
+# PE, ELF and Mach-O), shared by the three below.
+_EXECUTABLES = [*MT.PE, *MT.ELF, *MT.MACHO]
+
+
+@mcp.tool(meta={"reads": _EXECUTABLES})
 @output_safe
 def diec_scan(file_path: str, deep: bool = False) -> dict:
     """
@@ -135,7 +142,7 @@ def tlsh_compare(file_a: str, file_b: str) -> dict:
             "distance": distance, "interpretation": band}
 
 
-@mcp.tool()
+@mcp.tool(meta={"reads": _EXECUTABLES})
 def r2_summary(file_path: str) -> dict:
     """
     Headless radare2/rizin structural summary: file info, sections with
@@ -167,7 +174,7 @@ def r2_summary(file_path: str) -> dict:
     return out
 
 
-@mcp.tool()
+@mcp.tool(meta={"reads": _EXECUTABLES})
 def upx_detect(file_path: str) -> dict:
     """
     Test whether a binary is UPX-packed (non-destructive `upx -t`).
@@ -186,7 +193,7 @@ def upx_detect(file_path: str) -> dict:
     return result
 
 
-@mcp.tool()
+@mcp.tool(meta={"reads": _EXECUTABLES})
 @output_safe
 def upx_unpack(file_path: str, output_path: str) -> dict:
     """

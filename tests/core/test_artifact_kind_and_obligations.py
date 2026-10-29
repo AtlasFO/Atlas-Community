@@ -176,8 +176,9 @@ def test_winevt_absent_escape_blocked_when_disk_opened(tmp_path: Path):
     assert ok is None
 
 
-def test_complete_requires_unseen_zero_despite_soft_floor(tmp_path: Path):
+def test_complete_requires_unseen_zero_despite_soft_floor(tmp_path: Path, monkeypatch):
     """A task soft floor must not yield complete while units stay unseen."""
+    monkeypatch.setenv("ATLAS_WORK_ORDER", "0")     # the floors decide off the order
     case = tmp_path / "case"
     case.mkdir()
     (case / ".atlas").mkdir()

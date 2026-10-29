@@ -12,7 +12,7 @@ from core import case_knowledge as ck
 from core import ioc_pivots as ip
 
 BRIEF = (
-    "# Case: CASE-A\n\n**Case ID:** CASE-A\n\n"
+    "# Case: CASE-A\n\n**Case ID:** CASE-A\n**System owner:** victim\n\n"
     "## Investigation Requests\n\n"
     "<!-- Append one bullet per request, for example:\n"
     "- Determine whether the workstation was compromised.\n-->\n\n"
@@ -58,13 +58,14 @@ def _data(block: str) -> str:
     return block.split("<<<PRIOR KNOWLEDGE\n", 1)[1].split("\nPRIOR KNOWLEDGE>>>", 1)[0]
 
 
+@pytest.mark.usefixtures("todays_pivots")
 class TestBlock:
     def test_every_statement_stands_with_its_id_under_one_contract(self, tmp_path):
         block = ck.prompt_note(_case(tmp_path))
         data = _data(block)
         assert "- [ac-0001] We suspect data theft that began around 2031-01-02." in data
         assert "- [ac-0002] 10.0.0.5 is our admin jump host; CORP\\jane.doe administers it." in data
-        assert ck.CONTRACT in block
+        assert ck.contract_text() in block and ck.PRIOR_INDICATOR_SENTENCE in block
         assert "not a blind allowlist" in block and "never exoneration" in block
         # The template's commented example is no statement of the analyst's.
         assert "ransomware" not in block
@@ -158,6 +159,7 @@ class TestCaseFile:
         assert _case_file_text(long.replace("\n", "\r\n"), knowledge_shown=False) == lf
 
 
+@pytest.mark.usefixtures("todays_pivots")
 class TestPivots:
     def test_the_nudge_quotes_the_statement_behind_an_analyst_named_indicator(self, tmp_path):
         case = _case(tmp_path)
@@ -179,7 +181,7 @@ class TestPivots:
     def test_a_brief_describing_the_estate_does_not_crowd_out_the_runs_indicators(self, tmp_path):
         servers = "".join(f"- 198.51.100.{i} is one of our file servers.\n"
                           for i in range(1, ip.MAX_PIVOTS + 6))
-        brief = "# Case: CASE-C\n\n## What you already know\n\n" + servers
+        brief = "# Case: CASE-C\n**System owner:** victim\n\n## What you already know\n\n" + servers
         case = _case(tmp_path, brief, claims=("Beacon to 203.0.113.44 seen.",))
         pivots = ip.refresh_pivots(case)["pivots"]
         assert "ip:203.0.113.44" in pivots

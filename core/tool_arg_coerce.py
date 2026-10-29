@@ -54,8 +54,31 @@ def _try_json_loads(value: str) -> Any:
         return None
 
 
+def _enum_of(prop: dict[str, Any]) -> list[str]:
+    """The string values a property allows (anyOf/oneOf included)."""
+    if not isinstance(prop, dict):
+        return []
+    out = [v for v in prop.get("enum") or [] if isinstance(v, str)]
+    for key in ("anyOf", "oneOf"):
+        for alt in prop.get(key) or []:
+            out += _enum_of(alt if isinstance(alt, dict) else {})
+    return out
+
+
+def _enum_spelling(value: str, allowed: list[str]) -> str | None:
+    """The allowed value a spelling variant stands for: the same words in
+    another case, or with spaces or hyphens for the underscores."""
+    key = re.sub(r"[\s\-]+", "_", value.strip()).casefold()
+    return next((a for a in allowed if a.casefold() == key), None)
+
+
 def coerce_value(value: Any, prop: dict[str, Any]) -> Any:
     """Return ``value`` coerced toward ``prop``'s declared JSON-schema type."""
+    allowed = _enum_of(prop)
+    if allowed and isinstance(value, str) and value not in allowed:
+        hit = _enum_spelling(value, allowed)
+        if hit is not None:
+            return hit
     types = _schema_types(prop)
     if not types:
         return value
@@ -76,7 +99,7 @@ def coerce_value(value: Any, prop: dict[str, Any]) -> Any:
             if "array" in types and isinstance(parsed, list):
                 return _coerce_array_items(parsed, prop)
             if "object" in types and isinstance(parsed, dict):
-                return parsed
+                return _coerce_object_props(parsed, prop)
             # Single-quoted pseudo-JSON from some models — last resort.
             if "array" in types and value.strip().startswith("["):
                 repaired = value.replace("'", '"')
@@ -86,12 +109,42 @@ def coerce_value(value: Any, prop: dict[str, Any]) -> Any:
 
     if isinstance(value, list) and "array" in types:
         return _coerce_array_items(value, prop)
+    if isinstance(value, dict) and "object" in types:
+        return _coerce_object_props(value, prop)
 
     return value
 
 
+def _coerce_object_props(value: dict, prop: dict[str, Any]) -> dict:
+    """An object's declared properties coerced by type (coerce_value), one
+    level down and on: never a key renamed, added or dropped (the guessed-
+    name rename and the underscore drop are the top-level call's alone)."""
+    props = prop.get("properties") if isinstance(prop, dict) else None
+    if not isinstance(value, dict) or not isinstance(props, dict):
+        return value
+    out = None
+    for key, sub in props.items():
+        if key in value and isinstance(sub, dict):
+            new = coerce_value(value[key], sub)
+            if (new is value[key] and isinstance(new, str) and "array" in _schema_types(sub)
+                    and "string" not in _schema_types(sub) and _items_type(sub) == "string"
+                    and new.strip() and not _JSON_LIKE_RE.match(new)):
+                # One plain value where a list of strings is declared is a list
+                # of that one value (nested only: the top level keeps its own
+                # rules), never its characters.
+                new = [new]
+            if new is not value[key]:
+                out = out if out is not None else dict(value)
+                out[key] = new
+    return out if out is not None else value
+
+
 def _coerce_array_items(values: list, prop: dict[str, Any]) -> list:
     item_t = _items_type(prop)
+    items = prop.get("items") if isinstance(prop, dict) else None
+    if item_t == "object" and isinstance(items, dict) and isinstance(items.get("properties"), dict):
+        coerced = [_coerce_object_props(v, items) if isinstance(v, dict) else v for v in values]
+        return coerced if any(a is not b for a, b in zip(coerced, values)) else values
     if item_t not in ("integer", "number"):
         return values
     out: list = []

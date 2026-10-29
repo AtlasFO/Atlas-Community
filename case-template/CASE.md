@@ -17,8 +17,9 @@
      suspect: the device of the person under investigation; no remediation
      is recommended to its owner, investigative next steps and legal
      process apply instead.
-     unknown, or the line left out: the recommendations assume a victim and
-     the report says so. -->
+     unknown, or the line left out: no side is assumed. No remediation is
+     addressed to an owner, a value gets a side only where a finding's own
+     evidence shows it, and the report says the brief names no system owner. -->
 
 ## Investigation Requests
 

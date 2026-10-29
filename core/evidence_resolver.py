@@ -199,9 +199,9 @@ def _windows_for_call_id(
 
 
 # Parsed timeline per file, keyed by path and stamped with the file's size
-# and mtime. The events are read once per report: every claim's resolution
-# used to parse the whole file again, and with a large events.jsonl the
-# exit-time report assembly took most of an hour and gigabytes of memory.
+# and mtime. The events are read once per report: re-parsing the whole file
+# for every claim's resolution is quadratic on a large events.jsonl and
+# exhausts time and memory at report assembly.
 _TIMELINE_CACHE: dict[str, tuple[int, int, list[dict[str, Any]]]] = {}
 # Every event field the resolver reads (see _event_from_timeline,
 # _find_timeline_by_record_ref and the correlation loops).
@@ -710,7 +710,7 @@ def _read_artifact_lines(
 def _resolve_call_id(
     case_dir: Path, call_id: int, *, component: str = "",
 ) -> list[EvidenceEvent]:
-    from core.evidence_noise import is_tool_metadata_text, is_weak_timeline_event_text
+    from core.evidence_noise import envelope_rows, is_tool_metadata_text, is_weak_timeline_event_text
 
     events: list[EvidenceEvent] = []
     windows = _windows_for_call_id(case_dir, call_id, limit=30)
@@ -726,7 +726,19 @@ def _resolve_call_id(
         # row about a stranger's encrypted file rode into the account
         # finding on the line beneath it. One event per record.
         start = w.get("line_start")
-        rows = [ln for ln in raw.splitlines() if ln.strip()][:12] or [raw]
+        inside = envelope_rows(raw)
+        if inside is not None:
+            # Atlas's own result envelope: the rows inside it are the
+            # records. The window's event_time is the envelope's first date,
+            # a tool banner's as readily as a record's, so no row takes it;
+            # a row's own printed time is read where the row is read. An
+            # envelope with no row list (a hash, a status) or one cut short
+            # stays one event, its raw text, with no time.
+            rows = [ln for ln in inside if not is_tool_metadata_text(ln)][:12] or [raw]
+            stamp = ""
+        else:
+            rows = [ln for ln in raw.splitlines() if ln.strip()][:12] or [raw]
+            stamp = str(w.get("event_time") or "")
         for i, text in enumerate(rows):
             if len(text) > 2000:
                 text = text[:2000] + " …"
@@ -737,7 +749,7 @@ def _resolve_call_id(
                 call_id=call_id,
                 component=component,
                 provenance="direct",
-                timestamp=str(w.get("event_time") or "") if i == 0 else "",
+                timestamp=stamp if i == 0 else "",
             )
             if is_weak_timeline_event_text(text):
                 fallback.append(ev)
@@ -781,8 +793,11 @@ def _resolve_call_id(
                 pass
     excerpt = (entry.get("stdout_excerpt") or "").strip()
     if excerpt and not is_tool_metadata_text(excerpt):
-        rows = [ln for ln in excerpt.splitlines()
-                if ln.strip() and not is_tool_metadata_text(ln)][:12] or [excerpt]
+        inside = envelope_rows(excerpt)
+        rows = (([ln for ln in inside if not is_tool_metadata_text(ln)][:12] or [excerpt])
+                if inside is not None
+                else [ln for ln in excerpt.splitlines()
+                      if ln.strip() and not is_tool_metadata_text(ln)][:12] or [excerpt])
         return [EvidenceEvent(
             text=ln[:2000],
             source=f"trace call_id={call_id}",
@@ -880,9 +895,9 @@ _ANCHOR_TIME_RE = re.compile(r"\b\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2})?")
 _ANCHOR_IP_RE = re.compile(
     r"\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b")
 _ANCHOR_SID_RE = re.compile(r"\bS-1-5-21(?:-\d+){3,4}\b")
-# "Event ID 4624", "event 4624" and the analyst's shorthand "EID 4624".
-_ANCHOR_EVENT_RE = re.compile(
-    r"(?i)\b(?:event\s*(?:id)?|eid)\s*[:#]?\s*(\d{3,5})\b")
+# "Event ID 4624", "event 4624" and the analyst's shorthand "EID 4624": the
+# one cue grammar, defined beside the other extractors.
+from core.entities import EVENT_ID_RE as _ANCHOR_EVENT_RE  # noqa: E402
 _ANCHOR_HASH_RE = re.compile(r"\b(?:[0-9a-f]{32}|[0-9a-f]{40}|[0-9a-f]{64})\b", re.I)
 # A name introduced by what it is: "process svc.exe", "account jdoe". Cues
 # chain ("the service binary svc.exe" names svc.exe, not "binary"), and a cue
@@ -940,7 +955,7 @@ _ANCHOR_STOP = frozenset({
 })
 # An OS or product build ("6.3.9600", "10.0.19041") is as checkable as a
 # date: a finding that quotes one the cited output never printed has made
-# it up. Not the tail of an address: "61.24.102" inside "194.61.24.102" is
+# it up. Not the tail of an address: "20.30.123" inside "10.20.30.123" is
 # the address, already anchored whole, and no output prints the tail alone.
 _ANCHOR_VERSION_RE = re.compile(
     r"(?<![\d.])\d{1,2}\.\d{1,2}\.\d{3,6}(?:\.\d{1,6})?(?![\d.])")
@@ -1028,11 +1043,26 @@ def resolve_claim_evidence(
     pat = dict(_COMPONENT_PATTERNS)
     anchors = _claim_anchors(node)
     bystanders: list[EvidenceEvent] = []
+    # The row test decides which rows of a cited or located call are the
+    # claim's records (ATLAS_CITATION_ROWS); with the anchor test an l2tcsv
+    # row that shows the claim was demoted to "correlated" and a same-day
+    # row promoted. Records of a call Atlas located are labelled so.
+    row_terms = None
+    located_ids = {int(c) for c in (node.get("located_call_ids") or []) if c}
+    located_ids |= {int(e.get("call_id")) for e in (node.get("evidence") or [])
+                    if isinstance(e, dict) and e.get("located") and e.get("call_id")}
+    try:
+        from tools._gates.citation_support import _rows_on, claim_terms, row_shows
+        if _rows_on():
+            row_terms = claim_terms(str(node.get("statement") or ""), host=str(node.get("host") or ""))
+            if not row_terms["strong"] and not (row_terms["names"] and row_terms["times"]):
+                row_terms = None
+    except Exception:  # noqa: BLE001
+        row_terms = None
 
     # 0) What the analyst cited when recording the finding, when it names
-    #    a record (a timestamp or an event id). Used to be a fallback behind
-    # call windows — so "file01 Security.evtx EventID 4720 
-    #    10:54:25" lost out to mid-field CSV fragments from a grep spill.
+    #    a record (a timestamp or an event id). It outranks call windows,
+    #    which can match mid-field CSV fragments from a grep spill.
     try:
         from core.forensic_citation import normalize_timestamp as _nts
         for ev in _supporting_evidence_prose_events(node, max_events=4):
@@ -1080,10 +1110,16 @@ def resolve_claim_evidence(
         # that shares nothing with the claim is kept
         # only as a labelled correlation, never as a cited record.
         for ev in _resolve_call_id(root, cid, component=components[0]):
-            if anchors and not _shares_anchor(ev.text, anchors):
+            if row_terms is not None:
+                shown = row_shows(row_terms, ev.text) is not None
+            else:
+                shown = not anchors or _shares_anchor(ev.text, anchors)
+            if not shown:
                 ev.provenance = "correlated"
                 bystanders.append(ev)
                 continue
+            if int(cid) in located_ids:
+                ev.provenance = "located by Atlas"
             collected.append(ev)
 
     # 3) Artifact + locator
@@ -1161,7 +1197,7 @@ def resolve_claim_evidence(
         return pack
 
     # 3b) Analyst supporting_evidence prose when call_id/artifact failed —
-    # prefer cited prose over a correlated RAW EVENT flood (I5).
+    # prefer cited prose over a correlated RAW EVENT flood.
     prose = _supporting_evidence_prose_events(node, max_events=max_events)
     if prose:
         pack.selection_mode = "supporting_evidence_prose"
@@ -1206,8 +1242,8 @@ def resolve_claim_evidence(
     return pack
 
 
-# Heading for a rendered evidence block. Replaces the old "[RAW EVENT]"
-# per-event marker: what follows is a list of citations, not a dump.
+# Heading for a rendered evidence block: what follows is a list of
+# citations, not a per-event dump.
 EVIDENCE_BLOCK_MARKER = "**Cited records**"
 
 
@@ -1217,6 +1253,7 @@ def format_evidence_markdown(
     compact: bool = False,
     limit: int = 8,
     known_hosts: Iterable[str] = (),
+    case_dir: Any = None,
 ) -> str:
     """Render an EvidencePack as Markdown citations with provenance.
 
@@ -1278,7 +1315,7 @@ def format_evidence_markdown(
     from core.forensic_citation import render_citations
 
     event_dicts = [ev for ev in events if isinstance(ev, dict)]
-    body = render_citations(event_dicts, known_hosts=known_hosts, limit=limit)
+    body = render_citations(event_dicts, known_hosts=known_hosts, limit=limit, case_dir=case_dir)
     if compact:
         out = []
         if note and mode == "correlated":

@@ -41,6 +41,20 @@ It should contain:
 Nothing else is required. Append new bullets whenever new work appears.
 No “Round 2” blocks, no manual task statuses, no findings, no report paste.
 
+### Header rows that set the frame
+
+Besides the case id and the requests, the brief can state field rows that
+change how the case is read (`**Engagement:** examination`, or a table row, or
+a bare `engagement: x`; the first word of the value decides, and German labels
+and words are read too). A row Atlas does not recognise is reported, never
+guessed.
+
+| Row | Values | What it changes |
+|-----|--------|-----------------|
+| Engagement | `incident-response` (the default), `examination` | Examination is a device or image looked at after the fact. The owner's duties remain: a step applies to systems still in service, and what a finding still has to recover or preserve stays until that is done. |
+| System owner | `victim`, `suspect`, or the row left out | `victim` is the incident frame: remediation goes to the owner. `suspect` is the device of the person under investigation: no remediation is addressed to its owner, only investigative next steps and legal process. With no owner named (or an unrecognised one) Atlas reads the case in a neutral frame: no side is assumed, a value gets a side only where a finding's cited output shows it, no first-hour precaution or owner remediation is seeded, and the report and the analyst's prompt say "SYSTEM OWNER: NOT NAMED". |
+| Vision descriptions | `on` | Lets `images.describe` send a case picture to the provider of the vision role ([llm.md](llm.md)). Off unless every such row says an on-word exactly; a missing row, any other text or two rows that disagree is off. |
+
 ---
 
 ## Why findings are intentionally NOT in CASE.md
@@ -158,7 +172,9 @@ it names.
   host) and `principal` rows. This is **not** a findings dump — keep it short.
 - `.atlas/mount_plan.json` lists detected images (**shipped**).
 - Auto-mount (V1): unambiguous E01/Ex01 under `case/mnt/<stem>/`.
-- VMDK / ISO / encrypted / ambiguous → plan only.
+- Disk containers (VMDK, VHD, VHDX, QCOW2, VDI) are read without a copy
+  through a read-only raw view (below). ISO, encrypted and ambiguous images
+  stay plan only.
 - `<case>/mnt/` is a protected path segment (same write refusal class as
   `evidence/`).
 
@@ -173,6 +189,79 @@ it names.
 | Plane A auto-mount privilege? | Privileged by design. Default `ATLAS_PLANE_A_AUTO_MOUNT=auto` mounts only when passwordless sudo is available; `off` = plan-only; `force` = attempt anyway. |
 | Non-NTFS E01? | Soft `plan_only` (gate `non_ntfs`) — not a Plane A hard failure; agent uses tsk.*/plaso on the EWF device. |
 | Remount after teardown? | `mount_full_image` reuses existing `ewf1` and `mount_ntfs` reuse logic; already-mounted `case/mnt/<stem>/fs` is not remounted. |
+
+### Disk containers and raw views
+
+The Sleuth Kit build Atlas runs reads raw images only, and a split or renamed
+VMDK names its extents in its descriptor. Instead of converting each container
+to a raw copy, Atlas serves the disk as one read-only regular file:
+`qemu-storage-daemon` exports it over FUSE, without root, with a snapshot
+chain applied, at `mnt/<image>/disk`. The contents index, the Sleuth Kit tools
+and plaso read that file, so a case of many images needs no free space for
+copies and a renamed VMDK opens. The view's state is kept in the image's entry
+in `mount_plan.json`; a view daemon is infrastructure, never a read, so it
+leaves no trace entry.
+
+A container is untrusted input. Atlas pins the format from the file's name and
+magic, never lets qemu guess, and checks that every file the container names
+is a regular file under the image's own folder before qemu opens it. A
+container that names a file outside its folder or a network location, or whose
+parent qemu does not apply (a differencing VHD or VDI, a VMDK delta without
+its parent or made on a changed parent), is refused with the reason, rather
+than shown with zeros where the parent's data belongs. A snapshot base is an
+earlier state of the disk and is read on demand.
+
+A view needs `qemu-storage-daemon` with a FUSE export, `fusermount3` and a
+usable `/dev/fuse` (`install.sh` installs `qemu-utils`; a container without
+`/dev/fuse` falls back to the copy), and local tools: with `--remote` the
+tools run elsewhere and no view is served. Without a view the copy,
+`img_vmdk_export_raw`, stays; it keeps the case volume's free-space floor and
+is refused while a view serves the disk. A tool run as root is refused on a
+view. The run-end teardown stops the views except the ones a running
+background job still reads. `ATLAS_RAW_VIEWS=0` switches views off: the
+readers then take the container as it is.
+
+### Files inside images
+
+At intake Atlas lists every disk image of the case once (`fls -r -m /` per
+filesystem volume) into the **contents index**, `.atlas/contents_index.db`,
+and joins it with what the case's exports parsed. The index is a pointer and a
+disclosure, never a floor: nothing in it asks for a read. What it gives:
+
+- `tsk.index_find` finds a file inside any image of a host without running
+  `fls`; a search with more matches than its limit returns one line per
+  directory, and a read state filter (`unread`, `partial`, `read`, `skipped`)
+  shows what no call has read.
+- The analyst is shown one line per host (file count, commonest extensions,
+  the largest directory trees few other hosts hold) after the inventory and
+  again after compaction, and the per-question plan sees what each host's
+  image holds where it will look.
+- An **image handle**, `<image>::<path>`, is accepted by any parser. The image
+  is named by its path, file name, stem or host label (`@<offset>` picks a
+  volume), and the path is the one inside the image. Atlas extracts the file
+  first, under `analysis/extracted/`; the result says which copy it read and
+  which call extracted it, and the parse's trace entry names that extraction.
+  `job_start_image_extract(images, paths, dest)` copies one path, glob or
+  folder from several images (or all of them) as one background job, so a
+  single parser call over the folder reads them all.
+- An export is an index of what an image holds and the image is the authority:
+  event logs, mail stores and captures the index lists inside the images count
+  as present, never as absent, and an absence claim is checked against the host
+  it names. A file named with its host joined by a hyphen
+  (`corp-ws01-triage.raw`) maps to that host.
+
+### Readers by input format
+
+Which tool parses an event log, a hive, a Prefetch file or a mail store is not
+left to the model's memory. Each tool declares the media types it reads in its
+own registration, and the "readers by input format" table that the analyst's
+guidance and the director's review carry is built from those declarations and
+from the content type libmagic finds (`python-magic`), so carved pictures,
+documents and archives name a reader too. A strings pass, text grep or text
+read over an input whose format has an installed parser is refused with the
+parsers named, for planned reads and the analyst's calls alike
+(`ATLAS_FORMAT_READER_ROUTING`). A tool refuses an input that is not its kind,
+and a folder handed to a one-file reader.
 
 ---
 
@@ -221,7 +310,7 @@ trimming alone (see `core/investigation_orchestrator.py`):
   next action.
 - **Flat-score LLM rank:** when top candidate scores are nearly tied,
   optionally reorder *only within the existing list*
-  (`ATLAS_ORCH_LLM_RANK=auto|off|force`).
+  (`ATLAS_ORCH_LLM_RANK=auto|off|force`; off unless set).
 
 ---
 

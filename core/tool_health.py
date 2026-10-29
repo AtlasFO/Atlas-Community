@@ -193,7 +193,7 @@ SOURCES: dict[str, str] = {
     # python packages from requirements.txt
     "capa": "pip flare-capa", "floss": "pip flare-floss", "olevba": "pip oletools",
     "mraptor": "pip oletools", "usn.py": "pip usnparser", "vol": "pip volatility3",
-    "log2timeline.py": "pip plaso", "hindsight": "pip pyhindsight",
+    "log2timeline.py": "pip plaso", "hindsight": "pip pyhindsight + install.sh (ccl_chromium_reader, pinned in install-versions.env)",
     "pe-carver": "pip pe-carver", "machinae": "pip machinae",
     "analyzemft": "pip analyzeMFT",
     # fetched by an install.sh step

@@ -22,7 +22,7 @@ SECURITY_QUERY = _call(
     206, "<py>:table_table_query",
     '{"success": true, "path": "analysis/dc_security_4624_4625.csv", '
     '"matched_rows": 11, "returned_rows": 11, "rows": [{"TimeCreated": '
-    '"2020-09-19 03:21:48", "EventId": "4624", "LogonType": "10", '
+    '"2031-03-01 03:21:48", "EventId": "4624", "LogonType": "10", '
     '"RemoteHost": "203.0.113.9", "SubjectUserName": "Administrator"}]}')
 TRUNCATED_GREP = _call(
     214, "sudo ngrep -q -I evidence/network/capture.pcap -i POST tcp",
@@ -91,13 +91,14 @@ class TestPositiveClaimsAreJudgedAsBefore:
         silent = _call(5, "strings -a evidence/x.bin")
         assert cs.citation_supports(POSITIVE, [silent], tool_calls=[silent]) is None
 
-    def test_a_claim_naming_nothing_checkable_is_not_refused(self):
+    def test_a_claim_naming_nothing_checkable_is_not_judged(self):
+        # Not checkable: never True, never False (the row test has nothing to ask for).
         assert cs.citation_supports("the archive could not be opened", [MEMORY_INFO],
-                                    tool_calls=[MEMORY_INFO]) is True
+                                    tool_calls=[MEMORY_INFO]) is None
 
     def test_a_plain_word_after_a_cue_cannot_refuse_a_citation(self):
         assert cs.citation_supports("the process migration was observed", [MEMORY_INFO],
-                                    tool_calls=[MEMORY_INFO]) is True
+                                    tool_calls=[MEMORY_INFO]) is None
 
 
 class TestSuggestions:

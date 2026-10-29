@@ -3,7 +3,6 @@ from core.auth_ontology import (
     WINDOWS_AUTH_FAILURE_EIDS,
     WINDOWS_AUTH_SUCCESS_EIDS,
     positively_frames_success,
-    session_search_cmd_regex,
     claim_auth_success_regex,
     claim_auth_none_regex,
 )
@@ -12,12 +11,6 @@ from core.auth_ontology import (
 def test_windows_eids_are_platform_adapters_not_empty():
     assert "4624" in WINDOWS_AUTH_SUCCESS_EIDS
     assert "4625" in WINDOWS_AUTH_FAILURE_EIDS
-
-
-def test_session_search_cmd_matches_security_evtx():
-    rx = session_search_cmd_regex()
-    assert rx.search("EvtxECmd -f Security.evtx --inc 4624,4625")
-    assert rx.search("security_logons export")
 
 
 def test_claim_polarity_helpers():

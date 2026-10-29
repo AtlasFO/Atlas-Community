@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from core import llmhub
+from core import llmhub, providers
 from agent.llm import parse_response, rate_limit_delay, LLMError, LLMHubClient
 
 
@@ -34,12 +34,12 @@ class TestApiKeyAliases:
     def test_tsystems_alias(self, monkeypatch):
         monkeypatch.delenv("LLMHUB_API_KEY", raising=False)
         monkeypatch.setenv("TSYSTEMS_API_KEY", "tsi-key")
-        assert llmhub.api_key() == "tsi-key"
+        assert providers.resolve("llmhub").api_key == "tsi-key"
 
     def test_llmhub_wins(self, monkeypatch):
         monkeypatch.setenv("LLMHUB_API_KEY", "hub-key")
         monkeypatch.setenv("TSYSTEMS_API_KEY", "tsi-key")
-        assert llmhub.api_key() == "hub-key"
+        assert providers.resolve("llmhub").api_key == "hub-key"
 
 
 class TestRateLimitDelay:
@@ -621,3 +621,22 @@ class TestFirewallRefusal:
             self._chat(monkeypatch, 403, text)
         assert not isinstance(err.value, WAFBlockedError)
         assert "HTTP 403" in str(err.value)
+
+
+def test_the_pacing_estimate_counts_a_picture_as_its_tokens_not_its_base64_length():
+    """A provider that reports no usage falls back to an estimate of the
+    request's tokens; a data-URL picture counts as IMAGE_PART_TOKENS, never
+    as a quarter of its base64 text (a 1 MB picture would read as 250,000)."""
+    import json
+    from agent.llm import IMAGE_PART_TOKENS, _payload_tokens_estimate
+    text_only = {"model": "x", "messages": [{"role": "system", "content": "s" * 400},
+                                            {"role": "user", "content": [{"type": "text", "text": "Describe this picture."}]}]}
+    base = _payload_tokens_estimate(text_only)
+    assert base == len(json.dumps(text_only)) // 4
+    with_picture = json.loads(json.dumps(text_only))
+    with_picture["messages"][1]["content"].append(
+        {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + "A" * 1_000_000}})
+    assert _payload_tokens_estimate(with_picture) == base + IMAGE_PART_TOKENS
+    with_link = json.loads(json.dumps(text_only))
+    with_link["messages"][1]["content"].append({"type": "image_url", "image_url": {"url": "https://example.com/a.jpg"}})
+    assert _payload_tokens_estimate(with_link) == len(json.dumps(with_link)) // 4   # a link is text

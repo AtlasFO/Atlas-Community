@@ -36,11 +36,12 @@ topic, e.g. `atlas guide brain`).
 | Lab run + independent reviewer grade | `atlas train --case DIR -q "…"` |
 | Check whether a running investigation is stuck | `atlas review --live` |
 | Change the animated LIVE panel look | `atlas skin` / `atlas run --skin matrix` |
-| Read the newest report nicely in the terminal / as HTML | `atlas report [--format html]` |
+| Read the case's main report in the terminal, or write it as Markdown, HTML or PDF; export the ATT&CK Navigator layer or the STIX indicator bundle | `atlas report [--format md\|html\|pdf\|navigator\|stix] [--output PATH]` |
 | Re-investigate after evidence changed (keep Claim Graph) | `atlas rerun --case DIR` / `--no-agent` / `--assemble-report` |
 | Compare investigation journal runs | `atlas rerun --diff run-0001..run-0002` |
-| List models your LLM Hub key can use | `atlas models` |
+| List the model ids a provider serves (default: the analyst's provider) | `atlas models [--provider NAME]` |
 | See which backend/model each role resolved to | `atlas doctor` |
+| Connect, test or switch a model provider; edit what Atlas knows about it | `atlas provider setup` / `test NAME` / `use NAME`; `atlas provider profile init ID` copies a shipped provider profile into your folder to edit, `atlas provider profile path` shows the folders ([llm.md](llm.md#provider-profiles)) |
 | Run forensic tools on a *different* machine (a SIFT VM) | any of the above + `--remote HOST` — see [Remote SIFT execution](#remote-sift-execution---remote) |
 | Manage Atlas's long-term memory | `atlas brain …` |
 | Pull brain knowledge other contributors merged | `atlas brain sync` |
@@ -50,7 +51,7 @@ topic, e.g. `atlas guide brain`).
 ## First-run checklist
 
 1. **Install** — `./install.sh` from the repo root (idempotent). Details: [try-it-out.md](try-it-out.md).
-2. **A model** — `bin/atlas provider setup` connects any OpenAI-compatible backend and tests it (see [llm.md](llm.md)).
+2. **A model** — `bin/atlas provider setup` connects a provider (any OpenAI-compatible backend, or Anthropic's own API) and tests it (see [llm.md](llm.md)).
 3. **Sanity check** — `bin/atlas doctor` prints what every role (analyst, `reason.*`, `dair.*`) resolved to. If something says `NOT SET`, fix it *before* running: missing reasoning backends silently degrade a run (findings are never challenged).
 4. **A case directory** — either the bundled NITROBA-2008 brief (`~/Atlas/demo-cases/nitroba`) or a fresh copy of `case-template/`:
    ```bash
@@ -108,11 +109,12 @@ atlas run --case ~/cases/mycase -q "…" --remote sift-lab
 | `--case DIR` | The case directory | Omit if your cwd is the case |
 | `-q/--question` | Override of CASE.md Investigation Requests; without either, the standard objective | When you need a one-shot objective without editing CASE.md |
 | `-L/--language en\|de` | Report and recommendation language, persisted in `.atlas/case_config.json` | Set once per case (the dashboard asks at case creation) |
-| `--model ID` | Analyst model override | Trying a different hub model for one run |
+| `--model ID` | Analyst model override | Trying a different model for one run |
+| `--fresh` / `--resume` | Clear the previous run's working files before starting, or continue its trace. Without `--resume` the clear happens on `--fresh`, when the prior run recorded an end, or when `analysis/` still holds a trace of an earlier process; it moves `reports/` contents and the traces to `.atlas/run_history/`, deletes `analysis/` and `exports/`, and keeps claims, tasks and the plan under `.atlas/` (with `--output-dir`, in that directory, never in the case) | A prior run that ended or crashed starts fresh by default; `--resume` continues the old trace and clears nothing |
 | `--case-id ID` | Override the case ID from `CASE.md` | Distinct trace filenames for repeated runs |
 | `--output-dir DIR` | Write `analysis/`/`exports/`/`reports/` elsewhere; evidence stays read-only in place | Keeping the case dir pristine; comparing runs side by side |
 | `--remote HOST` | Execute forensic tools on a SIFT VM | Evidence or tooling lives on another machine — [details](#remote-sift-execution---remote) |
-| `--all-tools` | Expose all ~270 tool schemas up front (~36k tokens) | Only for large-context models; normally namespaces lazy-load |
+| `--all-tools` | Load tool namespaces up front until the schema budget is full (it follows the model's context window; `ATLAS_AGENT_MAX_OPENAI_TOOLS` or the provider profile's `max_tools` can change it); the rest still load on demand | Only for large-context models; normally namespaces lazy-load |
 | `--interactive` | The agent may consult you at decision points | Same as `atlas interactive` |
 | `--quiet` | Suppress per-turn narration | Logs/cron |
 | `--json` | Final stats as JSON on stdout (implies `--quiet`) | Scripting |
@@ -125,17 +127,29 @@ prints a **live dashboard URL** — open it in a browser to watch the trace fill
 **Where output lands** (all under the case dir, or `--output-dir`):
 
 ```
-reports/<CASE_ID>_investigation_report.md   ← the analyst report
-reports/<CASE_ID>_trace.{json,md}           ← exported audit trail
+reports/<CASE_ID>_investigation_report.md   ← the case report when the analyst writes it without a path;
+                                              also the name `atlas write-report` and a killed run's exit report use
+reports/estate_report.md                    ← the estate report, written when the loop closes the run out
+reports/host_<HOST>_report.md               ← one per host with findings, with the estate report
 analysis/<CASE_ID>_trace.json               ← live trace (dashboard input)
+analysis/<CASE_ID>_trace.jsonl              ← hash-chained mirror (`atlas verify-trace`)
 exports/                                    ← raw tool output (CSV, EVTX exports, …)
 ```
+
+`atlas report` and the dashboard's Report tab show the best-ranked of these
+(the case's main report before host sections and notes, the working copy in
+`reports/` before a snapshot's, the estate report before a single-scope one,
+then the newest). `atlas report --format html|pdf` writes the render next to the report;
+`atlas rerun --assemble-report` writes `reports/<CASE_ID>_report.md` (or
+`.html`, `.pdf`; `--format json` writes `<CASE_ID>_report_projection.json`)
+from the projection.
 
 ---
 
 ## `atlas interactive` — supervised run
 
-Exactly `atlas run`, but the agent is allowed to pause and ask **you** at genuine decision
+`atlas run` with the same flags and the same start rule, except `--quiet`, `--json` and
+`--interactive`, but the agent is allowed to pause and ask **you** at genuine decision
 points (via the `atlas_ask_analyst` tool) — e.g. "two plausible pivots, which first?" or
 "scope: is host X in bounds?". Between questions it works autonomously.
 
@@ -166,9 +180,11 @@ full run with it.
 
 ## `atlas skin` — the live dashboard's animation
 
-The CLI's live panel has five skins. `atlas skin` lists them and marks the
-active one; `atlas skin NAME` makes one the default (saved in
-`~/.atlas/ui.json`); `--skin NAME` on `run`/`train`/`interactive`/`chat`
+The CLI's live panel has five skins. `atlas skin` lists them, marks the
+active one (what a run uses without `--skin`, environment included) and
+names the default behind it: your saved choice, or the built-in `atlas`;
+`atlas skin NAME` saves one as yours (in `~/.atlas/ui.json`), and
+`--preview` prints a few frames; `--skin NAME` on `run`/`train`/`interactive`/`chat`
 uses one for a single session; `ATLAS_LIVE_SKIN=NAME` does the same from the
 environment. Precedence: flag, then environment, then the saved default.
 
@@ -184,8 +200,9 @@ Cosmetic only: the skin never changes what a run does or records.
 
 ## `atlas train` — graded run
 
-A **clean-slate run plus an independent review**. The case's `analysis/`, `exports/`, and
-`reports/` are cleared first, the investigation runs to completion, and then a *separate*
+A **clean-slate run plus an independent review**. The previous run's reports and trace are
+moved to `.atlas/run_history/` and `analysis/` and `exports/` are deleted first, the
+investigation runs to completion, and then a *separate*
 reviewer model — fresh context, no tools — grades the run from its trace, report, and (when
 the case ships one) the `ground_truth.json` answer key.
 
@@ -199,8 +216,8 @@ atlas train --case DIR -q "…" --no-clear --review-model <model-id>
 The review lands in `reports/<CASE_ID>_run_review.md` with a verdict — `STRONG` /
 `ACCEPTABLE` / `NEEDS WORK` — and recommendations *only when the run needs them*.
 Afterwards, background investigation learning may stage a few high-quality
-candidates for Dashboard → Brain Review (nothing is promoted without your
-`atlas brain approve`).
+candidates for the dashboard's Brain page, Inbox tab (nothing is promoted without
+an approval there or with `atlas brain approve`).
 
 Brain flags: `--no-brain` disables the second brain **entirely** — no
 memory/concept injection into the prompt (it sets `ATLAS_NO_BRAIN` for the run)
@@ -212,13 +229,15 @@ Brain learning when the run finishes. `atlas train` adds an independent
 reviewer (labs / graded cases). Optional `--capture-brain` additionally stages
 legacy review/self-correction candidates.
 
-**Careful:** the clear step is destructive to prior run output in that case dir (evidence is
-never touched). Use `--no-clear` to keep prior state, or `--output-dir` to run in an isolated
+**Careful:** the clear step deletes `analysis/` and `exports/` of that case dir (the reports
+and trace go to `.atlas/run_history/`; evidence is never touched). Use `--no-clear` to keep
+prior state, or `--output-dir` to run in an isolated
 mirror directory and leave the real case alone.
 
 Scriptable exit codes: `0` ended through one of the loop's endings and the coverage
-verdict is `complete`, `2` the run was cut off before any of them (turn cap, wall clock,
-deadlock, transport), `3` review says NEEDS WORK, `4` it ended cleanly but coverage or
+verdict is `complete`, `2` the run did not finish (a stop from the dashboard or a
+`kill -TERM`, content classes with neither a read nor a reason, or a cut-off before any
+ending such as a deadlock or a lost model call), `3` review says NEEDS WORK, `4` it ended cleanly but coverage or
 beliefs do not support calling it complete. A run the loop closed out itself — it wrote
 the reports once the gate passed, rather than the model calling `atlas_finish` — is an
 ending like any other, not a failure.
@@ -257,15 +276,22 @@ the review goes to the case the trace belongs to, never to the directory the com
 
 ## `atlas report` — render the final report
 
-Finds the newest report in the case and renders it — in the terminal by default, or as
+Finds the case's main report, the one the dashboard's Report tab shows, and renders it — in the terminal by default, or as
 Markdown, HTML or PDF for sharing.
 
 ```bash
-atlas report                                   # newest report, pretty-printed in the terminal
+atlas report                                   # the main report, pretty-printed in the terminal
 atlas report --format html                     # writes <report>.html next to the report
 atlas report --format pdf                      # writes <report>.pdf next to the report
 atlas report --format html --output /tmp/r.html
+atlas report --format stix                     # exports/<CASE_ID>.iocs.stix.json and .iocs.csv
+atlas report --format navigator                # exports/<CASE_ID>.navigator.json (ATT&CK Navigator layer)
 ```
+
+`--format stix` renders the indicator list: the same rows as the report's indicator
+file, as a STIX 2.1 bundle of the located, actionable ones (each with the first time
+the evidence shows it) and a CSV. A value that is only named, and that no tool output
+shows, is never exported. `--output` names a directory for `stix` and `navigator`.
 
 PDF renders from the report's own Markdown, so it says what the Markdown says.
 It needs no system libraries, only the `fpdf2` package from `requirements.txt`.
@@ -309,14 +335,17 @@ atlas rerun --diff run-0001..run-0002
 ## `atlas models` / `doctor` / `serve` — plumbing
 
 ```bash
-atlas models     # model ids available to your LLM Hub key (use these with --model / --analyst-models)
-atlas doctor     # resolved configuration: base URL, key present?, model per role
+atlas models [--provider NAME]   # model ids a provider serves (use these with --model); default: the analyst's provider; a paged list is read to its end
+atlas doctor     # resolved configuration: base URL, key present?, model per role, provider profiles and bindings
+atlas doctor --probe   # also asks each provider a role uses or ATLAS_PROVIDERS declares for its model list (an implicit hub no role uses is skipped)
 atlas serve      # run the Atlas MCP server on stdio — for connecting other MCP clients
 ```
 
-`atlas doctor` is the first thing to run when behavior seems off. In particular it warns when
-Legacy note: `ANTHROPIC_API_KEY` is ignored (Anthropic backends removed). Prefer hub:
-Claude, so set `REASON_BACKEND=llmhub` / `DAIR_BACKEND=llmhub` explicitly to force the hub.
+`atlas doctor` is the first thing to run when behavior seems off. It lists where the provider
+profiles come from, the ones that cannot be used (with the reason) and, per provider, the profile
+it binds to and why ([llm.md](llm.md#provider-profiles)). `ANTHROPIC_API_KEY` is not read: Claude is
+a provider like any other (the `anthropic` profile), registered with `atlas provider setup`, and its
+key is stored under that provider's own name.
 
 ---
 
@@ -345,8 +374,8 @@ atlas brain globe                  # knowledge-graph data for the dashboard's Br
 ```
 
 **Recommended workflow:** use `atlas run` for real investigations. Background
-Brain learning starts automatically when the run finishes. Open Dashboard →
-**Brain Review** to approve or reject candidates. Use `atlas train` for lab
+Brain learning starts automatically when the run finishes. Open the dashboard's
+**Brain** page, **Inbox** tab, to approve or reject candidates. Use `atlas train` for lab
 cases that need an independent reviewer. Design:
 [architecture-brain.md](architecture-brain.md).
 
@@ -471,12 +500,12 @@ lab VM*. Both share the pinned-host config file and SSH plumbing.
 
 Designed for scripting — every path is distinguishable:
 
-| Command | 0 | 1 | 2 | 3 |
-|---------|---|---|---|---|
-| `run` | finished | LLM/config error | run stopped unfinished | — |
-| `train` | finished, review OK | reviewer/LLM error | run didn't finish | review says NEEDS WORK |
-| `review --live` | healthy | reviewer error | — | run is stalled |
-| `review` | graded, review OK | reviewer error | — | review says NEEDS WORK |
+| Command | 0 | 1 | 2 | 3 | 4 |
+|---------|---|---|---|---|---|
+| `run` | finished, coverage complete | LLM/config error or crash | run stopped unfinished | — | finished, but coverage or beliefs do not support calling it complete |
+| `train` | finished, review OK | reviewer/LLM error | run didn't finish | review says NEEDS WORK | finished and review OK, but coverage incomplete; or the reviewer refused a trace of another case |
+| `review --live` | healthy | reviewer error | — | run is stalled | — |
+| `review` | graded, review OK | reviewer error | — | review says NEEDS WORK | — |
 
 ```bash
 atlas train --case DIR -q "…" --json > result.json
@@ -486,6 +515,26 @@ case $? in
   3) echo "needs work — read reports/*_run_review.md" ;;
 esac
 ```
+
+Exit code `2` covers every way a run stops before it finishes:
+
+- **A requested stop.** For `run`, `train` and `interactive`, the dashboard's Stop or
+  a `kill -TERM` writes the report the findings support, prints `Run stopped on
+  request` and exits with `2`, without a traceback. A stopped `atlas rerun` (the
+  dashboard's *Continue*) records the stop too, but ends with the interrupt. Ctrl+C
+  still raises its interrupt.
+- **Evidence left undecided.** Every content class inside the evidence (the event
+  logs of an image, its registry hives, a mail store) must end read, partly read or
+  left with a checked reason. The finish is held back once for each set of undecided
+  classes. A run that reaches any of its endings with a class still undecided ends
+  unfinished (`finish_status` `stopped_undecided`; the dashboard calls it
+  `undecided_evidence`). The report names them under *Evidence not decided*;
+  `atlas run --resume` continues on them.
+- **A stop before any ending**, such as a protocol deadlock or a model call lost after
+  its retries.
+
+`--json` prints `stopped_reason` and `finish_status`; their values are listed in
+[cli-reference.md](cli-reference.md#how-a-run-ends).
 
 ---
 
@@ -499,6 +548,8 @@ Keyring (`bin/atlas-secret set NAME`), or the environment. `atlas doctor` shows 
 | `LLMHUB_API_KEY` (alias `TSYSTEMS_API_KEY`) | T-Systems LLM Hub key, when the hub is one of your providers |
 | `LLMHUB_MODEL` | Default hub model for all roles |
 | `ATLAS_AGENT_MODEL` | Analyst model override (also `--model`) |
+| `ATLAS_PROVIDER_<NAME>_PRESET` / `ATLAS_PROVIDER_PROFILES_DIR` | Which provider profile a provider uses, and where your own profiles live ([llm.md](llm.md#provider-profiles)) |
+| `ATLAS_LOOP` | `conversation` (default) or `frontier`: how a run works its owed reads ([architecture](architecture-investigation.md#6-coverage-the-work-order-and-the-incident-map)) |
 | `REASON_BACKEND` / `REASON_URL` / `REASON_MODEL` / `REASON_API_KEY` | Adversarial-reviewer role |
 | `DAIR_BACKEND` / `DAIR_URL` / `DAIR_MODEL` / `DAIR_API_KEY` | Phase-director role |
 | `ATLAS_REVIEW_MODEL` | Reviewer for `train`/`review` (then the reviewer provider's model, then `REASON_MODEL`) |
@@ -508,12 +559,34 @@ Keyring (`bin/atlas-secret set NAME`), or the environment. `atlas doctor` shows 
 | `ATLAS_REMOTE_SIFT` / `ATLAS_REMOTE_MODE` / `ATLAS_REMOTE_WORKSPACE` / `ATLAS_REMOTE_LOCAL_ROOT` | Remote execution — the `--remote*` flags set these for you |
 | `ATLAS_LIVE_SSH_KEY` | Fallback SSH identity when a host entry has none |
 | `ATLAS_AGENT_INPUT_TPM` | Proactive rate-limit pacing (default 400000; `0` disables) |
-| `ATLAS_AGENT_RATE_LIMIT_WAIT` | Max total wait on 429s (default 600 s) |
+| `ATLAS_AGENT_RATE_LIMIT_WAIT` | Max total wait on 429s (default 600 s); a 429 with no stated wait is asked again after 2, 4, 8, 16, then 30 s |
 | `ATLAS_AGENT_CONTEXT_CHARS` | Context sent per turn (derived from the probed window; ~3 000 000 chars for 1M tokens) |
 | `ATLAS_THEME` | CLI colour theme: `neon` (default) / `atlas` / `mono` |
 | `ATLAS_LIVE_SKIN` | LIVE dashboard animation: `atlas` (default) / `matrix` / `radar` / `wave` / `aquarium` (also `atlas skin` / `--skin`) |
 | `ATLAS_VOL_TIMEOUT` | Volatility timeout on slow hardware |
-| `VIRUSTOTAL_API_KEY` / `ABUSEIPDB_API_KEY` / `OTX_API_KEY` / `URLSCAN_API_KEY` / `MISP_URL`+`MISP_API_KEY` | Optional IOC enrichment — never block a run; a failed lookup is reported as failed, not as clean |
+| `ATLAS_HASH_TIMEOUT` | Seconds an evidence hash may take (default 900) |
+| `ATLAS_TOOL_MEM_CAP_MB` | Memory limit in MB for each forensic tool process (unset: none) |
+| `ATLAS_AGENT_TURN_TIME_BUDGET` | Seconds one model turn may take, re-asks included (default 1800) |
+| `ATLAS_AGENT_TOOL_OUTPUT_LIMIT` | Characters of one tool result the model sees. Atlas derives 2500, 8000 or 12000 from the context window; a value set here overrides that |
+| `ATLAS_MODEL_CONTEXT_PROBE_TIMEOUT` | Seconds the context-window probe waits (default 20) |
+| `ATLAS_LLM_ALLOW_TEMPERATURE` | `0` never sends a temperature, `1` always does ([llm.md](llm.md#api-dialect-hub-vs-openai)) |
+| `ATLAS_USE_KEYRING` / `ATLAS_NO_KEYRING` | `ATLAS_USE_KEYRING=1` looks keys up in the GNOME Keyring even when `.env` or the shell already holds a model key; `ATLAS_NO_KEYRING=1` never looks there |
+| `ATLAS_CAPTURE_BRAIN` | `1` also stages the older review and self-correction candidates after a run (as `--capture-brain`) |
+| `ATLAS_BRAIN_ROOT` / `ATLAS_BRAIN_IDENTITY` | Another brain folder than `brain/`; the e-mail the contributor gate checks instead of `git config user.email` |
+| `ATLAS_LIVE_HOSTS_CONFIG` | The pinned-host file for `--remote` and the `live.*` tools (default `~/cases/.common/live_hosts.json`) |
+| `ATLAS_EVIDENCE_ROOTS` | Extra folders, separated by `:`, that tools may read from besides the case |
+| `ATLAS_SKIP_SUDO_CHECK` | `1` skips the passwordless-sudo check at start (tests and CI only) |
+| `ATLAS_VOL3_BIN`, `ATLAS_EZ_TOOLS`, `ATLAS_HAYABUSA_HOME`, `REGRIPPER_PLUGINS_DIR`, `ATLAS_ODL_PY`, `ATLAS_VELO_BIN`, `ATLAS_VELO_API_CONFIG` | Where a tool lives when it is not where `install.sh` puts it |
+| `ATLAS_PDF_FONT_DIR` | Folder holding `DejaVuSans.ttf`, searched first for `--format pdf` |
+| `ATLAS_DASHBOARD_DB` | The dashboard's account database (default `~/.config/atlas/dashboard/auth.db`) |
+| `ATLAS_DASHBOARD_SECURE_COOKIES` | `1` marks the sign-in cookie secure behind a TLS proxy (on by itself when the dashboard serves HTTPS) |
+| `ATLAS_DASHBOARD_STOP_GRACE` | Seconds a stopped run may spend writing its report before it is killed (default 900) |
+| `ATLAS_DASHBOARD_CHAT_IDLE` / `ATLAS_DASHBOARD_CHAT_MAX` | *Ask Atlas*: seconds an idle chat lives (default 1800) and chats at once (default 6) |
+| `VIRUSTOTAL_API_KEY` / `ABUSEIPDB_API_KEY` / `OTX_API_KEY` / `URLSCAN_API_KEY` / `MISP_URL`+`MISP_API_KEY` | Optional IOC enrichment — never block a run; a failed lookup is reported as failed, not as clean. `MISP_VERIFY_TLS=0` skips the certificate check of the MISP server (a self-signed certificate) |
+
+The other `ATLAS_*` names the code reads, the ones these pages do not document,
+are set by Atlas itself between its own processes, or switch and tune single
+mechanisms. Leave them unset unless a CHANGELOG.md entry or a maintainer names one.
 
 ---
 
@@ -533,6 +606,9 @@ Keyring (`bin/atlas-secret set NAME`), or the environment. `atlas doctor` shows 
   `matrix` / `radar` / `wave` / `aquarium`), one-shot via `atlas run --skin matrix`, or
   `ATLAS_LIVE_SKIN`. Preference lands in `~/.atlas/ui.json`.
 - **Don't reach for `--all-tools`.** Namespaces lazy-load exactly when a phase needs them;
-  the flag exists for large-context models and costs ~36k tokens of schemas every turn.
+  the flag exists for large-context models. It loads tool namespaces up front until the
+  schema budget is full (it follows the model's context window; `ATLAS_AGENT_MAX_OPENAI_TOOLS`
+  or the provider profile's `max_tools` can change it) and sends that list on every turn;
+  the rest still load on demand.
 - **When in doubt: `atlas doctor` first, then `atlas models`.** Most "it behaves weirdly"
   reports are a role silently resolving to a different backend than intended.

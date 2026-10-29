@@ -7,6 +7,9 @@ from typing import Optional
 
 
 def check(ctx) -> Optional[dict]:
+    from core.deferred_intents import dair_no_defer_on
+    if dair_no_defer_on():
+        return None          # no deferral: a finding needs no director call first
     window = ctx.window
     log = getattr(ctx, "log", None)
     if log is not None and hasattr(log, "recent_actions"):

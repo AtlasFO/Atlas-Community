@@ -255,3 +255,24 @@ def test_a_stop_asserted_in_a_mirror_also_stands_in_the_real_case(tmp_path):
     (other / ".atlas").mkdir(parents=True)
     hs.assert_stop(other, "csam", "intake", frame="subject")
     assert hs.is_stopped(other)
+
+
+def test_a_stop_with_no_owner_named_ends_the_examination_as_in_the_incident_frame(tmp_path):
+    """The neutral frame (the brief names no system owner) hands over like
+    the incident frame: safety first, a stop ends the examination whoever
+    owns the system (by design: a brief that names no owner is the neutral
+    frame)."""
+    from core.evidence_links import empty_links, save_evidence_links
+    from core.indicators import frame_for
+    d = _case(tmp_path, "**Case ID:** X\n")
+    assert frame_for(d) == "neutral"
+    links = empty_links("X")
+    links["entries"] += [{"label": "PC01", "kind": "disk", "path": "evidence/pc01.E01", "host": "PC01"}]
+    save_evidence_links(d, links)
+    (d / "evidence").mkdir()
+    (d / "evidence" / "pc01.E01").write_bytes(b"\x00" * 16)
+    st = H.assert_stop(d, "csam", "intake")
+    assert st["frame"] == "neutral"
+    r = H.gate("tsk_tsk_fls", {"image": str(d / "evidence" / "pc01.E01")}, d)
+    assert r and "all evidence was handed over" in r
+    assert any("all evidence" in line for line in H.report_lines(d, "en"))

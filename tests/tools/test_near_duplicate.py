@@ -10,18 +10,18 @@ class _Log:
                          for i, (h, d) in enumerate(findings)]
 
 
-OLD = "FTP upload of rhino1.jpg to 192.168.0.5 by user jane on the workstation"
+OLD = "FTP upload of photo1.jpg to 192.168.0.5 by user jane on the workstation"
 
 
 def test_restatement_without_new_content_is_folded():
     log = _Log(("ws1", OLD))
-    near = misc._near_duplicate("rhino1.jpg was uploaded by jane over FTP to 192.168.0.5", "WS1", log)
+    near = misc._near_duplicate("photo1.jpg was uploaded by jane over FTP to 192.168.0.5", "WS1", log)
     assert near and near["relation"] == "restates" and near["call_id"] == 10
 
 
 def test_sharper_statement_is_a_refinement():
     log = _Log(("ws1", OLD))
-    near = misc._near_duplicate(OLD + " at 2007-04-19 14:57", "ws1", log)
+    near = misc._near_duplicate(OLD + " at 2031-04-19 14:57", "ws1", log)
     assert near and near["relation"] == "refines" and near["call_id"] == 10
 
 
@@ -32,7 +32,7 @@ def test_another_event_on_the_same_host_is_not_a_duplicate():
 
 def test_the_same_event_on_another_file_or_host_is_not_a_duplicate():
     log = _Log(("ws1", OLD))
-    assert misc._near_duplicate(OLD.replace("rhino1", "rhino4"), "ws1", log) is None
+    assert misc._near_duplicate(OLD.replace("photo1", "photo4"), "ws1", log) is None
     assert misc._near_duplicate(OLD, "ws2", log) is None
 
 

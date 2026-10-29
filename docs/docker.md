@@ -37,6 +37,21 @@ images. Without either, Atlas still runs fine for memory-only or
 log/PCAP-only investigations; only the image-mounting tools report
 themselves unavailable.
 
+Disk containers (VMDK, VHD, VHDX, QCOW2, VDI) are read through read-only raw
+views that `qemu-storage-daemon` serves over FUSE (see
+[architecture-case-driven.md](architecture-case-driven.md#disk-containers-and-raw-views)).
+That needs `/dev/fuse` in the container: privileged mode provides it, and the
+narrower form needs `--device /dev/fuse` added. Without it Atlas falls back to
+a raw copy of the container, which needs free space in the case volume, and
+says why no view was made.
+
+## Network at build time
+
+`install.sh` runs during `docker build`, so the build host needs the network
+access the installer needs (see [INSTALL_INSTRUCTIONS.md](../INSTALL_INSTRUCTIONS.md)):
+the distribution's package mirrors, GitHub, and `pypi.org` with
+`files.pythonhosted.org` for the Python packages.
+
 ## Case evidence
 
 Mount `~/cases`-equivalent as a volume (`docker-compose.yml` does this via

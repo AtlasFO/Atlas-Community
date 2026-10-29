@@ -248,9 +248,11 @@ def check(ctx) -> Optional[dict]:
                     "activity after <date>' read from it is an analysis "
                     "artifact, not evidence. " + frozen +
                     " Re-run the analysis against the chain-top descriptor "
-                    "(img_vmdk_chain_info → img_vmdk_export_raw), or state "
-                    "explicitly that the finding describes the pre-snapshot "
-                    "state."
+                    "(img_vmdk_chain_info names it; tsk.* reads it with the "
+                    "chain applied, through its raw view or, on a host "
+                    "without views, a copy from img_vmdk_export_raw), or "
+                    "state explicitly that the finding describes the "
+                    "pre-snapshot state."
                 ),
                 "description": ctx.description,
                 "confidence": ctx.confidence,

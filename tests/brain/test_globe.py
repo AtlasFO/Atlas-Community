@@ -9,10 +9,10 @@ def _seed(brain):
               tags="memory", related='"[[timeline]]"', updated="2031-02-04")
     make_note(brain, "wiki/concepts/timeline.md", "Timeline", type="concept",
               tags="memory", updated="2026-01-01")
-    make_note(brain, "wiki/cases/nitroba.md", "Nitroba", type="case",
-              cases="nitroba", tags="network")
+    make_note(brain, "wiki/cases/case-a.md", "Case A", type="case",
+              cases="case-a", tags="network")
     make_note(brain, "wiki/tools/zeek.md", "Zeek", type="tool",
-              cases="nitroba", tags="network")
+              cases="case-a", tags="network")
 
 
 def test_build_nodes_edges_clusters(brain):
@@ -20,7 +20,7 @@ def test_build_nodes_edges_clusters(brain):
     data = globe.build()
     assert data["summary"]["nodes"] == 4
     ids = {n["id"] for n in data["nodes"]}
-    assert {"vol", "timeline", "nitroba", "zeek"} <= ids
+    assert {"vol", "timeline", "case-a", "zeek"} <= ids
     edge_types = {e["type"] for e in data["edges"]}
     assert "related" in edge_types          # vol -> timeline
     assert "shared_tag" in edge_types or "shared_entity" in edge_types
@@ -28,8 +28,8 @@ def test_build_nodes_edges_clusters(brain):
     assert {"tools", "concepts", "cases"} <= clusters
     # case/concept hubs are bigger than plain notes with equal degree
     vol = next(n for n in data["nodes"] if n["id"] == "vol")
-    nitroba = next(n for n in data["nodes"] if n["id"] == "nitroba")
-    assert nitroba["size"] >= vol["size"] - 2
+    case_a = next(n for n in data["nodes"] if n["id"] == "case-a")
+    assert case_a["size"] >= vol["size"] - 2
 
 
 def test_confidential_excluded(brain):
@@ -44,9 +44,9 @@ def test_confidential_excluded(brain):
 
 def test_case_and_topic_filters(brain):
     _seed(brain)
-    data = globe.build(case="nitroba")
+    data = globe.build(case="case-a")
     ids = {n["id"] for n in data["nodes"]}
-    assert "nitroba" in ids and "zeek" in ids
+    assert "case-a" in ids and "zeek" in ids
     assert "vol" not in ids
     data = globe.build(topic="memory")
     ids = {n["id"] for n in data["nodes"]}

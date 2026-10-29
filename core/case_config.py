@@ -60,8 +60,9 @@ _ENGAGEMENT_LINE_RE = _field_line_re(r"engagement(?:[ \t]+type)?")
 # (labels: system owner, device owner, Systeminhaber, Geräteeigentümer; a
 # bare "Owner:" line names the case owner and is not read). The value's
 # first word decides, a possessive included ("suspect's own laptop");
-# free text may follow. Absent or unrecognised, the owner is unknown: the
-# recommendations assume a victim and the report states that assumption.
+# free text may follow. Absent or unrecognised, the owner is unknown: no side
+# is assumed (the neutral frame, core.indicators.frame_for) and the report
+# states the frame.
 SYSTEM_OWNERS = ("victim", "suspect", "unknown")
 DEFAULT_SYSTEM_OWNER = "unknown"
 _OWNER_WORDS = {
@@ -281,6 +282,55 @@ def parse_system_owner(text: str) -> str | None:
     return system_owner_field(text)[2]
 
 
+# The consent switches a brief states, each a field row like Engagement:
+# "Vision descriptions: on" lets tools.images send a case picture to the
+# vision model's provider. On only when every row present is exactly one
+# on-word; a missing row, any other text, or two rows that disagree is off
+# (fail closed).
+_VISION_LINE_RE = _field_line_re(r"vision(?:[ \t]+descriptions?)?|(?:modell[- ]?)?bildbeschreibung(?:en)?")
+_ON_WORDS = frozenset({"on", "yes", "true", "enabled", "enable", "allowed", "ja", "ein", "aktiv", "erlaubt"})
+
+
+def vision_field(text: str) -> tuple[bool, str, bool]:
+    """``(present, raw value, on)`` for the "Vision descriptions" row of a
+    brief: on only when every row present says an on-word."""
+    if not text:
+        return False, "", False
+    try:
+        from core.investigation_tasks import _strip_noncontent_markdown
+        text = _strip_noncontent_markdown(text)
+    except Exception:  # noqa: BLE001 - read the text as it is
+        pass
+    values = [m.group("value").strip(" \t*_`").lower() for m in _VISION_LINE_RE.finditer(text)]
+    if not values:
+        return False, "", False
+    # The whole value, emphasis and trailing punctuation stripped, must be
+    # one on-word: "on hold until the client agrees", "on, after legal
+    # review" and an empty value are not an agreement (fail closed).
+    return True, values[0], all(v.strip(" \t*_`.,;:!?") in _ON_WORDS for v in values)
+
+
+def model_vision(case_dir: str | os.PathLike | None) -> bool:
+    """Whether the case brief turns vision descriptions on, read now."""
+    if not case_dir:
+        return False
+    try:
+        return vision_field(_brief(case_dir))[2]
+    except Exception:  # noqa: BLE001 - an unreadable brief is off
+        return False
+
+
+_CASE_SWITCHES = {"model_vision": model_vision}
+
+
+def case_switch(case_dir: str | os.PathLike | None, name: str) -> bool:
+    """A named consent switch of the case (``_CASE_SWITCHES``), False for a
+    name no parser knows: a tool declares the name in its registration
+    (``meta["case_switch"]``) and the reader table applies it."""
+    reader = _CASE_SWITCHES.get(str(name or ""))
+    return bool(reader(case_dir)) if reader else False
+
+
 def _brief(case_dir: str | os.PathLike) -> str:
     from core.investigation_tasks import read_case_markdown
     return read_case_markdown(case_dir)
@@ -290,7 +340,7 @@ def get_engagement(case_dir: str | os.PathLike) -> str:
     """The case's engagement type: what CASE.md states, else an incident."""
     try:
         found = parse_engagement(_brief(case_dir))
-    except Exception:  # noqa: BLE001 - an unreadable brief is an incident, as before
+    except Exception:  # noqa: BLE001 - an unreadable brief is an incident
         found = None
     return found or DEFAULT_ENGAGEMENT
 
@@ -331,7 +381,7 @@ def unrecognized_system_owner(case_dir: str | os.PathLike | None) -> str | None:
     shown = raw or "(empty)"
     return (f"CASE.md states a system owner Atlas does not recognise: {shown!r} "
             f"(the first word must be one of: {', '.join(SYSTEM_OWNERS)}); the "
-            "owner is treated as unknown and the recommendations assume a victim")
+            "owner is treated as unknown, so no victim or suspect side is assumed")
 
 
 def unrecognized_engagement(case_dir: str | os.PathLike | None) -> str | None:
@@ -377,6 +427,18 @@ def engagement_prompt_note(case_dir: str | os.PathLike | None) -> str:
         return ""
     owner = get_system_owner(case_dir)
     after = is_examination(case_dir)
+    if owner not in ("suspect", "victim") and not names_subject(case_dir):
+        # The neutral frame (core.indicators.frame_for): no owner named.
+        return (
+            "# SYSTEM OWNER: NOT NAMED\n"
+            "The brief names no system owner. Assume no side: record what the "
+            "evidence shows, and type a value's side (attacker, victim) only "
+            "where the finding's cited output shows it. There is no owner to "
+            "remediate for: a recommendation is an investigative next step, a "
+            "preservation or legal-process request for a named account or "
+            "provider, or an escalation, never a containment, blocking, "
+            "eradication or hardening step for an owner.\n"
+        )
     if owner == "suspect":
         return (
             "# SYSTEM OWNER: THE PERSON UNDER INVESTIGATION\n"
@@ -400,14 +462,22 @@ def engagement_prompt_note(case_dir: str | os.PathLike | None) -> str:
         "This case examines a device or image after the event, but the "
         "owner's systems are still in service and the owner's duties remain. "
         "Record the containment, eradication, recovery and hardening steps "
-        "the findings warrant for the owner's live estate (the named accounts "
-        "to reset, the named persistence to remove, the named addresses to "
-        "block), each applying only if the owner has not already taken it. A "
-        "mitigation from the ATT&CK table is a lesson for the owner (phase "
-        "harden, urgency later), not a first-hour step."
+        "the findings warrant for the owner's own live estate (the named "
+        "accounts to reset, the named persistence to remove, the named "
+        "addresses to block), each applying only if the owner has not already "
+        "taken it. What a finding names as still to be recovered, hashed or "
+        "preserved from a system is kept until that is done: the step that "
+        "removes it comes after the step that secures it. A mitigation from "
+        "the ATT&CK table is a lesson for the owner (phase harden, urgency "
+        "later), not a first-hour step."
         + ("" if owner == "victim" else
            " The brief does not say whose system this is; assume the owner is "
-           "the victim and say so where it matters.")
+           "the victim and say so where it matters. A system the brief does "
+           "not place with the owner (a third party's server, a provider's "
+           "service) is not the owner's estate: a step that would alter or "
+           "remove what is on it is a request to that system's operator "
+           "(phase investigate or escalate), recorded after the preservation "
+           "and follow-up steps the findings open, never a first-hour step.")
         + "\n"
     )
 

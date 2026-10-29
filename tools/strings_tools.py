@@ -1,12 +1,30 @@
 """String extraction, file identification, and metadata tools."""
+import errno
 import os
 import shutil
+import uuid
 from typing import Optional, Union
 from fastmcp import FastMCP
+
+from tools import media_types as MT
 from core import run, output_safe, DEFAULT_TIMEOUT
 from core.paths import assert_output_safe
 
 mcp = FastMCP("strings")
+
+
+def _refuse_directory(file_path: str, tool: str) -> Optional[dict]:
+    """The gate's refusal (wrong_input_kind) for a folder handed to a reader
+    of one file's bytes, None for anything else. The program exits 1 on a
+    folder, and that exit read as a tool failure to investigate (the latch
+    nudged turn after turn), while the input was of the wrong kind; a gate
+    refusal is recorded as one and creates no investigate debt."""
+    if not os.path.isdir(file_path):
+        return None
+    return {"success": False, "gate": "wrong_input_kind", "failure_class": "wrong_input_kind",
+            "error": f"{tool} reads the bytes of one file; {file_path!r} is a directory",
+            "path": file_path,
+            "use_instead": "misc.list_evidence_dir to list the directory, then this tool on one file of it"}
 
 
 @mcp.tool()
@@ -37,6 +55,8 @@ def strings_extract(
             "output_path": output_path,
         }
     file_path = resolved
+    if (refused := _refuse_directory(file_path, "strings_extract")):
+        return refused
 
     results = {}
 
@@ -97,6 +117,85 @@ def _full_output(res: dict) -> str:
     return (res or {}).get("stdout", "") or ""
 
 
+def _kept_path(file_path: str, min_length: int, wide: bool) -> tuple[str, str]:
+    """``(path, identity prefix)`` of the kept extraction of one strings pass,
+    beside the run's spills (analysis/tool-output, which no evidence walk
+    reads), ("", "") where nothing spills or for a file it cannot stat. The
+    file is known by device, inode, size, mtime and ctime: a changed file is
+    a new extraction, and so is a renamed one, since a rename sets ctime. ctime counts because a copy
+    over the file in place (cp -p, rsync --inplace) can keep inode, size and
+    mtime, and no user tool sets ctime."""
+    from core.executor import _spill_target_dir
+    spills = _spill_target_dir()
+    if not spills:
+        return "", ""
+    try:
+        st = os.stat(file_path)
+    except OSError:
+        return "", ""
+    d = os.path.join(spills, "strings-cache")
+    ident = f"{st.st_dev}-{st.st_ino}-"
+    name = f"{ident}{st.st_size}-{st.st_mtime_ns}-{st.st_ctime_ns}-n{min_length}-{'el' if wide else 'a'}.txt"
+    return os.path.join(d, name), ident
+
+
+def _keep_extraction(res: dict, path: str, ident: str) -> None:
+    """Keep a complete pass under ``path``: its spill linked, not copied, so
+    the first call's output is on disk once. Extractions of an earlier state
+    of the same file are removed, so a file holds at most one kept
+    extraction per length and encoding. Never raises."""
+    spill = str(res.get("stdout_file") or "")
+    if (res.get("success") is not True or res.get("timed_out") or res.get("exit_code")
+            or (res.get("truncated") and not os.path.isfile(spill))):
+        return
+    d, own = os.path.dirname(path), os.path.basename(path)
+    current = own.rsplit("-n", 1)[0] + "-n"
+    # One name per call: threads of one process keep at once, and a shared
+    # name would let one call copy into the other's link of its own spill.
+    tmp = f"{path}.{uuid.uuid4().hex}.tmp"
+    try:
+        os.makedirs(d, exist_ok=True)
+        for name in os.listdir(d):
+            if name.startswith(ident) and not name.startswith(current):
+                os.remove(os.path.join(d, name))
+        if spill and os.path.isfile(spill):
+            try:
+                os.link(spill, tmp)
+            except OSError as e:
+                if e.errno != errno.EXDEV:
+                    return            # nothing kept; the next call runs again
+                shutil.copyfile(spill, tmp)
+        else:
+            with open(tmp, "w", encoding="utf-8") as fh:
+                fh.write(res.get("stdout") or "")
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+
+
+def _strings_pass(file_path: str, min_length: int, wide: bool, timeout: int) -> tuple[str, dict]:
+    """``(full output, result)`` of one strings pass. Within a case the
+    output of a pass over the same file state, length and encoding is read
+    from the kept extraction instead of running again: a hunt of several
+    calls over one disk image extracts it once, and its output is stored
+    once, not once per call."""
+    path, ident = _kept_path(file_path, min_length, wide)
+    if path and os.path.isfile(path):
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                return fh.read(), {"success": True, "stdout": "", "extraction_reused": True}
+        except OSError:
+            pass
+    res = run(["strings", "-a", *(["-el"] if wide else []), "-n", str(min_length), file_path],
+              timeout=timeout)
+    if path:
+        _keep_extraction(res, path, ident)
+    return _full_output(res), res
+
+
 @mcp.tool()
 @output_safe
 def strings_grep(file_path: str, pattern: Union[str, list[str]], min_length: int = 4,
@@ -125,6 +224,8 @@ def strings_grep(file_path: str, pattern: Union[str, list[str]], min_length: int
             "matches": [],
         }
     file_path = resolved
+    if (refused := _refuse_directory(file_path, "strings_grep")):
+        return refused
 
     patterns = [pattern] if isinstance(pattern, str) else list(pattern or [])
     patterns = [p for p in patterns if str(p).strip()]
@@ -148,10 +249,8 @@ def strings_grep(file_path: str, pattern: Union[str, list[str]], min_length: int
     timeout = scale_timeout(DEFAULT_TIMEOUT, file_path)
     # Run strings twice: ASCII and UTF-16LE (memory images and Windows
     # artifacts carry many strings only as UTF-16LE)
-    ascii_result = run(["strings", "-a", "-n", str(min_length), file_path],
-                       timeout=timeout)
-    unicode_result = run(["strings", "-a", "-el", "-n", str(min_length), file_path],
-                         timeout=timeout)
+    ascii_text, ascii_result = _strings_pass(file_path, min_length, False, timeout)
+    unicode_text, unicode_result = _strings_pass(file_path, min_length, True, timeout)
     if not ascii_result["success"] and not ascii_result["stdout"] \
             and not unicode_result["success"] and not unicode_result["stdout"]:
         return ascii_result
@@ -164,8 +263,8 @@ def strings_grep(file_path: str, pattern: Union[str, list[str]], min_length: int
     ascii_matches: list[str] = []
     unicode_matches: list[str] = []
     for lines, bucket in (
-        (_full_output(ascii_result).splitlines(), ascii_matches),
-        (_full_output(unicode_result).splitlines(), unicode_matches),
+        (ascii_text.splitlines(), ascii_matches),
+        (unicode_text.splitlines(), unicode_matches),
     ):
         for line in lines:
             hit = False
@@ -188,6 +287,8 @@ def strings_grep(file_path: str, pattern: Union[str, list[str]], min_length: int
         "matches": ascii_matches + unicode_matches,
         "matches_by_pattern": {p: len(v) for p, v in by_pattern.items()},
         "timeout_seconds": timeout,
+        **({"extraction_reused": True} if ascii_result.get("extraction_reused")
+           or unicode_result.get("extraction_reused") else {}),
     }
 
 
@@ -213,6 +314,10 @@ def hexdump(file_path: str, length: int = 256, offset: int = 0) -> dict:
     length: number of bytes to dump (default 256).
     offset: byte offset to start from.
     """
+    from core.paths import resolve_path_ci
+    file_path, _ = resolve_path_ci(file_path)
+    if (refused := _refuse_directory(file_path, "hexdump")):
+        return refused
     cmd = ["hexdump", "-C", "-n", str(length), "-s", str(offset), file_path]
     return run(cmd)
 
@@ -225,18 +330,27 @@ def xxd_dump(file_path: str, length: int = 256, offset: int = 0) -> dict:
     length: number of bytes to dump.
     offset: byte offset to start from.
     """
+    from core.paths import resolve_path_ci
+    file_path, _ = resolve_path_ci(file_path)
+    if (refused := _refuse_directory(file_path, "xxd_dump")):
+        return refused
     cmd = ["xxd", "-l", str(length), "-s", str(offset), file_path]
     return run(cmd)
 
 
-@mcp.tool()
+# What exiftool reads, from its own supported-formats list: the metadata of
+# images, audio and video, PDF and Office documents, and executables.
+_EXIFTOOL_READS = [*MT.IMAGE_ANY, *MT.AUDIO_ANY, *MT.VIDEO_ANY, *MT.PDF, *MT.OFFICE, *MT.PE]
+
+
+@mcp.tool(meta={"reads": _EXIFTOOL_READS, "depth": "metadata"})
 @output_safe
 def exiftool_metadata(file_path: str) -> dict:
     """Extract EXIF and metadata from files (images, Office docs, PDFs, executables)."""
     return run(["exiftool", file_path])
 
 
-@mcp.tool()
+@mcp.tool()     # declares nothing: it takes a folder, not a file of a type (exiftool_metadata is the file reader)
 @output_safe
 def exiftool_batch(directory: str, recursive: bool = True) -> dict:
     """Extract EXIF metadata from all files in a directory."""
@@ -254,7 +368,7 @@ def stat_file(file_path: str) -> dict:
     return run(["stat", file_path])
 
 
-@mcp.tool()
+@mcp.tool(meta={"reads": list(MT.PE)})      # FLOSS: PE files (its documented input)
 @output_safe
 def floss_extract(
     file_path: str,
@@ -272,6 +386,8 @@ def floss_extract(
     """
     if output_path:
         assert_output_safe(output_path)
+    if (refused := _refuse_directory(file_path, "floss_extract")):
+        return refused
     binary = shutil.which("floss")
     if not binary:
         return {"success": False, "error":
@@ -332,6 +448,8 @@ def read_text(
     import re
     from core.paths import resolve_path_ci
     path, _ = resolve_path_ci(os.path.expanduser(file_path))
+    if (refused := _refuse_directory(path, "read_text")):
+        return refused
     if not os.path.isfile(path):
         return {"success": False, "error": f"not a file: {file_path}"}
     size = os.path.getsize(path)

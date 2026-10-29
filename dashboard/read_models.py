@@ -28,6 +28,8 @@ import json
 import os
 from pathlib import Path
 import re
+import threading
+import time
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import quote
@@ -94,13 +96,12 @@ def load_task_store(case_dir: str) -> dict:
     # (or edited by a dashboard/CLI version that predates the write-side
     # sync) with nothing to otherwise trigger a sync — without it, such a
     # case shows "No investigation questions" forever. It must be skipped
-    # while a run is active, though: every Overview/Questions poll used to
-    # call this unconditionally, so a live run's own incremental engine
+    # while a run is active, though: a live run's own incremental engine
     # (core/incremental.py, which reconciles the same file on its own
-    # writer path) and a viewer's background poll could both write
-    # investigation_tasks.json at once. A live
-    # run already keeps the store in sync itself, so a read-triggered
-    # reconcile has nothing to add there and only adds a race.
+    # writer path) and a viewer's background poll would both write
+    # investigation_tasks.json at once. A live run already keeps the store
+    # in sync itself, so a read-triggered reconcile has nothing to add there
+    # and only adds a race.
     try:
         if not run_process_alive(case_dir):
             from core.investigation_tasks import reconcile_case_md
@@ -132,6 +133,13 @@ def _node_brief(n: dict) -> dict:
             e.get("call_id") for e in (n.get("evidence") or [])
             if isinstance(e, dict) and e.get("call_id") is not None
         }),
+        # The lineage-by-wiring fields the pre-report check writes on the node.
+        "located_call_ids": [int(c) for c in (n.get("located_call_ids") or []) if c],
+        "citation_status": n.get("citation_status") or None,
+        # A conclusion's basis and the tier it asked for, and what bounded it.
+        "basis_ids": [str(b) for b in (n.get("basis_ids") or [])],
+        "requested_confidence": (n.get("requested_confidence") or "").upper() or None,
+        "tier_bound": n.get("tier_bound") or None,
     }
 
 
@@ -150,22 +158,53 @@ def _narrative_summaries(case_dir) -> dict[str, str]:
         return {}
 
 
-def derive_task_answer(task: dict, graph: dict) -> dict:
+def derive_task_answer(task: dict, graph: dict, questions: list[str] | None = None) -> dict:
     """Project a human-readable answer for one task from the claim graph.
 
     Thin dashboard view over ``core.answer_synthesis.answer_for_task`` —
-    the report's answers section reads the same function, so the analyst
-    sees one answer everywhere. Never stored — see module docstring.
+    the report's answers section reads the same function, with the same
+    case questions (``questions``, core.answer_synthesis.competing_questions),
+    so the analyst sees one answer everywhere. Never stored — see module
+    docstring.
     """
     from core.answer_synthesis import answer_for_task, cached_answer_text, scaffold_fingerprint
-    core = answer_for_task(task, graph, _narrative_summaries(graph.get("_case_dir")))
+    core = answer_for_task(task, graph, _narrative_summaries(graph.get("_case_dir")),
+                           questions=questions)
     case_dir = graph.get("_case_dir")
-    if core.get("has_answer") and case_dir:
+    nodes = graph.get("nodes") or {}
+    composed_fields: dict = {}
+    if case_dir:
+        # The composed answer when its sheet matches (a file read, never a
+        # call and never a re-check); the scaffold otherwise, as today.
+        try:
+            from core.answer_synthesis import (answer_sheet, cached_composed, compose_on, composed_verdict,
+                                               lead_tier, sheet_fingerprint)
+            if compose_on():
+                from core.case_config import get_report_language
+                # The report's language: the fingerprint carries it.
+                sheet = answer_sheet(task, graph, questions, language=get_report_language(case_dir),
+                                     case_dir=case_dir)
+                hit = cached_composed(case_dir, task.get("id") or "", sheet_fingerprint(sheet, graph)) \
+                    if sheet["beliefs"] else None
+                if hit:
+                    cited = [c for s in hit["sentences"] for c in s.get("ids") or []
+                             if not c.startswith(("p", "w", "v"))]
+                    core["text"] = hit["text"]
+                    core["has_answer"] = True
+                    core["confidence"] = lead_tier(hit["sentences"], graph)
+                    core["verdict"] = composed_verdict(hit["sentences"], sheet)
+                    first = [nodes[c] for c in dict.fromkeys(cited) if c in nodes]
+                    core["supporting"] = first + [n for n in core["supporting"] if n not in first]
+                    composed_fields = {"composed": True,
+                                       "citations": [{"sentence": s["text"], "ids": list(s["ids"])}
+                                                     for s in hit["sentences"]]}
+        except Exception:  # noqa: BLE001 - the scaffold stands
+            composed_fields = {}
+    if core.get("has_answer") and case_dir and not composed_fields:
         cached = cached_answer_text(case_dir, task.get("id") or "",
                                     scaffold_fingerprint(core))
         if cached:
             core["text"] = cached
-    nodes = graph.get("nodes") or {}
     rel_ids = {n.get("id") for n in core["supporting"]}
     # Conflicts that touch any related claim (open conflicts only).
     conflicts = []
@@ -199,10 +238,13 @@ def derive_task_answer(task: dict, graph: dict) -> dict:
         "supporting": supporting,
         "conflicts": conflicts,
         "missing_claim_ids": core["missing_claim_ids"],
+        # A composed answer's flag and its per-sentence citations, for a
+        # later card change (none on the scaffold).
+        **composed_fields,
     }
 
 
-def task_projection(task: dict, graph: dict) -> dict:
+def task_projection(task: dict, graph: dict, questions: list[str] | None = None) -> dict:
     """One investigator-facing question card."""
     status = task.get("status") or "open"
     view = STATUS_VIEW.get(status) or {
@@ -221,7 +263,7 @@ def task_projection(task: dict, graph: dict) -> dict:
         "bucket": view["bucket"],
         "updated_at": task.get("updated_at"),
         "created_at": task.get("created_at"),
-        "answer": derive_task_answer(task, graph),
+        "answer": derive_task_answer(task, graph, questions),
     }
 
 
@@ -241,7 +283,9 @@ def questions_projection(case_dir: str) -> dict:
             pass
     graph = load_claim_graph(case_dir)
     graph["_case_dir"] = case_dir           # lets answers name F-ids
-    tasks = [task_projection(t, graph)
+    from core.answer_synthesis import competing_questions
+    questions = competing_questions(store.get("tasks") or [])
+    tasks = [task_projection(t, graph, questions)
              for t in (store.get("tasks") or [])]
     progress = {"answered": 0, "partial": 0, "open": 0, "dropped": 0}
     for t in tasks:
@@ -324,6 +368,7 @@ def _trace_digest(path: str) -> dict:
     cached = _trace_cache.get(path)
     if cached and cached[0] == mtime:
         return cached[1]
+    from core.execution_log import PROSE_NARRATION_KINDS
     data = _read_json(path)
     entries = (data or {}).get("entries") or []
     findings = []
@@ -346,7 +391,7 @@ def _trace_digest(path: str) -> dict:
                 "ts": e.get("ts"),
                 "call_id": e.get("call_id"),
             })
-        elif t == "investigation_narration":
+        elif t == "investigation_narration" and (e.get("kind") or "") in PROSE_NARRATION_KINDS:
             content = (e.get("content") or "").strip()
             if content:
                 last_narration = content
@@ -470,12 +515,31 @@ def activity_projection(case_dir: str, *, finding_limit: int = 5,
     # Start/Stop pill's own "run finished" state — and don't get the
     # error-styled banner; every other reason is an abnormal stop the
     # operator needs to see explained.
-    if not busy and stopped_reason not in ("", "running", "finished",
-                                           "closed_out"):
+    finish_status = str(status.get("finish_status") or "")
+    try:
+        from core.investigation_exit import FINISH_STATUSES, STOPPED_UNDECIDED
+        undecided_end = finish_status == STOPPED_UNDECIDED or (
+            bool(finish_status) and finish_status not in FINISH_STATUSES
+            and finish_status not in ("error", "interrupted"))
+    except Exception:  # noqa: BLE001
+        undecided_end = False
+    if not busy and (stopped_reason not in ("", "running", "finished", "closed_out") or undecided_end):
+        detail = ""
+        if undecided_end:
+            # The run ended with content classes undecided: said as a stop,
+            # with the count per host, whatever the loop's own stop word.
+            und = (status.get("coverage_disclosure") or {}).get("evidence_disposition") or {}
+            by_host = und.get("undecided_by_host") or {}
+            detail = (f"{und.get('undecided_classes') or sum(by_host.values())} content class(es) with neither a "
+                      "read nor a reason" + (": " + ", ".join(f"{h or 'no host'} {n}" for h, n in list(by_host.items())[:8])
+                                              if by_host else "")
+                      + ". Resume to continue, or decide them from the Coverage tab's list.")
         last_stop = {
-            "reason": stopped_reason,
-            "finish_status": str(status.get("finish_status") or ""),
-            "error": str(status.get("error") or ""),
+            "reason": "undecided_evidence" if undecided_end and stopped_reason in ("", "finished", "closed_out",
+                                                                                   "finish_deferred", "quiet")
+            else stopped_reason,
+            "finish_status": finish_status,
+            "error": str(status.get("error") or "") or detail,
             "updated_at": status.get("updated_at"),
         }
     elif not busy and stopped_reason == "running" and status.get("pid"):
@@ -496,6 +560,9 @@ def activity_projection(case_dir: str, *, finding_limit: int = 5,
         "current_tool": current_tool if busy else "",
         "tool_running_seconds": tool_running_seconds,
         "logs_stale": logs_stale,
+        # Model calls have been failing longer than ATLAS_ESCAPE_ALERT_SECONDS;
+        # the activity text says what the escape does next.
+        "escape_alert": bool(busy and status.get("escape_alert")),
         "last_stop": last_stop,
         "trace": rel,
         "trace_entries": digest.get("entry_count") or 0,
@@ -534,6 +601,196 @@ def evidence_summary(case_dir: str) -> dict:
     }
 
 
+# ── Coverage: what was read, left with a reason, or is still open ─────────────
+
+_coverage_cache: dict[str, tuple[tuple, dict]] = {}
+# The extracted outputs are computed from the trace (extracted_outputs reads
+# the whole document), so they are kept apart from the ledger part: read
+# again at most once per interval while the trace or the ledger moves (a
+# live run rewrites both at every flush), by one request at a time per case
+# (the others wait for its result). The ledger part is cheap and follows
+# every ledger write. The interval bounds a reader's cost; it never bounds
+# the run.
+_extracted_cache: dict[str, dict] = {}
+_extracted_locks: dict[str, threading.Lock] = {}
+_extracted_locks_guard = threading.Lock()
+COVERAGE_EXTRACT_INTERVAL = 30.0   # seconds between two readings of a moving trace
+_monotonic = time.monotonic
+
+# The ledger's states in the four words the Coverage tab uses; the ledger's
+# own words never reach the page.
+_COVERAGE_STATE = {"read": "read", "partial": "partial", "walked": "partial", "swept": "partial",
+                   "left": "left", "pending": "open", "relevant": "open", "parsed": "parsed"}
+_COVERAGE_ZERO = {"read": 0, "partial": 0, "parsed": 0, "left": 0, "open": 0}
+
+
+def _coverage_unit(u: dict) -> dict:
+    """One ledger unit (an item or a content class) as the page shows it:
+    the state, a note naming the next step (undecided, refused: a leave
+    of it was refused) or how it was partly read (walked: the lists only;
+    swept: a search for the known indicators), and a left unit's kind,
+    reason and proof calls. The ledger's own prose stays here."""
+    raw = str(u.get("state") or "pending")
+    out = {"state": _COVERAGE_STATE.get(raw, "open"), "note": "", "reason_kind": "", "reason": "",
+           "proof": [str(p) for p in (u.get("proof_call_ids") or []) if p][:6]}
+    if out["state"] == "left":
+        out["reason_kind"] = str(u.get("reason_kind") or "")
+        out["reason"] = str(u.get("reason") or "")
+    elif out["state"] == "open":
+        # An undecided class (pending or relevant alike: no read credited,
+        # no reason recorded), as the end label counts it; never shown as
+        # left.
+        out["note"] = "refused" if u.get("triage_refused") else "undecided"
+    elif raw in ("walked", "swept"):
+        out["note"] = raw
+    elif raw == "parsed":
+        # Open, with its next step: query the output that holds its rows.
+        out["note"] = str((u.get("outputs") or [""])[0])
+    return out
+
+
+def _trace_document_mtime(case_dir: str) -> float:
+    try:
+        from core.execution_log import case_trace_document
+        doc = case_trace_document(case_dir)
+        return os.path.getmtime(doc) if doc else 0.0
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
+def _extracted_cached(case_dir: str, key: tuple) -> tuple[list[dict], float]:
+    """The extracted outputs under ``key`` (ledger mtime, trace mtime): the
+    cached ones while the key stands or the interval has not passed since
+    they were computed, else computed once for every request waiting on
+    the case. Returns them with the moment they were computed."""
+    def fresh(entry: dict | None) -> bool:
+        return bool(entry) and (entry["key"] == key or _monotonic() - entry["at"] < COVERAGE_EXTRACT_INTERVAL)
+    entry = _extracted_cache.get(case_dir)
+    if fresh(entry):
+        return entry["outputs"], entry["at"]
+    with _extracted_locks_guard:
+        lock = _extracted_locks.setdefault(case_dir, threading.Lock())
+    with lock:
+        entry = _extracted_cache.get(case_dir)
+        if fresh(entry):
+            return entry["outputs"], entry["at"]
+        from core.coverage_ledger import extracted_outputs
+        try:
+            outputs = extracted_outputs(case_dir)
+        except Exception:  # noqa: BLE001
+            outputs = []
+        at = _monotonic()
+        if len(_extracted_cache) > 64:
+            _extracted_cache.clear()
+        _extracted_cache[case_dir] = {"key": key, "at": at, "outputs": outputs}
+        return outputs, at
+
+
+def coverage(case_dir: str) -> dict:
+    """The Coverage tab: each evidence item with its content classes in
+    four plain states (read, partly read, left with a reason, open), the
+    extracted outputs' file classes the same way, and the counts behind the
+    header. Read from the coverage ledger and the trace, never written.
+    The ledger part is recomputed on every ledger write; the extracted
+    outputs follow the trace at most once per COVERAGE_EXTRACT_INTERVAL
+    (_extracted_cached).
+
+    ``ledger`` False: the case has no ledger yet. ``disposition`` False: the
+    ledger has no class level (a run from before it, or the switch off), so
+    an item stands as the run left it: blocked is left, anything else open.
+    """
+    path = os.path.join(case_dir, ".atlas", "coverage_ledger.json")
+    try:
+        ledger_mtime = os.path.getmtime(path)
+    except OSError:
+        return {"ledger": False, "disposition": False, "items": [], "extracted": [],
+                "summary": {**_COVERAGE_ZERO, "total": 0}}
+    outputs, stamp = _extracted_cached(case_dir, (ledger_mtime, _trace_document_mtime(case_dir)))
+    key = (ledger_mtime, stamp)
+    cached = _coverage_cache.get(case_dir)
+    if cached and cached[0] == key:
+        return cached[1]
+    from core.coverage_ledger import load_ledger
+    ledger = load_ledger(case_dir)
+    disposition = ledger.get("classes") is not None
+    try:
+        from core.evidence_depth import class_tiers
+        tiers = class_tiers(case_dir, ledger) if disposition else {}
+    except Exception:  # noqa: BLE001
+        tiers = {}
+    by_item: dict[str, list[dict]] = {}
+    for c in (ledger.get("classes") or {}).values():
+        if isinstance(c, dict):
+            by_item.setdefault(str(c.get("item") or ""), []).append(c)
+    summary = dict(_COVERAGE_ZERO)
+    items: list[dict] = []
+    for iid, it in (ledger.get("items") or {}).items():
+        if not isinstance(it, dict):
+            continue
+        if disposition:
+            unit = _coverage_unit(it)
+        elif it.get("status") == "blocked":
+            unit = {**_coverage_unit({"state": "left"}), "reason": str(it.get("blocked_reason") or "")}
+        else:
+            unit = {**_coverage_unit({"state": "pending"}), "note": ""}
+        classes = [{"label": str(c.get("label") or ""), "files": int(c.get("files") or 0),
+                    "tier": tiers.get(str(c.get("id")), ""), **_coverage_unit(c)}
+                   for c in sorted(by_item.get(str(iid), []), key=lambda c: str(c.get("label") or ""))]
+        counts = dict(_COVERAGE_ZERO)
+        for c in classes or [unit]:
+            counts[c["state"]] += 1
+        for s in counts:
+            summary[s] += counts[s]
+        path = str(it.get("path") or iid)
+        items.append({"id": str(iid), "path": path, "kind": str(it.get("kind") or ""),
+                      "host": str(it.get("host") or ""),
+                      # The lane the page shows the item under: its host, else
+                      # the item's own file name, never "no host".
+                      "lane": str(it.get("host") or "") or path.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1],
+                      # An item the ledger holds no class for stands in the
+                      # depth count by itself as one cheap class.
+                      "tier": "" if classes else "cheap",
+                      **unit, "counts": counts, "classes": classes})
+    items.sort(key=lambda i: (i["host"].casefold(), i["path"]))
+    extracted: list[dict] = []
+    for o in outputs:
+        # ``left``: the classes a code fact leaves, when the ledger module gives them.
+        left = o.get("left") or {}
+        sample = o.get("sample") or {}
+        blocked = str(o.get("blocked") or "")
+        classes = []
+        for label, (n, m) in sorted((o.get("classes") or {}).items(), key=lambda kv: (-kv[1][1], kv[0])):
+            c = {"label": str(label), "read": int(n), "total": int(m), "state": "open", "note": "",
+                 "detail": "", "reason_kind": "", "reason": "", "proof": []}
+            if label in left:
+                c.update(state="left", reason_kind=str((left[label] or {}).get("kind") or ""),
+                         reason=str((left[label] or {}).get("basis") or ""))
+            elif blocked and not n:
+                c.update(state="left", reason_kind="blocked", reason=blocked)
+            elif n >= m:
+                c["state"] = "read"
+            elif n:
+                c["state"] = "partial"
+            elif label in sample:
+                c.update(note="file", detail=str(sample[label]))
+            else:
+                c["note"] = "failed"
+            classes.append(c)
+        counts = dict(_COVERAGE_ZERO)
+        for c in classes:
+            counts[c["state"]] += 1
+        for s in counts:
+            summary[s] += counts[s]
+        extracted.append({"path": str(o.get("path") or ""), "made": str(o.get("made") or ""),
+                          "counts": counts, "classes": classes})
+    result = {"ledger": True, "disposition": disposition, "items": items, "extracted": extracted,
+              "summary": {**summary, "total": sum(summary.values())}}
+    if len(_coverage_cache) > 64:
+        _coverage_cache.clear()
+    _coverage_cache[case_dir] = (key, result)
+    return result
+
+
 def timeline_plugin_active() -> bool:
     """True when the timeline_builder plugin is enabled and importable.
 
@@ -564,129 +821,25 @@ def timeline_template_tsv() -> str | None:
     return "\t".join(TSV_COLUMNS) + "\n"
 
 
-# Deliverable kinds we ship from reports/ (not process/audit artifacts).
-_REPORT_SKIP_NAMES = frozenset({
-    "claim_snapshot.json",
-    "investigation_fingerprint.json",
-})
-_REPORT_SKIP_SUFFIXES = (
-    "_trace.md", "_trace.json", ".before_trim",
-)
-
-
-def _is_report_deliverable(name: str) -> bool:
-    """Markdown reports + timeline TSVs/CSVs (+ small timeline README)."""
-    if name.startswith(".") or name in _REPORT_SKIP_NAMES:
-        return False
-    if any(name.endswith(s) for s in _REPORT_SKIP_SUFFIXES):
-        return False
-    low = name.lower()
-    if low.endswith(".md"):
-        return True
-    if "timeline" in low and low.endswith((".tsv", ".csv", ".txt")):
-        return True
-    return False
-
-
-def _file_kind(name: str) -> str:
-    low = name.lower()
-    if "timeline" in low and low.endswith((".tsv", ".csv")):
-        return "timeline"
-    if "timeline" in low and low.endswith(".txt"):
-        return "timeline_readme"
-    if low.endswith(".md"):
-        return "report"
-    return "other"
-
-
-def _report_snapshot_dir(case_dir: str) -> str | None:
-    """The rerun snapshot ``reports/latest`` names, when the case has one.
-
-    A persisting ``atlas rerun`` freezes the report pack into
-    ``reports/initial_report/`` or ``reports/rerun_NNNN/`` and points
-    ``reports/latest`` at the newest one (core.report_snapshots). Only a
-    directory that resolves inside the case's own reports/ counts: a link
-    aimed anywhere else, or one that cannot be resolved, leaves reports/ as
-    the only source.
-    """
-    reports = os.path.realpath(os.path.join(case_dir, "reports"))
-    try:
-        from core.report_snapshots import resolve_latest_report_dir
-        snap = os.path.realpath(resolve_latest_report_dir(case_dir))
-    except (OSError, RuntimeError):  # RuntimeError: a symlink loop, Python < 3.13
-        return None
-    if not snap.startswith(reports + os.sep) or not os.path.isdir(snap):
-        return None
-    return snap
-
-
 def list_report_files(case_dir: str) -> list[dict]:
-    """Case-scoped report deliverables (markdown + timeline files).
-
-    reports/ first, then the files of the newest rerun snapshot that reports/
-    does not hold under the same name. Promoting a snapshot moves every
-    deliverable out of reports/, so a file found there was written after the
-    snapshot was taken and supersedes the snapshot's copy of that name: a
-    rerun that changed no investigation state regenerates its report in
-    reports/ and leaves the snapshot as it was. Names are therefore unique,
-    which is what lets the export route find a file by name in this same
-    listing. A file that resolves outside the case's reports/ is not listed.
-    """
-    reports = os.path.join(case_dir, "reports")
-    real_reports = os.path.realpath(reports)
-    sources = [(reports, "")]
-    snap = _report_snapshot_dir(case_dir)
-    if snap is not None:
-        sources.append((snap, os.path.relpath(snap, real_reports)))
+    """Case-scoped report deliverables (core.report_snapshots.report_files),
+    each with the URL the dashboard serves it under."""
+    from core.report_snapshots import report_files
     case_name = os.path.basename(case_dir)
-    out: list[dict] = []
-    seen: set[str] = set()
-    for d, sub in sources:
-        try:
-            names = sorted(os.listdir(d))
-        except OSError:
-            continue
-        for fn in names:
-            if fn in seen or not _is_report_deliverable(fn):
-                continue
-            p = os.path.join(d, fn)
-            real = os.path.realpath(p)
-            if not real.startswith(real_reports + os.sep) \
-                    or not os.path.isfile(real):
-                continue
-            try:
-                st = os.stat(p)
-            except OSError:
-                continue
-            seen.add(fn)
-            rel = f"{sub}/{fn}" if sub else fn
-            out.append({
-                "name": fn,
-                # A URL: a name holding "#" or "?" must not end the path.
-                "path": quote(f"/{case_name}/reports/{rel}"),
-                "kind": _file_kind(fn),
-                "size": st.st_size,
-                "mtime": st.st_mtime,
-                "abs_path": p,  # server-side only; stripped before JSON responses
-            })
+    out = []
+    for f in report_files(case_dir):
+        entry = {k: v for k, v in f.items() if k != "rel"}
+        # A URL: a name holding "#" or "?" must not end the path.
+        entry["path"] = quote(f"/{case_name}/reports/{f['rel']}")
+        out.append(entry)
     return out
 
 
 def _report_rank(f: dict, reports: str) -> tuple:
-    """Order for the case's default report, best last.
-
-    The case's main report before notes, host sections and the rerun change
-    history; then the working copy in ``reports`` before a snapshot's file;
-    then the estate report before a single-scope one; then the newest.
-    ``reports`` is the same join list_report_files builds its root entries
-    from.
-    """
-    from core.report_snapshots import RESERVED_FILES
-    low = f["name"].lower()
-    main = (low.endswith("_report.md") and not low.startswith("host_")
-            and f["name"] not in RESERVED_FILES)
-    return (main, os.path.dirname(f["abs_path"]) == reports,
-            low.endswith("estate_report.md"), f.get("mtime") or 0)
+    """Order for the case's default report, best last (one rule with
+    `atlas report`: core.report_snapshots.report_rank)."""
+    from core.report_snapshots import report_rank
+    return report_rank(f, reports)
 
 
 def build_report_bundle_zip(case_dir: str) -> bytes | None:
@@ -789,7 +942,21 @@ def report_status(case_dir: str) -> dict:
 
 _ioc_cache: dict[str, tuple[float, dict]] = {}
 
-_EMPTY_IOC_SUMMARY = {"total": 0, "beliefs_considered": 0, "groups": [], "top": []}
+_EMPTY_IOC_SUMMARY = {"total": 0, "beliefs_considered": 0, "groups": [], "others": [],
+                      "review_total": 0, "affected_total": 0, "context_total": 0, "top": []}
+
+
+def ioc_groups(catalog: dict) -> list[tuple[str, list, bool]]:
+    """The catalog's groups in deliverable order, each marked whether its
+    rows count as indicators. Only the typed rows do (the catalog's total,
+    the number the report and the IOC export print); the case's own assets,
+    the rows to review before use and the values named but not seen in this
+    evidence are listed beside them and counted apart, so every page shows
+    one indicator count."""
+    from core.ioc_catalog import grouped
+    typed = {title for title, _rows in grouped(
+        {**catalog, "affected_assets": [], "review": [], "context": []})}
+    return [(title, rows, title in typed) for title, rows in grouped(catalog)]
 
 
 def ioc_summary(case_dir: str, *, top: int = 6) -> dict:
@@ -815,20 +982,29 @@ def ioc_summary(case_dir: str, *, top: int = 6) -> dict:
     if cached and cached[0] == mtime:
         return cached[1]
     try:
-        from core.ioc_catalog import build_catalog, grouped
+        from core.ioc_catalog import build_catalog
         catalog = build_catalog(case_dir)
     except Exception:  # noqa: BLE001
         return dict(_EMPTY_IOC_SUMMARY)
+    groups = ioc_groups(catalog)
     summary = {
         "total": catalog.get("total") or 0,
         "beliefs_considered": catalog.get("beliefs_considered") or 0,
-        "groups": [{"title": title, "count": len(rows)}
-                   for title, rows in grouped(catalog)],
+        # The groups that make up the total, and the ones listed beside it.
+        "groups": [{"title": title, "count": len(rows)} for title, rows, counted in groups if counted],
+        "others": [{"title": title, "count": len(rows)} for title, rows, counted in groups if not counted],
+        "review_total": catalog.get("review_total") or 0,
+        "affected_total": catalog.get("affected_total") or 0,
+        "context_total": catalog.get("context_total") or 0,
+        # The top rows: those a located sighting stands behind when the
+        # catalogue is sighted (an unchecked row is not a headline).
         "top": [{"value": r.get("value"),
                  "explanation": r.get("explanation") or "",
                  "confidence": r.get("confidence"),
                  "hosts": r.get("hosts") or []}
-                for r in (catalog.get("iocs") or [])[:top]],
+                for r in [r for r in (catalog.get("iocs") or [])
+                          if not catalog.get("sighted")
+                          or r.get("standing") in ("cited", "same_host", "elsewhere")][:top]],
     }
     if len(_ioc_cache) > 64:
         _ioc_cache.clear()
@@ -1027,6 +1203,7 @@ def _version_chains(nodes: dict[str, dict]) -> dict[str, dict]:
 def evidence_board(case_dir: str) -> dict:
     """The claim graph plus what Case Findings needs to arrange it:
     a host for every belief (its own field, else the hosts it names), the
+    first moment its statement states (the Time layout's order), the
     version chains, an attention flag, and the counts for the band.
 
     Cached on the graph's mtime: hostname recognition runs the entity
@@ -1041,6 +1218,7 @@ def evidence_board(case_dir: str) -> dict:
     cached = _board_cache.get(case_dir)
     if cached and cached[0] == mtime:
         return cached[1]
+    from core.incident_window import leading_time
     graph = load_claim_graph(case_dir)
     nodes = {nid: n for nid, n in (graph.get("nodes") or {}).items()
              if isinstance(n, dict)}
@@ -1067,6 +1245,7 @@ def evidence_board(case_dir: str) -> dict:
         board[nid] = {
             "host": hlist[0] if len(hlist) == 1 else "",
             "hosts": hlist,
+            "t": leading_time(n.get("statement") or ""),
             "version": chain,
             "gone": gone,
             "attention": attention and not gone,
@@ -1146,7 +1325,7 @@ def ioc_catalog_with_context(case_dir: str | os.PathLike) -> dict:
     expanded: the beliefs it came from in their own words, and where it has
     and has not been searched for. Never raises: an empty context is fine,
     a broken tab is not."""
-    from core.ioc_catalog import build_catalog, grouped
+    from core.ioc_catalog import build_catalog
     catalog = build_catalog(case_dir)
     try:
         from core.claim_graph import load_graph
@@ -1159,7 +1338,10 @@ def ioc_catalog_with_context(case_dir: str | os.PathLike) -> dict:
     except Exception:  # noqa: BLE001
         pivots = {}
     for row in (list(catalog.get("iocs") or []) + list(catalog.get("affected_assets") or [])
-                + list(catalog.get("review") or [])):
+                + list(catalog.get("review") or []) + list(catalog.get("context") or [])):
+        if row.get("sightings"):
+            from core.ioc_catalog import _seen_cell
+            row["seen"] = _seen_cell(row)
         claims = []
         for cid in (row.get("claim_ids") or [])[:6]:
             n = nodes.get(cid)
@@ -1174,5 +1356,11 @@ def ioc_catalog_with_context(case_dir: str | os.PathLike) -> dict:
         targets = (hit or {}).get("targets") or {}
         row["searched"] = sorted(t for t, st in targets.items() if st == "searched")
         row["pending"] = sorted(t for t, st in targets.items() if st == "pending")
-    catalog["groups"] = [{"title": title, "iocs": rows} for title, rows in grouped(catalog)]
+        # The estate count: rows per table, and the tables a call showed
+        # them on (ATLAS_ESTATE_COUNT).
+        row["counted"] = {src: int(c.get("full") or c.get("name") or 0)
+                          for src, c in ((hit or {}).get("counts") or {}).items()}
+        row["shown_on"] = sorted(((hit or {}).get("shown") or {}).keys())
+    catalog["groups"] = [{"title": title, "iocs": rows, "counted": counted}
+                         for title, rows, counted in ioc_groups(catalog)]
     return catalog

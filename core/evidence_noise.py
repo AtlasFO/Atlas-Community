@@ -56,6 +56,37 @@ def is_tool_metadata_text(text: str) -> bool:
     return False
 
 
+def envelope_rows(text: str) -> list[str] | None:
+    """The content rows of Atlas's own result envelope — the JSON object a
+    Python tool returns, with its ``success`` key — as strings: the first
+    list it carries under lines, rows, matches, hits, entries, results or
+    records (a row that is an object prints its values). None when ``text``
+    is not such an envelope; an empty list for an envelope with no rows or
+    one cut short (an excerpt). The envelope is Atlas's writing, never a
+    record of the evidence: a reader that cites it reads the rows inside."""
+    import json
+    s = (text or "").lstrip()
+    if not s.startswith("{") or '"success"' not in s[:200]:
+        return None
+    try:
+        obj = json.loads(s)
+    except ValueError:
+        return []
+    if not isinstance(obj, dict) or "success" not in obj:
+        return None
+    for key in ("lines", "rows", "matches", "hits", "entries", "results", "records"):
+        value = obj.get(key)
+        if isinstance(value, list):
+            out = []
+            for item in value:
+                if isinstance(item, dict):
+                    out.append("\t".join(str(v) for v in item.values()))
+                else:
+                    out.append(str(item))
+            return [r for r in out if r.strip()]
+    return []
+
+
 def is_weak_timeline_event_text(text: str) -> bool:
     """True if text should not appear as a curated Attack Timeline Event."""
     if is_tool_metadata_text(text):

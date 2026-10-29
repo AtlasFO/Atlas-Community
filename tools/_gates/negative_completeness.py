@@ -274,12 +274,137 @@ def _absence_on_unavailable_program(ctx) -> Optional[dict]:
     }
 
 
+# Grammar and absence words left out of an absence sentence's class words
+# (English and German function words; no artefact or case vocabulary).
+_CLASS_STOP = frozenset((
+    "no", "not", "none", "never", "nothing", "any", "was", "were", "is", "are", "be", "been", "the", "a", "an",
+    "of", "on", "in", "at", "for", "from", "to", "by", "with", "and", "or", "that", "this", "these", "those",
+    "found", "present", "seen", "observed", "detected", "recorded", "exists", "exist", "existed", "absent",
+    "missing", "there", "it", "its", "has", "have", "had", "evidence", "host", "system", "kein", "keine",
+    "nicht", "nie", "auf", "im", "in", "der", "die", "das", "gefunden", "vorhanden", "beobachtet"))
+_CLASS_WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9_.$-]{2,}")
+# A statement of what was read, not of the host: the gate's own remedy.
+_READ_SCOPE_RE = re.compile(r"(?i)\b(?:exports?|rows|tables?|timeline)\s+searched\b|\bin the (?:rows|exports?) "
+                            r"(?:read|searched)\b")
+
+
+def _profile_gate_on() -> bool:
+    from core.envfile import env_flag
+    return env_flag("ATLAS_ABSENCE_GATE_V2")
+
+
+def _args_text(entry: dict) -> str:
+    args = entry.get("args")
+    return args if isinstance(args, str) else ""
+
+
+def _profile_shortfall(ctx, sid: str, rx, hits: list, blob: str) -> Optional[str]:
+    """None when a hit is credited (a read of the log itself, an export whose
+    profile carries the channel and the claim's event ids, or an export with
+    no profile row, with an advisory); else the refusal sentence."""
+    from core.envfile import env_flag
+    if not env_flag("ATLAS_ABSENCE_GATE_V2") or not str(sid).startswith(("security", "sessions")):
+        return None
+    case = _case_dir(ctx)
+    if not case:
+        return None
+    from core.export_profile import claim_event_ids, export_covers
+    ids = claim_event_ids(blob)
+    shortfalls = []
+    for e in hits:
+        ok, why = export_covers(case, e, rx, ids)
+        if ok:
+            return None
+        if ok is None:
+            notes = getattr(ctx, "notes", None)
+            if isinstance(notes, dict):
+                notes["export_profile_advisory"] = why
+            return None
+        shortfalls.append(why)
+    from core.contents_index import handle_clause
+    return ("The searches cited read " + "; ".join(shortfalls) + ". Read the log itself (" + handle_clause()
+            + "), or state the absence as what was read ('not in the <export> rows searched'), not as absent "
+              "from the host.")
+
+
+def _index_absence(ctx) -> Optional[dict]:
+    """An absence about a host is checked against the case's own index
+    (the contents index): when the index lists files on that host that the
+    sentence's class words name and that no call read, the claim is refused
+    with the count, an example and a handle (ATLAS_ABSENCE_GATE_V2)."""
+    from core.envfile import env_flag
+    if not env_flag("ATLAS_ABSENCE_GATE_V2"):
+        return None
+    case = _case_dir(ctx)
+    if not case:
+        return None
+    try:
+        from core.contents_index import class_absence_candidates, index_on
+        from core.forensic_citation import host_mentioned, known_case_hosts
+    except Exception:  # noqa: BLE001
+        return None
+    if not index_on():
+        return None
+    desc = ctx.description or ""
+    if _READ_SCOPE_RE.search(desc):
+        return None
+    hosts = list(dict.fromkeys(known_case_hosts(case)))
+    from .universal_from_truncated import _P_ABSENCE_RE, analysts_words
+    for written in re.split(r"(?<=[.;!?])\s+", " ".join(desc.split())):
+        # The analyst's own claim, as the universal gate reads it: a quote, a
+        # hedge, a condition or the run's own progress states no absence.
+        sentence = analysts_words(written)
+        if not _P_ABSENCE_RE.search(sentence):
+            continue
+        named = [h for h in hosts if host_mentioned(h, sentence)]
+        if not named and getattr(ctx, "host", ""):
+            named = [ctx.host]
+        if not named:
+            continue
+        host_words = {w.casefold() for h in named for w in re.split(r"[^A-Za-z0-9]+", h) if w}
+        words = [w.strip(".-").casefold() for w in _CLASS_WORD_RE.findall(sentence)]
+        words = [w for w in dict.fromkeys(words) if w and w not in _CLASS_STOP and w not in host_words
+                 and not any(host_mentioned(h, w) for h in named)]
+        for host in named:
+            cands = class_absence_candidates(case, host, words)
+            if not cands:
+                continue
+            ex = cands[0]
+            return {
+                "success": False, "gate": "negative_completeness", "detail_gate": "index_absence",
+                "description": ctx.description, "confidence": ctx.confidence, "objected_sentences": [written],
+                "error": (f"The case's index lists {len(cands)} file(s) matching '{' '.join(words)}' on {host} "
+                          f"(for example {ex['path']}), none read. Read one ({ex['handle'] or ex['path']}) or "
+                          "state the absence as 'not in the exports searched'."),
+            }
+    return None
+
+
 def check(ctx) -> Optional[dict]:
+    """The refusal names the sentences it objects to: the finding's absence
+    sentences, unless the check named its own (core.work_order keeps the
+    rest of a refused finding on the table)."""
+    out = _check(ctx)
+    if out is not None and not out.get("objected_sentences"):
+        from .universal_from_truncated import _P_ABSENCE_RE, analysts_words, split_sentences
+        absent = [s for s in split_sentences(ctx.description or "") if _P_ABSENCE_RE.search(analysts_words(s))]
+        if absent:
+            out = {**out, "objected_sentences": absent}
+    return out
+
+
+def _check(ctx) -> Optional[dict]:
     # An absence asserted on the strength of a program that never ran is a
     # capability gap wearing a finding's clothes — any tier, any category.
     unavailable = _absence_on_unavailable_program(ctx)
     if unavailable:
         return unavailable
+
+    # An absence on a host whose listed image holds unread files the
+    # sentence names: the case's own index answers before any manifest.
+    indexed = _index_absence(ctx)
+    if indexed:
+        return indexed
 
     # Tier- and category-independent: an artifact that lives *inside* a disk
     # image cannot be declared absent while that image has never been
@@ -368,8 +493,18 @@ def check(ctx) -> Optional[dict]:
     if callable(where):
         where = where(cmds, blob)
     missing = []
+    profile_refusals: list[str] = []
     for _sid, rx, hint in required:
-        if any(rx.search(e["cmd"]) for e in cmds):
+        # What the call was asked to read: its command line and arguments
+        # (a typed tool's command line names only the tool).
+        hits = [e for e in cmds if rx.search(e["cmd"]) or (_profile_gate_on() and rx.search(_args_text(e)))]
+        if hits:
+            # A table read of an export counts for an event-log source only
+            # for the channels and event ids the export's profile shows.
+            why = _profile_shortfall(ctx, _sid, rx, hits, blob)
+            if why is None:
+                continue
+            profile_refusals.append(why)
             continue
         if _ABSENT_RE.search(blob) and rx.search(blob):
             blocked = _access_blocks_absent_escape(ctx)
@@ -377,6 +512,10 @@ def check(ctx) -> Optional[dict]:
                 return blocked
             continue
         missing.append(hint)
+    if profile_refusals and not missing:
+        return {"success": False, "gate": "negative_completeness", "detail_gate": "export_profile",
+                "description": ctx.description, "confidence": ctx.confidence,
+                "error": " ".join(profile_refusals)}
     if missing:
         return {
             "success": False,

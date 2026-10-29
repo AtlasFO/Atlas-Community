@@ -370,10 +370,12 @@ def triage(evtx_path: str, output_dir: str,
 
 
 @mcp.tool()
-def summary(jsonl_path: str, min_level: str = "low", top_n: int = 40) -> dict:
+def summary(hayabusa_jsonl_path: str, min_level: str = "low", top_n: int = 40) -> dict:
     """Summarise a JSONL that hayabusa.triage or its background job wrote,
     without scanning again: raise min_level to cut noise, or top_n to list
-    more rules. Reads only that file."""
+    more rules. Reads only that file. The parameter names hayabusa's own
+    JSONL output, so the format routing never takes any .jsonl for it."""
+    jsonl_path = hayabusa_jsonl_path
     if not os.path.isfile(jsonl_path):
         return {"success": False, "error": f"Not a file: {jsonl_path}"}
     refused = _level_error(min_level)

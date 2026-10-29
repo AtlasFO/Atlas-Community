@@ -121,7 +121,7 @@ def test_globe_endpoint_rebuilds_when_stale(server):
 def test_globe_endpoint_keeps_focused_view(server):
     # a deliberately filtered globe (atlas brain globe --case ...) is never
     # clobbered by the auto-rebuild
-    data = {"generated": "then", "mode": "full", "case": "nitroba",
+    data = {"generated": "then", "mode": "full", "case": "case-a",
             "topic": "", "nodes": [], "edges": [], "timeline": [],
             "summary": {}}
     globe_path = server["brain_root"] / "analytics/globe/brain-globe.json"
@@ -130,7 +130,7 @@ def test_globe_endpoint_keeps_focused_view(server):
     _write_note(server["brain_root"])
     status, body = _get(server["port"], "/_dashboard/api/brain/globe")
     assert status == 200
-    assert body["case"] == "nitroba" and body["nodes"] == []
+    assert body["case"] == "case-a" and body["nodes"] == []
 
 
 def test_globe_html_asset_served(server):

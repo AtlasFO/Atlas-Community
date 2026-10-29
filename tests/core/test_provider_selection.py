@@ -105,6 +105,31 @@ class TestCD_AuthPrefixBearer:
         assert seen["headers"]["Authorization"] == "Bearer sk-or-test"
 
 
+    def test_probe_sends_the_listing_header_a_vendor_requires(self, monkeypatch):
+        """Anthropic's GET /models is its native API and needs a version
+        header: the anthropic profile's [headers] carry it, other profiles
+        none, and a probe that names no profile never guesses one by host."""
+        seen = {}
+
+        def fake_get(url, headers=None, timeout=None, params=None):
+            seen["headers"], seen["params"] = headers, params
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.json.return_value = {"data": [{"id": "claude-x"}]}
+            return resp
+
+        monkeypatch.setattr("httpx.get", fake_get)
+        assert ls.probe("https://api.anthropic.com/v1", "sk-ant-test", profile_id="anthropic-compat").ok
+        assert seen["headers"]["anthropic-version"]
+        assert seen["headers"]["Authorization"] == "Bearer sk-ant-test"
+        ls.probe("https://api.anthropic.com/v1", "sk-ant-test", profile_id="anthropic")
+        assert seen["headers"]["anthropic-version"] and seen["headers"]["x-api-key"] == "sk-ant-test"
+        assert "Authorization" not in seen["headers"] and seen["params"] == {"limit": 1000}
+        ls.probe("https://openrouter.ai/api/v1", "sk-or-test", profile_id="openrouter")
+        assert "anthropic-version" not in seen["headers"] and seen["params"] is None
+        ls.probe("https://api.anthropic.com/v1", "sk-ant-test")
+        assert "anthropic-version" not in seen["headers"]
+
 class TestE_CustomAuthPrefix:
     def test_explicit_custom_prefix(self, clean_roles, monkeypatch):
         _openrouter(monkeypatch, prefix="Token ")
@@ -133,7 +158,7 @@ class TestFG_ModelProbe:
         monkeypatch.delenv("ATLAS_MODEL_CONTEXT_TOKENS", raising=False)
         mc.clear_probed_window()
 
-        def fake_fetch(*, base_url, headers, timeout=20.0):
+        def fake_fetch(*, base_url, headers, timeout=20.0, paging="none"):
             return [{"id": "openai/gpt-4o-mini", "context_length": 128000}]
 
         monkeypatch.setattr(mc, "fetch_models_payload", fake_fetch)
@@ -162,7 +187,7 @@ class TestFG_ModelProbe:
             source_field="context_length", provider="OpenRouter",
         )
 
-        def fake_fetch(*, base_url, headers, timeout=20.0):
+        def fake_fetch(*, base_url, headers, timeout=20.0, paging="none"):
             return [{"id": "openai/gpt-4o-mini", "context_length": 128000}]
 
         monkeypatch.setattr(mc, "fetch_models_payload", fake_fetch)

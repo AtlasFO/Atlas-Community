@@ -35,7 +35,9 @@ These are already the same regardless of OS, since they never go through
   a .NET 9 runtime (Microsoft publishes RHEL/Fedora packages for this
   directly — see Microsoft's own `dotnet-install` docs).
 - **Python dependencies** (`requirements.txt`/`requirements-dev.txt`) — pure
-  pip, works the same everywhere Python 3.11+ and a C toolchain exist.
+  pip (from `pypi.org`, so that and `files.pythonhosted.org` must be reachable),
+  works the same everywhere Python 3.11+ and a C toolchain exist. `python-magic`
+  needs the `libmagic` library (the `file` package brings it on Debian).
 
 ## The apt → dnf/yum mapping
 
@@ -48,7 +50,8 @@ These are already the same regardless of OS, since they never go through
 | `clamav` | `clamav` (EPEL) | Packaged, should work |
 | `libimage-exiftool-perl` | `perl-Image-ExifTool` (EPEL) | Packaged, should work |
 | `hashdeep` | `hashdeep` (EPEL) | Packaged, should work |
-| `qemu-utils` | `qemu-img` (base repos) | Packaged, should work |
+| `qemu-utils` | `qemu-img` (base repos) | Packaged, should work. The read-only raw views of VMDK, VHD, VHDX, QCOW2 and VDI containers also need a `qemu-storage-daemon` that lists a FUSE export (`qemu-storage-daemon --help`), `fusermount3` and `/dev/fuse`; without them Atlas makes a raw copy instead |
+| `gawk` | `gawk` (base repos) | Packaged, should work. `table.table_pivot` counts several tables in one pass with it; `mawk` cannot |
 | `binwalk` | `binwalk` (EPEL, sometimes stale) | Verify version |
 | `xmount` | — | **Not in EPEL** as of this writing; may need a source build |
 | `ssdeep` | `ssdeep` (EPEL) | Packaged, should work |

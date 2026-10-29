@@ -100,3 +100,20 @@ def test_every_group_that_saves_has_a_line_to_report_on():
     groups = Groups()
     groups.feed(_page())
     assert not groups.missing
+
+
+def test_test_and_save_wait_past_the_shell_timeout_and_only_test_cancels():
+    """Both provider checks wait for the server's answer instead of the
+    shell's 15 s abandon: each passes its own signal. Test connection writes
+    nothing, so it may be cancelled; Save may still write after the page
+    gave up, so it has a bound of its own and no Cancel."""
+    import re
+    html = _page()
+    probe = re.search(r"apiPost\('config/llm/probe',.*?\}, \{ signal: (\w+)\.signal \}\)", html, re.S)
+    assert probe and probe.group(1) == "TEST_ABORT"
+    assert "TEST_ABORT.abort()" in html
+    save = re.search(r"apiPost\('config/llm/save',.*?\}, \{ signal \}\)", html, re.S)
+    assert save and "saveProvider(AbortSignal.timeout(SAVE_WAIT_MS))" in html
+    cancels = re.findall(r'<button[^>]*id="(llm-[\w-]*cancel[\w-]*)"', html)
+    assert cancels == ["llm-test-cancel"]
+    assert "do not press Save again" in html

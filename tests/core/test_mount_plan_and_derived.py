@@ -295,10 +295,10 @@ def test_hash_preflight_carries_the_images_acquisition_digest(monkeypatch):
     monkeypatch.setattr(hashing, "verify_evidence_hash", lambda p: {
         "success": True, "full_hash": True, "md5": "a" * 32,
         "acquisition_hashes": {"md5": "b" * 32}, "acquisition_verified": True,
-        "media_size_bytes": 4871301120})
+        "media_size_bytes": 4294967296})
     out = _preflight_hash_before_mount("/case/evidence/disk.E01")
     assert out["acquisition_hashes"] == {"md5": "b" * 32}
-    assert out["acquisition_verified"] is True and out["media_size_bytes"] == 4871301120
+    assert out["acquisition_verified"] is True and out["media_size_bytes"] == 4294967296
     monkeypatch.setattr(hashing, "verify_evidence_hash", lambda p: {"success": True, "md5": "a" * 32})
     assert "acquisition_hashes" not in _preflight_hash_before_mount("/case/evidence/disk.raw")
 

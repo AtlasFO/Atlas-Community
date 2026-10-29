@@ -34,7 +34,7 @@ class _ScriptedClient:
         self.script = list(script)
         self.calls = 0
 
-    def chat(self, messages, tools=None):
+    def chat(self, messages, tools=None, role=None):
         self.calls += 1
         item = self.script.pop(0) if self.script else self.script_default()
         if isinstance(item, Exception):
@@ -91,6 +91,13 @@ class TestWallClock:
 
 
 class TestDeadlineRouting:
+    """The plain routing, kept with ATLAS_MODEL_CALL_ESCAPE off (the escape's
+    behaviour is pinned in tests/agent/test_model_call_escape.py)."""
+
+    @pytest.fixture(autouse=True)
+    def _escape_off(self, monkeypatch):
+        monkeypatch.setenv("ATLAS_MODEL_CALL_ESCAPE", "0")
+
     def test_deadline_error_routes_to_wrapup_not_crash(self, monkeypatch):
         monkeypatch.setattr(loop_mod, "MAX_WALL_SECONDS", 0.0)
         client = _ScriptedClient([LLMDeadlineError("budget out"),
@@ -345,7 +352,7 @@ class TestTurnTimeBudget:
 class TestBudgetWrapupTraceMarker:
     """The report gate reads the MCP execution trace, not this JSONL log, so
     the loop mirrors budget wrap-up into the trace with a typed marker the gate
-    keys off to relax content-quality blockers (P4 report-gate deadlock)."""
+    keys off to relax content-quality blockers."""
 
     def test_wrapup_is_stamped_into_the_execution_trace(self, monkeypatch,
                                                         tmp_path):
@@ -385,6 +392,7 @@ class TestDairReengageOnQuiet:
         agent = _agent(_ScriptedClient([]))
         assert agent._dair_reengage_pending() is False
 
+    @pytest.mark.usefixtures("todays_dair")
     def test_pending_true_when_open_intents(self, tmp_path, monkeypatch):
         from core.execution_log import ExecutionLog
         cfg = ExecutionLog()
@@ -530,7 +538,7 @@ class TestStallAwareQuietPath:
     must record what the model actually returned."""
 
     def test_first_quiet_turn_names_the_blocker(self, monkeypatch):
-        """C1: the very first 'why are you quiet' nudge must demand
+        """The very first 'why are you quiet' nudge must demand
         dair_assess while forensic tools are blocked — steering toward the
         report burns the turn on work the model is not allowed to do."""
         agent = _quiet_run(_StalledAgent, _quiet_script(8), monkeypatch)
@@ -549,7 +557,7 @@ class TestStallAwareQuietPath:
 
     def test_narrated_call_triggers_reengage_without_open_intents(
             self, monkeypatch):
-        """A3: the model announcing dair_assess in prose while emitting no
+        """The model announcing dair_assess in prose while emitting no
         tool call is itself the stall signal — it fires even before a
         blocked tool has recorded a deferred intent."""
         script = [ChatResponse(content="DAIR window expired again. "
@@ -559,7 +567,7 @@ class TestStallAwareQuietPath:
         assert _reengage_messages(agent)
 
     def test_unrelated_prose_does_not_trigger_reengage(self, monkeypatch):
-        """Guard for A3's regex: ordinary narration must not be mistaken
+        """Guard for the narrated-call regex: ordinary narration must not be mistaken
         for a narrated dair_assess call."""
         script = [ChatResponse(content="The timeline is assembled and the "
                                        "report covers every host.")
@@ -568,7 +576,7 @@ class TestStallAwareQuietPath:
         assert _reengage_messages(agent) == []
 
     def test_stop_is_labelled_stall_when_dair_still_pending(self, monkeypatch):
-        """B2: stopping with forensic work still gated is not 'no progress
+        """Stopping with forensic work still gated is not 'no progress
         detected' — the operator needs to see it was a protocol stall."""
         agent = _quiet_run(_StalledAgent, _quiet_script(12), monkeypatch)
         assert agent.stats["stopped_reason"] == "stall"
@@ -579,7 +587,7 @@ class TestStallAwareQuietPath:
         assert agent.stats["stopped_reason"] == "quiet"
 
     def test_quiet_wrapup_names_the_blocker(self, monkeypatch):
-        """C1: even the close-out wrap-up must say what is actually
+        """Even the close-out wrap-up must say what is actually
         blocking — while keeping the close-out steps, so a hard stop can
         still produce a report."""
         agent = _quiet_run(_StalledAgent, _quiet_script(12), monkeypatch)
@@ -588,7 +596,7 @@ class TestStallAwareQuietPath:
         assert "dair_assess" in str(wrapups[0].get("content"))
 
     def test_empty_tool_turn_logs_the_raw_message(self, monkeypatch):
-        """E1: an empty-tool turn must leave the provider's raw message in
+        """An empty-tool turn must leave the provider's raw message in
         the transcript — otherwise 'narrated the call' and 'the parser
         dropped the call' are indistinguishable after the fact."""
 
@@ -1351,7 +1359,7 @@ class TestRunLoopPseudoToolRecovery:
         """A rerun's log holds the previous run's gate verdicts; the ladder of
         this run reads only its own. A Report phase in which evidence the gate
         counts as open is read for the first time every turn is never pushed;
-        the same phase with nothing read is wrapped up as before."""
+        the same phase with nothing read is wrapped up."""
         from core.execution_log import log
         for n in (1, 0):
             log.record_reason_call(
@@ -1893,16 +1901,94 @@ class TestRunLoopPseudoToolRecovery:
                  and "[namespaces only]" in str(m.get("content"))]
         assert len(notes) == 1 and "tsk.mmls" in notes[0]["content"]
 
+    def test_with_a_stable_list_the_namespaces_only_note_says_loading_changes_nothing(self, monkeypatch):
+        """A list that holds every namespace for the whole run: the note for
+        replies that only load namespaces says so instead of naming room."""
+        events = []
+
+        class _Loading(_DoneAgent):
+            _last_director_tools = ["tsk.mmls (all images)"]
+
+            def _run_tool(self, tc):
+                return "Loaded namespaces: img."
+
+            def _log(self, record):
+                events.append(record)
+
+        class _StableBox(_StubToolbox):
+            loaded = {"img", "tsk"}
+
+            def stable(self):
+                return True
+
+        load = ChatResponse(content="", tool_calls=[
+            ToolCall(id="l", name="atlas_load_namespaces", arguments={"namespaces": ["img"]})])
+        for name, value in (("MAX_WALL_SECONDS", 0.0), ("MAX_TURNS", 0),
+                            ("BLOCKER_EXTENSION_TURNS", 0), ("BLOCKER_EXTENSION_MAX", 0)):
+            monkeypatch.setattr(loop_mod, name, value)
+        agent = _Loading(_ScriptedClient([load, load, load, _finish_response()]), _StableBox(),
+                         case_dir=None, quiet=True)
+        agent.run("sys", "user")
+        notes = [m["content"] for m in agent.messages if m.get("role") == "user"
+                 and "[namespaces only]" in str(m.get("content"))]
+        assert len(notes) == 1 and "loading changes nothing" in notes[0]
+        assert "pushes out" not in notes[0] and "tsk.mmls" in notes[0]
+
+    def test_a_cut_of_a_stable_list_says_the_list_left_stable_mode(self, monkeypatch):
+        """tool_budget_shrunk on a list that held every namespace carries
+        left_stable_list: from then on the list swaps namespaces again."""
+        import agent.toolbox as toolbox_mod
+        monkeypatch.setattr(toolbox_mod, "_LEARNED_CEILING", None)
+        for name, value in (("MAX_WALL_SECONDS", 0.0), ("MAX_TURNS", 0),
+                            ("BLOCKER_EXTENSION_TURNS", 0), ("BLOCKER_EXTENSION_MAX", 0)):
+            monkeypatch.setattr(loop_mod, name, value)
+        events = []
+
+        class _FullBox(_StubToolbox):
+            sizes = {"misc": 40, "img": 30, "tsk": 30}
+
+            def __init__(self):
+                self.loaded = {"misc", "img", "tsk"}
+
+            def schema_count(self, loaded=None):
+                ns = self.loaded if loaded is None else loaded
+                return 4 + sum(self.sizes[n] for n in ns if n in self.sizes)
+
+            def shrink_to(self, count):
+                evicted = []
+                for ns in ("tsk", "img"):
+                    if self.schema_count() <= count:
+                        break
+                    self.loaded.discard(ns)
+                    evicted.append(ns)
+                return evicted
+
+            def stable(self):
+                return self.loaded == {"misc", "img", "tsk"}
+
+        class _Wide(_DoneAgent):
+            def _log(self, record):
+                events.append(record)
+
+            def _run_tool(self, tc):
+                return '{"success": true}'
+
+        tried = ChatResponse(content="<tool_call>misc:tool()", output_tokens=40, reasoning_tokens=10)
+        _Wide(_ScriptedClient([tried, tried, _finish_response()]), _FullBox(),
+              case_dir=None, quiet=True).run("sys", "user")
+        shrunk = [e for e in events if e.get("event") == "tool_budget_shrunk"]
+        assert [(e["kept"], e.get("left_stable_list")) for e in shrunk] == [(74, True)]
+
     def test_the_live_status_is_stamped_while_the_model_call_is_in_flight(self, monkeypatch):
-        """A model request the endpoint holds open used to leave the status
-        file untouched for its whole duration; the heartbeat that covered
-        tool calls now covers model calls too."""
+        """A model request the endpoint holds open must not leave the status
+        file untouched for its whole duration; the heartbeat that covers
+        tool calls covers model calls too."""
         import time as _time
         monkeypatch.setattr(loop_mod, "HEARTBEAT_SECONDS", 0.02)
         stamps = []
 
         class _Slow(_ScriptedClient):
-            def chat(self, messages, tools=None):
+            def chat(self, messages, tools=None, role=None):
                 _time.sleep(0.15)
                 return super().chat(messages, tools)
 
@@ -1947,7 +2033,7 @@ class TestRunLoopPseudoToolRecovery:
         assert agent.stats["stopped_reason"] != "finished"
 
     def test_plain_prose_is_untouched(self, monkeypatch):
-        """Guard: no tool syntax → the quiet path behaves exactly as before."""
+        """Guard: no tool syntax → the quiet path is untouched."""
         agent = _quiet_run(_DoneAgent, _quiet_script(8), monkeypatch)
         assert agent.stats["stopped_reason"] == "quiet"
 
@@ -2136,8 +2222,8 @@ class TestBlockedToolSpin:
         assert agent.stats["turns"] < 40, "must not spin through the script"
 
     def test_recovered_xml_calls_to_a_blocked_tool_also_stop(self, monkeypatch):
-        """The exact regression: the call arrives as text, gets recovered,
-        comes back protocol-blocked, and used to reset the quiet counter."""
+        """The call arrives as text, gets recovered, comes back
+        protocol-blocked, and must not reset the quiet counter."""
         script = [ChatResponse(content="<tool_call>tsk_fls(image=/e.raw)"
                                        "</tool_call>") for _ in range(40)]
         agent = _quiet_run(self._blocked_agent(), script, monkeypatch)
@@ -2375,6 +2461,9 @@ class TestIdenticalCallsWithinOneTurn:
     identical calls are deduplicated inside a turn, not only across turns."""
 
     def test_the_twin_in_the_same_batch_is_pointed_not_run(self, monkeypatch):
+        # The memo's pointer for a twin in one reply, with
+        # ATLAS_REPLY_DUPLICATES off (it otherwise answers as a duplicate first).
+        monkeypatch.setenv("ATLAS_REPLY_DUPLICATES", "0")
         import json
         ran = []
 
@@ -2540,7 +2629,7 @@ class TestWallClockReachesTheStallDetector:
     def _recording_detector(self, monkeypatch):
         seen = []
 
-        def detector(state, *, turn, report_written, case_dir=None, wall_clock=False):
+        def detector(state, *, turn, report_written, case_dir=None, wall_clock=False, work_order=None):
             seen.append(wall_clock)
             return []
         monkeypatch.setattr(loop_mod, "stall_messages_for_turn", detector)
@@ -2566,6 +2655,11 @@ class TestLostTurn:
     """A provider that drops the reply on every attempt of one request loses
     the turn, not the run: the turn is asked again after a pause, and only
     repeated loss of the same turn wraps the run up."""
+
+    @pytest.fixture(autouse=True)
+    def _escape_off(self, monkeypatch):
+        # The plain rule, kept with ATLAS_MODEL_CALL_ESCAPE off.
+        monkeypatch.setenv("ATLAS_MODEL_CALL_ESCAPE", "0")
 
     @staticmethod
     def _no_sleep(monkeypatch):
@@ -2621,7 +2715,7 @@ class TestFirewallRefusalInTheLoop:
         seen = []
 
         class _Client(_ScriptedClient):
-            def chat(self, messages, tools=None):
+            def chat(self, messages, tools=None, role=None):
                 seen.append([m["content"] for m in messages if m.get("role") == "tool"])
                 return super().chat(messages, tools)
 
@@ -2689,3 +2783,421 @@ def test_a_narrated_call_whose_namespace_cannot_be_loaded_names_the_way_back(mon
              if m.get("role") == "user" and "[no tool call received]" in str(m.get("content"))]
     assert len(notes) == 1
     assert 'atlas_load_namespaces(["tsk"])' in notes[0] and "loaded now" not in notes[0]
+
+
+class TestThePivotNudgeYieldsToTheReport:
+    """In Report, once the run has been asked for its report, the pivot
+    nudge no longer sends it back to searching: the gate check the push asks
+    for would otherwise never run, and the ladder wraps up without it."""
+
+    def _run(self, monkeypatch, tmp_path, turns=8):
+        import core.ioc_pivots as ip
+        events = []
+
+        class _Collecting(_DoneAgent):
+            def _run_tool(self, tc):
+                return '{"success": true}'
+
+            def _log(self, record):
+                events.append(record)
+
+            def _claim_count(self):
+                return 5
+
+        monkeypatch.setattr(loop_mod, "REPORT_STALL_TURNS", 3)
+        monkeypatch.setattr(loop_mod, "IOC_PIVOT_NUDGE_EVERY", 1)
+        monkeypatch.setattr(loop_mod, "MAX_WALL_SECONDS", 0.0)
+        monkeypatch.setattr(loop_mod, "MAX_TURNS", 0)
+        monkeypatch.setattr(loop_mod, "BLOCKER_EXTENSION_TURNS", 0)
+        monkeypatch.setattr(loop_mod, "BLOCKER_EXTENSION_MAX", 0)
+        # The ledger is re-derived each turn from the beliefs; the open
+        # pivots are fixed here instead.
+        monkeypatch.setattr(ip, "refresh_pivots", lambda *a, **k: None)
+        monkeypatch.setattr(ip, "open_pivots", lambda case_dir: [
+            {"ioc": "ip:203.0.113.9", "origin": "", "pending": ["analysis/CORP-WS01_security.csv"]}])
+        call = ChatResponse(content="", tool_calls=[ToolCall(id="1", name="misc_tool", arguments={})])
+        agent = _Collecting(_ScriptedClient([call] * turns + [_finish_response()]),
+                            _StubToolbox(), case_dir=tmp_path, quiet=True)
+        agent._dair_phase = "Report"
+        agent.run("sys", "user")
+        return agent, events
+
+    def test_nudged_until_the_first_push_and_not_after(self, monkeypatch, tmp_path):
+        agent, events = self._run(monkeypatch, tmp_path)
+        pushes = [e["turn"] for e in events if e.get("event") == "report_phase_stall"]
+        nudges = [e["turn"] for e in events if e.get("event") == "ioc_pivot_nudge"]
+        assert pushes and nudges and max(nudges) < pushes[0]
+        # the standing copy went with the push
+        assert not any("[ioc pivot]" in str(m.get("content")) for m in agent.messages
+                       if m.get("role") == "user")
+
+    def test_the_flag_follows_the_push_and_the_directors_phase(self, monkeypatch):
+        agent = Agent.__new__(Agent)
+        agent.messages = []
+        agent._nudge_index = {}
+        agent._log = lambda record: None
+        agent.ui = type("UI", (), {"warn": staticmethod(lambda *a, **k: None)})()
+        monkeypatch.setattr(Agent, "_report_stall_exhausted", lambda self, turn: False)
+        agent._nudge("ioc_pivot_nudge", "[ioc pivot] search these")
+        agent._dair_phase = "Report"
+        agent._push_report_phase(5, reason="director_reask")
+        assert agent._report_pushed
+        assert not any("[ioc pivot]" in str(m.get("content")) for m in agent.messages)
+        for unreadable in ("{}", "not json", '{"current_phase": ""}', '{"current_phase": "Report"}'):
+            agent._note_dair_phase(unreadable)
+            assert agent._report_pushed, unreadable
+        agent._note_dair_phase('{"current_phase": "Analyze"}')
+        assert not agent._report_pushed
+
+
+class TestCloseOutSpine:
+    """ATLAS_CLOSE_OUT_SPINE: at the report-stall close-out the loop supplies
+    the synthesis the verdict names as missing, once, then checks again."""
+
+    @staticmethod
+    def _trace(tmp_path, *, dair=True, finding=True):
+        from core.execution_log import ExecutionLog
+        l = ExecutionLog()
+        l.configure("SPINE", str(tmp_path / "trace.json"), save_session=False)
+        if dair:
+            l.record_dair_call("Report", "", False, "", "", "stay", "")
+        if finding:
+            tid = l.record_tool_call("vol.pslist", True, False, 0, 0, stdout_excerpt="PID 4412 svc_update.exe")
+            l.record_finding("svc_update.exe ran as PID 4412 on CORP-WS01", "LIKELY", "vol.pslist",
+                             linked_call_id=tid, input_call_ids=[tid])
+        return l
+
+    @staticmethod
+    def _synth(calls):
+        def fake(findings, investigation_summary="", input_call_ids=None):
+            from core.execution_log import log
+            calls.append((findings, investigation_summary, list(input_call_ids or [])))
+            cid = log.record_reason_call("reason_synthesize", True, "SYNTHESIS: consistent", {})
+            return {"success": True, "conclusion": "SYNTHESIS: consistent", "_atlas_call_id": cid}
+        return fake
+
+    def _agent(self, tmp_path, events, verdict):
+        class _A(_DoneAgent):
+            def _log(self, record):
+                events.append(record)
+
+            def _run_pre_report_check(self):
+                return verdict()
+        return _A(_ScriptedClient([_finish_response()]), _StubToolbox(), case_dir=tmp_path, quiet=True)
+
+    def test_the_missing_synthesis_is_supplied_once_and_the_check_rerun(self, tmp_path):
+        from unittest.mock import patch
+        events, calls = [], []
+        l = self._trace(tmp_path)
+        agent = self._agent(tmp_path, events, lambda: {"ready_to_report": True, "has_synthesize": True})
+        with patch("core.execution_log.log", l), patch("tools.reasoning.reason_synthesize", self._synth(calls)):
+            out = agent._close_out_spine(9, {"ready_to_report": False, "has_synthesize": False})
+            again = agent._close_out_spine(9, {"ready_to_report": False, "has_synthesize": False})
+        assert out["ready_to_report"] is True and again["ready_to_report"] is False
+        assert len(calls) == 1 and "LIKELY: svc_update.exe ran as PID 4412" in calls[0][0]
+        synth = [e for e in l._entries if e.get("tool") == "reason_synthesize"]
+        assert synth[-1]["source"] == "loop"
+        assert [e["event"] for e in events] == ["close_out_spine"]
+
+    @pytest.mark.parametrize("dair,finding,reason", [
+        (False, True, "no dair_call"), (True, False, "no finding")])
+    def test_without_a_dair_call_or_a_finding_the_spine_is_skipped(self, tmp_path, dair, finding, reason):
+        from unittest.mock import patch
+        events, calls = [], []
+        l = self._trace(tmp_path, dair=dair, finding=finding)
+        agent = self._agent(tmp_path, events, lambda: pytest.fail("rechecked"))
+        verdict = {"ready_to_report": False, "has_synthesize": False}
+        with patch("core.execution_log.log", l), patch("tools.reasoning.reason_synthesize", self._synth(calls)):
+            assert agent._close_out_spine(9, verdict) is verdict
+        assert not calls and events[0]["event"] == "spine_skipped" and reason in events[0]["reason"]
+
+    def test_a_verdict_with_a_synthesis_or_the_switch_off_is_left_alone(self, tmp_path, monkeypatch):
+        events = []
+        agent = self._agent(tmp_path, events, lambda: pytest.fail("rechecked"))
+        has = {"ready_to_report": False, "has_synthesize": True}
+        assert agent._close_out_spine(9, has) is has
+        monkeypatch.setenv("ATLAS_CLOSE_OUT_SPINE", "0")
+        none = {"ready_to_report": False, "has_synthesize": False}
+        assert agent._close_out_spine(9, none) is none and not events
+
+
+class TestRepeatedCallsInOneReply:
+    """A call identical to an earlier call of the same reply is not run; many
+    of them make the reply a runaway and the next ask goes one level lower."""
+
+    def test_duplicates_are_answered_and_not_run_and_the_next_ask_is_lower(self, tmp_path, monkeypatch):
+        ran = []
+
+        class _Box(_StubToolbox):
+            def call(self, name, arguments):
+                ran.append((name, dict(arguments)))
+                return '{"success": true, "_atlas_call_id": 41}', False
+
+        class _Client(_ScriptedClient):
+            def __init__(self, script):
+                super().__init__(script)
+                self.levels = []
+
+            def chat(self, messages, tools=None, role=None, **kw):
+                self.levels.append(kw.get("level"))
+                return super().chat(messages, tools=tools, role=role)
+
+            def next_lower_level(self, role, level=None):
+                return "low"
+        same = {"description": "x", "confidence": "LIKELY"}
+        calls = [ToolCall(id=f"c{i}", name="misc_record_finding", arguments=dict(same)) for i in range(8)]
+        calls.append(ToolCall(id="other", name="misc_tool", arguments={"a": 1}))
+        client = _Client([ChatResponse(content="", tool_calls=calls), _finish_response()])
+        events = []
+        agent = _DoneAgent(client, _Box(), case_dir=None, quiet=True)
+        agent._log = events.append
+        monkeypatch.setattr(loop_mod, "MAX_WALL_SECONDS", 0.0)
+        monkeypatch.setattr(loop_mod, "MAX_TURNS", 0)
+        agent.run("sys", "user")
+        assert [n for n, _a in ran].count("misc_record_finding") == 1 and ("misc_tool", {"a": 1}) in ran
+        dup = [m for m in agent.messages if m.get("role") == "tool" and m.get("tool_call_id") == "c3"]
+        assert dup and dup[0]["content"] == "[duplicate of call 41 in this reply, not run]"
+        assert [e for e in events if e.get("event") == "reply_duplicates_runaway"]
+        assert client.levels[:2] == [None, "low"]
+
+    def test_the_stored_reply_keeps_only_the_answered_calls(self, monkeypatch):
+        """40 identical calls and one other: the duplicates beyond the
+        answered ones leave the stored assistant message, so every call id
+        it holds has its result (a strict endpoint refuses one without)."""
+        class _Box(_StubToolbox):
+            def call(self, name, arguments):
+                return '{"success": true, "_atlas_call_id": 41}', False
+        same = {"description": "x", "confidence": "LIKELY"}
+        calls = [ToolCall(id=f"c{i}", name="misc_record_finding", arguments=dict(same)) for i in range(40)]
+        calls.append(ToolCall(id="other", name="misc_tool", arguments={"a": 1}))
+        client = _ScriptedClient([ChatResponse(content="", tool_calls=calls), _finish_response()])
+        agent = _DoneAgent(client, _Box(), case_dir=None, quiet=True)
+        agent._log = lambda rec: None
+        monkeypatch.setattr(loop_mod, "MAX_WALL_SECONDS", 0.0)
+        monkeypatch.setattr(loop_mod, "MAX_TURNS", 0)
+        agent.run("sys", "user")
+        reply = next(m for m in agent.messages if m.get("role") == "assistant" and m.get("tool_calls")
+                     and any(tc["id"] == "other" for tc in m["tool_calls"]))
+        at = agent.messages.index(reply)
+        answered = {m.get("tool_call_id") for m in agent.messages[at + 1:] if m.get("role") == "tool"}
+        ids = [tc["id"] for tc in reply["tool_calls"]]
+        assert set(ids) <= answered and "c0" in ids and "other" in ids
+        assert len(ids) < 41
+
+    def test_a_reply_left_with_no_call_and_no_text_keeps_a_placeholder(self):
+        agent = Agent.__new__(Agent)
+        agent.messages = [{"role": "user", "content": "go"},
+                          {"role": "assistant", "content": "",
+                           "tool_calls": [{"id": "c1", "type": "function",
+                                           "function": {"name": "t", "arguments": "{}"}}]},
+                          {"role": "user", "content": "[batch bounded] ..."}]
+        agent._prune_unanswered_tool_calls()
+        msg = agent.messages[1]
+        assert "tool_calls" not in msg and msg["content"] == loop_mod._PRUNED_REPLY_TEXT
+        agent.messages[1] = {"role": "assistant", "content": "Reading the log.",
+                             "tool_calls": [{"id": "c2", "type": "function",
+                                             "function": {"name": "t", "arguments": "{}"}}]}
+        agent._prune_unanswered_tool_calls()
+        assert agent.messages[1] == {"role": "assistant", "content": "Reading the log."}
+
+    def test_the_switch_off_runs_every_call(self, monkeypatch):
+        monkeypatch.setenv("ATLAS_REPLY_DUPLICATES", "0")
+        from types import SimpleNamespace
+        agent = Agent.__new__(Agent)
+        calls = [SimpleNamespace(name="t", arguments={"a": 1}, id="1"), SimpleNamespace(name="t", arguments={"a": 1}, id="2")]
+        assert agent._split_reply_duplicates(1, calls, None) == (calls, [])
+
+
+class TestARepeatedCappedQueryIsPointedAtANarrowerCall:
+    """An identical table_query whose earlier result returned part of its
+    matches is answered with the cut and the narrower calls (a filter, a
+    count by column, a period), with or without the earlier call's trace
+    entry; never a page of the same match set."""
+
+    def test_the_pointer_names_the_narrower_calls(self):
+        import json
+        from types import SimpleNamespace
+        agent = Agent.__new__(Agent)
+        capped = json.dumps({"success": True, "matched_rows": 120, "returned_rows": 50, "rows": []})
+        hit = SimpleNamespace(trace_call_id="", tool="table_table_query", result=capped, turn=3)
+        why, spill = agent._pointed_result_incomplete(hit)
+        assert why == "it returned 50 of 120 matching rows"
+        hint = agent._rest_of_result_hint(hit, spill)
+        assert "where=" in hint and "table.table_pivot" in hint and "offset=" not in hint
+
+
+class TestAProviderDecline:
+    """A request the provider declines (a safety classifier, a content
+    filter) has its own branch in the run loop, ahead of every empty-reply
+    rule: no tool-list cut, no empty-reply nudge, one fixed line of
+    notice on the next request, and three declines in a row end the run."""
+
+    DECLINED = ChatResponse(content="", finish_reason="refusal", output_tokens=40,
+                            refusal={"category": "cyber", "explanation": None})
+
+    class _Seeing(_ScriptedClient):
+        def __init__(self, script):
+            super().__init__(script)
+            self.seen = []
+
+        def chat(self, messages, tools=None, role=None, **kw):
+            self.seen.append([dict(m) for m in messages])
+            return super().chat(messages, tools=tools, role=role)
+
+    def _run(self, script, monkeypatch):
+        events = []
+
+        class _Logged(_DoneAgent):
+            def _log(self, record):
+                events.append(record)
+
+            def _claim_count(self):
+                return 3          # a run that already holds findings: the empty-reply rules would apply
+
+            def _run_tool(self, tc):
+                return '{"success": true}'
+
+        monkeypatch.setattr(loop_mod, "MAX_WALL_SECONDS", 0.0)
+        monkeypatch.setattr(loop_mod, "MAX_TURNS", 0)
+        monkeypatch.setattr(loop_mod, "BLOCKER_EXTENSION_TURNS", 0)
+        monkeypatch.setattr(loop_mod, "BLOCKER_EXTENSION_MAX", 0)
+        client = self._Seeing(script)
+        agent = _Logged(client, _StubToolbox(), case_dir=None, quiet=True)
+        agent.run("sys", "user")
+        return agent, client, events
+
+    @staticmethod
+    def _declined_lines(messages):
+        return [m["content"] for m in messages if m.get("role") == "user"
+                and "provider declined" in str(m.get("content"))]
+
+    def test_the_next_request_says_so_in_one_line_and_nothing_else(self, monkeypatch):
+        agent, client, events = self._run([self.DECLINED, _finish_response()], monkeypatch)
+        assert self._declined_lines(client.seen[1]) == [
+            "The provider declined the last request (category: cyber). "
+            "Continue the analysis with a different approach or other evidence."]
+        assert not [m for m in client.seen[1] if m.get("role") == "assistant"]
+        assert not [m for m in client.seen[1] if "[empty reply]" in str(m.get("content"))]
+        kinds = {e.get("event") for e in events}
+        assert not kinds & {"empty_reply_nudge", "dropped_call_nudge", "tool_budget_shrunk", "reply_cut_off"}
+        assert agent.stats["stopped_reason"] == "finished"
+
+    def test_three_declines_in_a_row_end_the_run(self, monkeypatch):
+        agent, client, events = self._run([self.DECLINED] * 3 + [_finish_response()], monkeypatch)
+        assert agent.stats["stopped_reason"] == "model_refusal" and client.calls == 3
+        assert len(self._declined_lines(client.seen[2])) == 1       # the earlier line retired, one standing
+
+    def test_any_other_reply_resets_the_count(self, monkeypatch):
+        call = ChatResponse(content="", tool_calls=[ToolCall(id="c", name="misc_tool", arguments={})])
+        agent, client, _ = self._run([self.DECLINED, self.DECLINED, call, self.DECLINED, self.DECLINED,
+                                      _finish_response()], monkeypatch)
+        assert agent.stats["stopped_reason"] == "finished" and client.calls == 6
+
+
+class TestCloseOutHold:
+    """The gate-ready close-out under the work order: it gives the model the
+    finish's deferral first, waits while the model's calls close named work,
+    and closes on the first turn that closes nothing."""
+
+    def _agent(self, monkeypatch, tmp_path, events, keys, deferrals, *, turns=12):
+        import json as _json
+        from core import work_order as W
+        monkeypatch.setenv("ATLAS_WORK_ORDER", "1")
+        script = iter(keys)
+        last = {"k": frozenset()}
+
+        def _keys(_work):
+            last["k"] = next(script, last["k"])
+            return last["k"]
+        monkeypatch.setattr(W, "open_work", lambda log, case_dir, **kw: {"parts": [], "derived": [], "due": [],
+                                                                         "refused": [], "parsed": []})
+        monkeypatch.setattr(W, "open_work_keys", _keys)
+        texts = iter(deferrals)
+
+        class _Standing(_DoneAgent):
+            def _run_tool(self, tc):
+                return _json.dumps({"current_phase": "Report", "progress": {"changed": False},
+                                    "directives": {"priority_tools": []}})
+
+            def _log(self, record):
+                events.append(record)
+
+            def work_order_settled(self):
+                return True
+
+            def _pre_report_fresh_ready(self):
+                return True
+
+            def _finish_open_work_check(self):
+                return next(texts, "")
+
+            def _nudge(self, kind, content):
+                events.append({"event": "nudge", "kind": kind, "turn": None})
+                super()._nudge(kind, content)
+
+            def _close_out(self, turn, *, reason):
+                events.append({"event": "close_out_called", "turn": turn, "reason": reason})
+                return True
+
+            def _claim_count(self):
+                return 5
+
+        monkeypatch.setattr(loop_mod, "MAX_WALL_SECONDS", 0.0)
+        monkeypatch.setattr(loop_mod, "MAX_TURNS", 0)
+        ask = ChatResponse(content="", tool_calls=[ToolCall(id="1", name="dair_assess", arguments={})])
+        return _Standing(_ScriptedClient([ask] * turns), _StubToolbox(), case_dir=tmp_path, quiet=True)
+
+    def test_the_deferral_reaches_the_model_and_the_close_waits_while_named_work_closes(self, monkeypatch, tmp_path):
+        from core import work_order as W
+        events = []
+        k3 = frozenset({("derived", "analysis/carved", "gif"), ("derived", "analysis/web", "exe"),
+                        ("derived", "analysis/web", "jpg")})
+        agent = self._agent(monkeypatch, tmp_path, events,
+                            [k3, k3 - {("derived", "analysis/web", "exe")},
+                             frozenset({("derived", "analysis/web", "jpg")}), frozenset({("derived", "analysis/web", "jpg")})],
+                            ["atlas_finish deferred: work is still open.\n- analysis/carved: gif 0 of 2 read"])
+        agent.run("sys", "user")
+        seq = [(e["event"], e["turn"]) for e in events
+               if e.get("event") in ("close_out_deferred", "close_out_held", "close_out_called")]
+        assert seq == [("close_out_deferred", 2), ("close_out_held", 3), ("close_out_held", 4),
+                       ("close_out_called", 5)]
+        nudges = [m["content"] for m in agent.messages if m.get("role") == "user"
+                  and str(m.get("content") or "").startswith(W.CLOSE_OUT_HEAD)]
+        # each wait shows the list as it stands; the standing nudge supersedes the last one
+        assert [e["kind"] for e in events if e.get("event") == "nudge" and e["kind"] == "close_out_deferred"] == \
+            ["close_out_deferred"] * 3
+        assert len(nudges) == 1
+        assert agent.stats["stopped_reason"] == "closed_out"
+
+    def test_nothing_named_or_nothing_closed_closes_at_once(self, monkeypatch, tmp_path):
+        events = []
+        k = frozenset({("derived", "analysis/web", "jpg")})
+        agent = self._agent(monkeypatch, tmp_path, events, [k, k], [])
+        agent.run("sys", "user")
+        assert [(e["event"], e["turn"]) for e in events if str(e.get("event", "")).startswith("close_out")] == \
+            [("close_out_called", 2)]
+
+    def test_work_all_closed_is_closed_out_at_once(self, monkeypatch, tmp_path):
+        events = []
+        k = frozenset({("derived", "analysis/web", "jpg")})
+        agent = self._agent(monkeypatch, tmp_path, events, [k, frozenset()], ["deferral"])
+        agent.run("sys", "user")
+        assert [(e["event"], e["turn"]) for e in events if str(e.get("event", "")).startswith("close_out")] == \
+            [("close_out_deferred", 2), ("close_out_called", 3)]
+
+    def test_a_new_key_is_a_new_deferral_by_the_finishs_own_rule(self, monkeypatch, tmp_path):
+        events = []
+        a = frozenset({("derived", "analysis/web", "jpg")})
+        b = a | {("derived", "analysis/web2", "gif")}
+        agent = self._agent(monkeypatch, tmp_path, events, [a, b, b], ["deferral one", "deferral two"])
+        agent.run("sys", "user")
+        assert [(e["event"], e["turn"]) for e in events if str(e.get("event", "")).startswith("close_out")] == \
+            [("close_out_deferred", 2), ("close_out_deferred", 3), ("close_out_called", 4)]
+
+    def test_without_the_work_order_or_after_the_clock_the_close_out_never_waits(self, monkeypatch, tmp_path):
+        events = []
+        agent = self._agent(monkeypatch, tmp_path, events, [frozenset({("item", 7)})], ["deferral"])
+        assert agent._close_out_held(3, wall_expired=True) is False
+        monkeypatch.setenv("ATLAS_WORK_ORDER", "0")
+        assert agent._close_out_held(3, wall_expired=False) is False
+        assert events == []

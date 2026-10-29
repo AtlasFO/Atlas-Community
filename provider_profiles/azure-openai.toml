@@ -1,0 +1,34 @@
+#:schema ./schema.json
+# Atlas provider profile: what Atlas knows about one kind of LLM provider.
+# Every field: docs/llm.md, "Provider profiles", and provider_profiles/schema.json.
+# To change a field, put a file of the same name in provider_profiles.local/
+# (`atlas provider profile init <id>` copies this one there) and keep only the
+# lines you change: the rest, and later fixes to them, come from this file.
+# A file there fails when its id is not its file name, when it sets [env] or
+# implicit, or when it is named custom.toml (the fallback cannot be changed).
+# Source: https://learn.microsoft.com/en-us/azure/ai-foundry/openai/api-version-lifecycle (v1 API)
+# Format version of this file; leave it at 1.
+schema = 1
+# Must equal the file name without .toml.
+id = "azure-openai"
+# Position in the setup menu; lower comes first.
+order = 25
+# Name shown in the setup menu and on the Settings page.
+label = "Azure OpenAI (v1 API)"
+# One line shown under the label in the menu.
+description = "Your Azure OpenAI or Foundry resource through its OpenAI-compatible v1 API."
+# Shown when this profile is chosen: what to know before saving.
+notes = """\
+Base URL: https://YOUR-RESOURCE-NAME.openai.azure.com/openai/v1 (or .services.ai.azure.com). \
+The model id is your deployment name. The key goes in the api-key header; the v1 API needs no \
+api-version. Microsoft Entra tokens are not supported here."""
+# How these facts were checked: "live", "docs" (vendor documentation only) or "" (no fixed endpoint).
+evidence = "docs"
+# Wire format: "chat" (Chat Completions), "responses" (OpenAI Responses) or "messages" (Anthropic Messages).
+dialect = "chat"
+
+[auth]
+# Header that carries the key (default Authorization).
+header = "api-key"
+# Text before the key ("Bearer " on Authorization by default; none on another header).
+prefix = ""

@@ -3,6 +3,14 @@ a time) and an answer that lacks it is told so, in both report languages."""
 from core import answer_synthesis as syn
 from core import investigation_tasks as tasks
 from core.report_i18n import t
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _todays_answer_path(monkeypatch):
+    """This module pins the answer path before the composer: the scaffold,
+    the prose pass, the conclusion lead (ATLAS_ANSWER_COMPOSE=0)."""
+    monkeypatch.setenv("ATLAS_ANSWER_COMPOSE", "0")
 
 
 def test_question_kinds_in_both_languages():
@@ -32,7 +40,7 @@ def test_a_count_needs_a_number_and_nameable_items_need_a_name():
     assert syn.answer_shape_gap("Wie viele Bilder?", ["Es wurden keine Bilder gefunden."], "de") == ""
     which = "Which files did the user upload?"
     assert syn.answer_shape_gap(which, ["The user uploaded images over FTP."]) == "named"
-    assert syn.answer_shape_gap(which, ["The user uploaded rhino1.jpg and rhino3.jpg over FTP."]) == ""
+    assert syn.answer_shape_gap(which, ["The user uploaded photo1.jpg and photo3.jpg over FTP."]) == ""
     assert syn.answer_shape_gap(which, ["The uploads were: a diary, a photo, a note."]) == ""
     assert syn.answer_shape_gap("Which accounts were used?", ["The jane account was used."]) == ""
     assert syn.answer_shape_gap(count, []) == ""

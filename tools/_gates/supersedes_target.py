@@ -11,6 +11,8 @@ standing finding, or to one on another host, is refused with the standing
 findings named."""
 from __future__ import annotations
 
+import re
+
 
 def _norm(value) -> str:
     return " ".join(str(value or "").split()).lower()
@@ -65,10 +67,18 @@ def check(ctx) -> dict | None:
         return None
     entry = resolve(name, ctx.log)
     if entry is None:
+        conclusion = ""
+        try:
+            from core.conclusion_door import door_on
+            if door_on() and re.match(r"(?i)^N\d{4,6}$", name):
+                conclusion = (f" {name.upper()} is a conclusion: revise it with "
+                              f"claim.promote_conclusion(supersedes={name.upper()}).")
+        except Exception:  # noqa: BLE001
+            conclusion = ""
         return _refuse(ctx, (
             f"supersedes={name!r} names no standing finding of this run. Pass the claim id "
             f"(C0012) or the call id record_finding returned for the finding this record "
-            f"replaces; {_standing_line(ctx.log)}"))
+            f"replaces; {_standing_line(ctx.log)}" + conclusion))
     mine, theirs = _norm(getattr(ctx, "host", "")), _norm(entry.get("host"))
     if mine and theirs and mine != theirs:
         return _refuse(ctx, (

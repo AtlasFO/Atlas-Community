@@ -7,7 +7,7 @@ Two ways to evaluate Atlas, shortest first:
 - **[Path A — Browse a finished investigation](#path-a--browse-a-finished-investigation)** (~2 min, **no evidence, no API key**). Install, launch the dashboard, and read a completed run's trace and report. This is the fastest way to see what Atlas produces and how every finding links back to the tool call that produced it.
 - **[Path B — Run a fresh investigation](#path-b--run-a-fresh-investigation)** (needs evidence and a connected model). Drive Atlas end-to-end on a real image and compare your run against the committed one.
 
-> **Full-quality runs need a connected model.** Any OpenAI-compatible backend powers the analyst, the `reason.*` adversarial reviewer and the `dair.*` phase director; `bin/atlas provider setup` connects one and tests it. Path A needs no model (you are reading a finished run); Path B does. See [docs/llm.md](llm.md).
+> **Full-quality runs need a connected model.** Any OpenAI-compatible backend, or Anthropic's own API, powers the analyst, the `reason.*` adversarial reviewer and the `dair.*` phase director; `bin/atlas provider setup` connects one and tests it. Path A needs no model (you are reading a finished run); Path B does. See [docs/llm.md](llm.md).
 
 ---
 
@@ -20,7 +20,7 @@ Two ways to evaluate Atlas, shortest first:
 | **SANS SIFT Workstation** (Ubuntu 24.04 x86-64) | Path B (the forensic tools) | Path A only needs Python 3.11+ and a browser. [Download](https://www.sans.org/tools/sift-workstation/) |
 | **Python 3.11+** | Both | Included in SIFT |
 | **.NET 9 runtime** (`dotnet-runtime-9.0`) | Path B — the `ez.*` Windows parsers | Included in SIFT. On a bare host: `sudo apt-get install -y dotnet-runtime-9.0`. The SDK is *not* required, and missing .NET is not fatal — `install.sh` warns and the rest of Atlas works. |
-| **A model** | Path B (full-quality) | Any OpenAI-compatible backend powers the analyst + `reason.*` + `dair.*`; connect it with `bin/atlas provider setup`. |
+| **A model** | Path B (full-quality) | Any OpenAI-compatible backend, or Anthropic's own API, powers the analyst + `reason.*` + `dair.*`; connect it with `bin/atlas provider setup`. |
 
 ---
 
@@ -120,8 +120,8 @@ This drives Atlas end-to-end. It needs the evidence (not committed — it's larg
 **1. Connect a model**, unless `install.sh` already did:
 
 ```bash
-bin/atlas provider setup   # the Telekom LLM Hub, OpenAI, a local server or any OpenAI-compatible endpoint
-bin/atlas doctor           # which backend and model each role uses
+bin/atlas provider setup   # the Telekom LLM Hub, OpenAI, Anthropic, a local server or any OpenAI-compatible endpoint
+bin/atlas doctor           # which backend and model each role uses, and the profile each provider binds to
 ```
 
 > Optional: `VIRUSTOTAL_API_KEY` and `ABUSEIPDB_API_KEY` add IOC corroboration but never block a run. Without a model, a full-quality investigation cannot run.

@@ -26,6 +26,23 @@ _DISK_POLL_SECONDS = 15
 _KILL_GRACE_SECONDS = 10
 # How often the supervisor looks at its tool and at a cancel request.
 _POLL_SECONDS = 1
+# A runner of Atlas's own that stops itself for a reason of Atlas's (not of
+# the evidence it reads) says why in this file of its job directory; the
+# supervisor tells it the directory in ATLAS_JOB_DIR.
+STOP_FILE = "stopped_by_atlas"
+
+
+def record_atlas_stop(reason: str) -> None:
+    """For a tool this supervisor runs: record that it stopped for a reason
+    of Atlas's (the run that owned it is gone, ...). Nothing outside a job."""
+    job_dir = os.environ.get("ATLAS_JOB_DIR")
+    if not job_dir:
+        return
+    try:
+        with open(os.path.join(job_dir, STOP_FILE), "w", encoding="utf-8") as fh:
+            fh.write(str(reason)[:300])
+    except OSError:
+        pass
 
 
 def _utcnow() -> str:
@@ -97,6 +114,31 @@ def _write_meta(job_dir: str, meta: dict) -> None:
     os.replace(tmp, os.path.join(job_dir, "meta.json"))
 
 
+# What the runner records in a job's meta; everything else is the server's.
+_RUNNER_KEYS = ("output_reclaimed", "view_lost", "stop_incomplete", "exit_code", "finished_utc",
+                "aborted_reason", "aborted_detail", "stopped_by_atlas")
+
+
+def merge_meta(job_dir: str, updates: dict, base: dict | None = None) -> dict:
+    """Write ``updates`` into the job's meta.json and keep every other key
+    as the file holds it now: the server records the start (the supervisor,
+    the start's trace entry) while a quick job's runner may already record
+    the outcome, and neither may drop the other's keys. One writer at a time
+    (an exclusive lock beside the file); ``base`` stands in for a meta.json
+    that cannot be read."""
+    import fcntl
+    with open(os.path.join(job_dir, "meta.lock"), "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            with open(os.path.join(job_dir, "meta.json")) as f:
+                meta = json.load(f)
+        except (OSError, ValueError):
+            meta = dict(base or {})
+        meta.update(updates)
+        _write_meta(job_dir, meta)
+    return meta
+
+
 def main(job_dir: str) -> int:
     # A cancel (job_cancel's SIGTERM to this supervisor's group) is a request
     # the loop below carries out: the tool runs in a session of its own, so
@@ -144,6 +186,7 @@ def _supervise(job_dir: str, cancel: list) -> int:
                 stdin=subprocess.DEVNULL,
                 cwd=meta.get("cwd") or None,
                 start_new_session=True,
+                env={**os.environ, "ATLAS_JOB_DIR": str(job_dir)},
             )
             if via_sudo:
                 from core.privileged_kill import start_time
@@ -215,6 +258,22 @@ def _supervise(job_dir: str, cancel: list) -> int:
                     f"\n[jobs_runner] could not hand {out_dir} back to the "
                     f"invoking user; it may still be root-owned\n".encode())
 
+    # A raw view the job read whose daemon changed while it ran answered some
+    # of its reads with errors: the output is incomplete, whatever the tool's
+    # exit code says, so the job fails and nothing credits its reads.
+    if meta.get("raw_views"):
+        try:
+            from core.raw_views import view_lost
+            lost = view_lost(meta)
+        except Exception:  # noqa: BLE001 - the outcome is still recorded
+            lost = ""
+        if lost:
+            with open(log_path, "ab") as log_fh:
+                log_fh.write(f"\n[jobs_runner] {lost}\n".encode())
+            meta["view_lost"] = lost
+            if exit_code == 0:
+                exit_code = 1
+
     if stop_incomplete:
         with open(log_path, "ab") as log_fh:
             log_fh.write(b"\n[jobs_runner] the tool was stopped, but the command it ran "
@@ -228,7 +287,22 @@ def _supervise(job_dir: str, cancel: list) -> int:
     elif aborted_reason:
         meta["aborted_reason"] = "disk_low"
         meta["aborted_detail"] = aborted_reason
-    _write_meta(job_dir, meta)
+    # Every stop Atlas made, one record (core.coverage_ledger reads it): a
+    # cancel, the disk guard, a raw view lost under the job, or the tool's
+    # own stop for a reason of Atlas's. Such an end says nothing about the
+    # evidence the job read: no read of it, no failed read.
+    try:
+        with open(os.path.join(job_dir, STOP_FILE), encoding="utf-8") as fh:
+            own_stop = fh.read().strip()
+    except OSError:
+        own_stop = ""
+    stop = (own_stop or ("cancelled" if aborted_reason == "cancelled" else "")
+            or (f"disk low: {aborted_reason}" if aborted_reason else "") or str(meta.get("view_lost") or ""))
+    if stop:
+        meta["stopped_by_atlas"] = stop[:300]
+    # Only the runner's own keys: the copy read at the start lacks what the
+    # server wrote after it (the start's trace entry, the supervisor).
+    merge_meta(job_dir, {k: meta[k] for k in _RUNNER_KEYS if k in meta}, base=meta)
     # Separate sentinel file: cheap existence check for job_status/job_collect.
     with open(os.path.join(job_dir, "exit_code"), "w") as f:
         f.write(str(exit_code))

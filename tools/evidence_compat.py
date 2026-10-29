@@ -96,7 +96,7 @@ _REQUIREMENT_RULES: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
     (("yara_yara_scan_memory", "yara_scan_memory"), ("memory",)),
     # PCAP / packet tools (not all of net.* — keep narrow)
     (("net_tcpdump", "net_ngrep", "net_http_session", "net_pcap",
-      "net_tcpxtract"), ("pcap",)),
+      "net_tcpxtract", "net_tshark"), ("pcap",)),
     # Tabular exports
     (("table_",), ("tabular",)),
     # $MFT consumers take an extracted $MFT file or a disk image.

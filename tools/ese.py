@@ -47,7 +47,7 @@ def _tables_in(export_dir: str) -> list[dict]:
     return rows
 
 
-@mcp.tool()
+@mcp.tool(meta={"input_names": ["*.edb", "SRUDB.dat", "WebCacheV01.dat"]})
 def esedb_info(db_path: str) -> dict:
     """
     Tables and record counts of an ESE database (esedbinfo), to pick a table
@@ -64,7 +64,7 @@ def esedb_info(db_path: str) -> dict:
     return run([program, db_path], timeout=DEFAULT_TIMEOUT)
 
 
-@mcp.tool()
+@mcp.tool(meta={"input_names": ["*.edb", "SRUDB.dat", "WebCacheV01.dat"]})
 @output_safe
 def esedb_export(db_path: str, output_dir: str, table: str = "", mode: str = "tables") -> dict:
     """

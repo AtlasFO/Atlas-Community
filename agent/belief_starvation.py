@@ -26,13 +26,15 @@ MIN_SUBSTANTIVE_CONTACTS = 3
 _FINDING_TOOL_RE = re.compile(r"record_finding", re.IGNORECASE)
 
 # Tools that examine artifact *content* (not inventory/list/schema-only).
+# A file listing (tsk fls) and an extraction to a file (tsk icat) show no
+# content: the read of what they list or write comes after them, and the
+# latch must not refuse that read on their count.
 _CONTACT_TOOL_RE = re.compile(
     r"(?:table_query|table_pivot|table_grep|"
     r"table\.table_query|table\.table_pivot|table\.table_grep|"
     r"ez_evtxecmd|ez\.evtxecmd|"
     r"chainsaw_hunt|hayabusa|"
     r"ez_mftecmd|ez_amcacheparser|ez_prefetch|"
-    r"tsk_fls|tsk\.fls|tsk_icat|tsk\.icat|"
     r"strings_grep|strings\.strings_grep|search_evidence|"
     r"vol_|vol\.|regripper)",
     re.IGNORECASE,
@@ -57,7 +59,7 @@ _ALLOWED_WHILE_LATCHED_RE = re.compile(
 _HIT_RE = re.compile(
     r'"(?:matched_rows|returned_rows|hit_count|rows_returned|event_count|'
     r'match_count|result_count|ascii_lines)"'
-    r"\s*:\s*([1-9]\d*)",
+    r"\s*:\s*(\d+)",
 )
 
 
@@ -103,6 +105,10 @@ def _tool_blob(entry: dict[str, Any]) -> str:
 
 
 def _result_blob(entry: dict[str, Any]) -> str:
+    """The entry's result as text. A trace entry keeps a tool's result as
+    ``stdout_excerpt`` (a Python tool's JSON text, a program's output); it is
+    added as it stands, since quoting it again would escape the field names
+    the hit test reads."""
     parts = [
         entry.get("output"),
         entry.get("result"),
@@ -111,9 +117,10 @@ def _result_blob(entry: dict[str, Any]) -> str:
         entry.get("stderr"),
     ]
     try:
-        return json.dumps(parts, default=str)
+        blob = json.dumps(parts, default=str)
     except Exception:
-        return " ".join(str(p) for p in parts if p)
+        blob = " ".join(str(p) for p in parts if p)
+    return blob + " " + str(entry.get("stdout_excerpt") or "")
 
 
 def is_substantive_contact(entry: dict[str, Any]) -> bool:
@@ -147,9 +154,9 @@ def is_substantive_contact(entry: dict[str, Any]) -> bool:
     # Search-style tools: require a positive hit count when present.
     if re.search(r"table_(?:query|pivot|grep)|table\.table_|strings_grep|"
                  r"search_evidence", tool, re.I):
-        m = _HIT_RE.search(body)
-        if m:
-            return int(m.group(1)) > 0
+        counts = [int(n) for n in _HIT_RE.findall(body)]
+        if counts:
+            return max(counts) > 0
         # Success without hit field — treat as contact only if not valid_zero
         if '"valid_zero": true' in body or '"valid_zero":true' in body:
             return False
@@ -163,7 +170,16 @@ def is_substantive_contact(entry: dict[str, Any]) -> bool:
 
 
 def substantive_contact_count(entries: list[dict[str, Any]] | None) -> int:
-    return sum(1 for e in entries or [] if is_substantive_contact(e))
+    """Contacts by model call: the entries one call wrote (a tool and its
+    executor passes share an action id) are one contact, judged by the
+    last of them, the result the model read: a grep's passes succeed even
+    when its result holds no hit."""
+    from core.execution_log import action_key
+    last: dict[Any, dict[str, Any]] = {}
+    for e in entries or []:
+        if e.get("type") == "tool_call":
+            last[action_key(e)] = e
+    return sum(1 for e in last.values() if is_substantive_contact(e))
 
 
 def active_claim_count(case_dir) -> int:
@@ -196,6 +212,138 @@ def starvation_latched(
     if case_dir and active_claim_count(case_dir) > 0:
         return False
     return substantive_contact_count(entries) >= min_contacts
+
+
+# The recording nudge: a guardrail on behaviour, not analysis. It names the
+# reads of this conversation whose result showed the model rows and that no
+# accepted finding cites yet, while their results are still in the
+# conversation, and asks for a finding on what each established. A read
+# leaves the list when an accepted finding cites it (a refused record_finding
+# writes no finding entry) or when its result leaves the conversation (the
+# compaction horizon, ATLAS_AGENT_KEEP_TOOL_TURNS). A disposition note does
+# not take a read off: a note rules on every value it names, so a "nothing
+# new" note listing what a read showed would silence the demand for exactly
+# the values that were seen and not recorded.
+# Three unrecorded reads in context, made over two turns or more, place the
+# list: a model reading about one table a turn has then let reads pass a turn
+# without a finding. A higher count seldom holds inside the four-turn horizon
+# at that pace, so it would name few reads before they leave the conversation.
+RECORD_NUDGE_READS = 3     # unrecorded reads in context that place the list...
+RECORD_NUDGE_TURNS = 2     # ...made over at least this many turns
+RECORD_NUDGE_NAMED = 8     # reads named at most, oldest first: the first to leave the conversation
+BLANKET_READS = 4          # a finding citing this many named reads at once is counted as a blanket one
+
+
+def shows_rows(entry: dict[str, Any]) -> bool:
+    """A substantive contact whose result the model saw as rows (a row or
+    record view, core.tool_result_view): the reads the recording nudge
+    names. The latch counts every substantive contact, a parse, an
+    extraction or a listing as well, because it asks whether evidence work
+    happened at all; the nudge asks what a read showed, and a result the
+    model saw no row of shows nothing to record."""
+    return is_substantive_contact(entry) and bool(entry.get("view_rows_shown"))
+
+
+def _cited(entry: dict[str, Any]) -> set[int]:
+    ids = set()
+    for x in [entry.get("linked_call_id"), *(entry.get("input_call_ids") or [])]:
+        try:
+            if int(x or 0):
+                ids.add(int(x))
+        except (TypeError, ValueError):
+            pass
+    return ids
+
+
+def _read_line(cid: int, entry: dict[str, Any]) -> str:
+    name = str(entry.get("evidence_ref") or "").rstrip("/\\").replace("\\", "/").rsplit("/", 1)[-1]
+    shown = int(entry.get("view_rows_shown") or 0)
+    meta = entry.get("result_meta") if isinstance(entry.get("result_meta"), dict) else {}
+    total = meta.get("matched_rows")
+    if not isinstance(total, int):
+        total = entry.get("view_rows_returned")
+    of = f" of {total:,}" if isinstance(total, int) and total > shown else ""
+    return f"call {cid}" + (f" ({name})" if name else "") + f": {shown}{of} rows shown"
+
+
+class RecordPace:
+    """The reads of this conversation that showed rows and that no accepted
+    finding cites, while their results are in the conversation (the module
+    note above). One check per turn: the first check takes the highest call
+    id the log holds then, and only later calls count; a resumed log loads
+    every earlier entry, and those reads were never shown to this
+    conversation. ``check`` returns the text to place, "" to retire the
+    standing copy, or None to leave it."""
+
+    def __init__(self) -> None:
+        self.after: int | None = None    # the highest call id before this conversation's first check
+        self.turn = 0                    # checks so far, one per turn
+        self.seen: dict[int, int] = {}   # read call id -> the turn it was first seen
+        self.lines: dict[int, str] = {}  # read call id -> its line in the list
+        self.cited: set[int] = set()     # call ids an accepted finding cites
+        self.named: tuple[int, ...] = ()  # the reads the standing copy names
+        self.named_ever: set[int] = set()
+        self.blanket = 0                 # findings that cited BLANKET_READS or more named reads at once
+        self._done: set[int] = set()     # entries already read (a verdict never changes)
+        self._action: dict[Any, int] = {}
+        self._alias: dict[int, int] = {}
+
+    def check(self, entries: list[dict[str, Any]] | None, suppress: bool = False) -> str | None:
+        entries = entries or []
+        if self.after is None:
+            self.after = max((int(e.get("call_id") or 0) for e in entries), default=0)
+        self.turn += 1
+        for e in entries:
+            cid = int(e.get("call_id") or 0)
+            if cid <= self.after or cid in self._done:
+                continue
+            self._done.add(cid)
+            if e.get("type") == "finding":
+                ids = {self._alias.get(i, i) for i in _cited(e)}
+                if len(ids & self.named_ever) >= BLANKET_READS:
+                    self.blanket += 1
+                self.cited |= ids
+            elif e.get("type") == "tool_call" and shows_rows(e):
+                act = e.get("action_id")
+                if act is not None and act in self._action:
+                    # One action's entries (a tool and its executor run): the
+                    # model saw the result of the last one.
+                    prev = self._action[act]
+                    self.seen.pop(prev, None)
+                    self._alias[prev] = cid
+                if act is not None:
+                    self._action[act] = cid
+                self.seen[cid] = self.turn
+                self.lines[cid] = _read_line(cid, e)
+        from core.envfile import env_int
+        # ponytail: the loop's turn horizon; with message counts pinned
+        # (ATLAS_AGENT_KEEP_TOOL_RESULTS) it is approximate.
+        horizon = max(1, env_int("ATLAS_AGENT_KEEP_TOOL_TURNS", 4))
+        open_ = [c for c in sorted(self.seen) if c not in self.cited and self.turn - self.seen[c] < horizon]
+        place = (not suppress and len(open_) >= RECORD_NUDGE_READS
+                 and len({self.seen[c] for c in open_}) >= RECORD_NUDGE_TURNS)
+        named = tuple(open_[:RECORD_NUDGE_NAMED]) if place else ()
+        if named == self.named:
+            return None
+        placed, self.named = self.named, named
+        if not named:
+            return "" if placed else None
+        self.named_ever |= set(named)
+        more = len(open_) - len(named)
+        # The order comes first: a work order of due reads stands beside this
+        # list, and a list that only describes is read as one more agenda
+        # after it. What counts as a finding is the latch's definition: a
+        # summary of routine rows recorded to empty the list cites many reads
+        # at once and records nothing a read showed, so the list says such a
+        # read needs none and leaves on its own.
+        return ("Before the next reads, record what these reads showed that bears on the case (an actor, an "
+                "action, an artifact's state, a time): one misc.record_finding per such thing, citing that read's "
+                "call id (linked_call_id or input_call_ids). Routine or baseline activity is not a finding: a read "
+                "that showed only that needs no finding and leaves this list on its own; a note does not take a "
+                "read off it. Reads whose rows no finding cites yet (a read leaves this list when a finding cites "
+                "it or its result leaves the conversation):\n"
+                + "\n".join(f"- {self.lines[c]}" for c in named)
+                + (f"\n- and {more} later read(s)" if more > 0 else ""))
 
 
 def tool_allowed_while_latched(tool_name: str) -> bool:

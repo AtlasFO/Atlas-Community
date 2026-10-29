@@ -22,7 +22,7 @@ def _finding(cid, description, cited, confidence="LIKELY"):
 
 QUERY = _call(206, "<py>:table_table_query",
               '{"path": "analysis/dc_security_4624_4625.csv", "matched_rows": 11, '
-              '"returned_rows": 11, "rows": [{"EventId": "4624", "TimeCreated": "2020-09-19 03:21:48"}]}')
+              '"returned_rows": 11, "rows": [{"EventId": "4624", "TimeCreated": "2031-03-01 03:21:48"}]}')
 CUT_GREP = _call(214, "sudo ngrep -q -I evidence/network/capture.pcap -i POST tcp",
                  "T 10.0.0.5:49694 -> 203.0.113.9:443 [AP] POST /x", truncated=True)
 NOTE = {"type": "reason_call", "call_id": 300, "tool": "reason_synthesize",

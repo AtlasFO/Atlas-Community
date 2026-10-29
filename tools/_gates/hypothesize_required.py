@@ -22,6 +22,9 @@ _BEHAVIOUR_RE = re.compile(
 
 
 def check(ctx) -> Optional[dict]:
+    from core.deferred_intents import report_check_no_scenario_on
+    if report_check_no_scenario_on():
+        return None          # the observer goes with the scenario checks that read its stamp
     if ctx.tier not in {"CONFIRMED", "LIKELY"}:
         return None
     if (ctx.tested_hypothesis_id or "").strip():
@@ -46,6 +49,9 @@ def check(ctx) -> Optional[dict]:
     if matched_hyp is not None:
         ctx.gated_by_hypothesize_call_id = int(matched_hyp.get("call_id") or 0)
         return None
+    from core.deferred_intents import dair_no_defer_on
+    if dair_no_defer_on():
+        return None          # an observer: it stamps, it never refuses (ATLAS_DAIR_NO_DEFER)
 
     return {
         "success": False,

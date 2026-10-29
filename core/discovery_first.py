@@ -192,7 +192,7 @@ def lookup_known(case_dir: str | os.PathLike | None, path: str) -> str | None:
         resolved = hit
     if not resolved or not os.path.exists(resolved):
         return None
-    # Drop poisoned mappings (e.g. MFT.csv → $MFT from an earlier bug).
+    # Drop poisoned mappings (e.g. MFT.csv → $MFT).
     if not _compatible_candidate(path, resolved):
         try:
             kn.get("known_paths", {}).pop(_norm(path), None)
@@ -684,9 +684,10 @@ def check_and_resolve_input_paths(
     missing_payloads: list[dict[str, Any]] = []
     repeat = False
 
+    from core.stack import population_word
     for key in INPUT_PATH_PARAM_NAMES:
         val = new_args.get(key)
-        if not isinstance(val, str):
+        if not isinstance(val, str) or population_word(tool_name, key, val):
             continue
         path = _norm(val)
         if not path:

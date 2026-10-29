@@ -47,26 +47,64 @@ def _offset_args(image: str, offset_sectors: Optional[int]) -> list[str]:
 
 def _note_volume(image: str, offset_sectors: Optional[int], res: dict) -> dict:
     """After a filesystem call: remember an offset that worked; on failure,
-    point at the offset that worked before when the call used another."""
+    point at the offset that worked before when the call named another, or
+    else, when the address asked for is outside the filesystem's range, at
+    finding the file by its path."""
+    if not isinstance(res, dict):
+        return res
     try:
         from core.mount_plan import note_volume_offset, volume_offset
         from core.paths import active_case_dir
         cd = active_case_dir()
-        if not cd or not isinstance(res, dict):
-            return res
-        if res.get("success") and offset_sectors:
+        if cd and res.get("success") and offset_sectors:
             note_volume_offset(cd, image, int(offset_sectors))
-        elif not res.get("success"):
+        elif cd and not res.get("success") and offset_sectors:
+            # A call that names no offset reads at the remembered one
+            # (_offset_args), so only a named offset can be another volume.
             known = volume_offset(cd, image)
-            if known and int(offset_sectors or 0) != known:
+            if known and int(offset_sectors) != known:
                 res["hint"] = (
                     f"the filesystem on this image was read successfully at "
                     f"offset_sectors={known} earlier; this call used "
-                    f"{offset_sectors or 'no offset'} — a different volume."
+                    f"{offset_sectors} — a different volume."
                 )
     except Exception:  # noqa: BLE001
         pass
+    if not res.get("success"):
+        hint = _address_range_hint(res)
+        if hint:
+            res.setdefault("hint", hint)
     return res
+
+
+# The Sleuth Kit's answer for a metadata address outside the filesystem's
+# range: icat, istat, ffind and jcat name the range's last address ("too
+# large") or its first ("too small"); fls reports the failed directory walk
+# that every filesystem driver's range check produces.
+_ADDRESS_RANGE_RE = re.compile(
+    r"(?:Metadata address|Inode(?: value)?) (?:is )?too (large|small) for image \((\d+)\)")
+_WALK_RANGE_RE = re.compile(r"Invalid walk range \([^)]*dir_open_meta\b")
+
+
+def _address_range_hint(res: dict) -> Optional[str]:
+    """What to do with an address this filesystem does not have. Addresses
+    belong to one filesystem, so a number taken from a timeline, another
+    image or another copy of the volume finds nothing here, or another file;
+    the file's path in this image gives its address here. The action comes
+    first: a failure latch quotes a hint's first 200 characters."""
+    text = str(res.get("stderr") or res.get("error") or "")
+    m = _ADDRESS_RANGE_RE.search(text)
+    if m:
+        bound = f" ({'last' if m.group(1) == 'large' else 'first'} address {m.group(2)})"
+    elif _WALK_RANGE_RE.search(text):
+        bound = ""
+    else:
+        return None
+    return (f"metadata address outside this filesystem's range{bound}: find the file by "
+            "its path in this image (tsk.resolve_path, or tsk.fls of its folder) and use "
+            "the address it returns. Addresses belong to one filesystem: a number from a "
+            "timeline, another image, another copy of this volume or another volume of "
+            "this image (offset_sectors) does not apply here.")
 
 
 
@@ -90,15 +128,55 @@ _NOT_A_VOLUME_RE = re.compile(r"(?i)\bmeta\b|unallocated|primary table|safety ta
 _NO_FS_RE = re.compile(r"(?i)cannot determine file system type")
 
 
+@functools.lru_cache(maxsize=1)
+def tsk_image_types() -> frozenset[str]:
+    """The image types this Sleuth Kit build reads (``mmls -i list``),
+    probed once per process. A build with libewf lists ``ewf`` and reads an
+    Expert Witness image without a mounted device; the distribution
+    packages often list only ``raw``. The contents index and the readers
+    below share this one probe, so the index never offers an image the
+    readers would refuse."""
+    try:
+        import subprocess
+        argv = program_argv("mmls") or ["mmls"]
+        proc = subprocess.run([*argv, "-i", "list"], capture_output=True, text=True, timeout=20)
+    except Exception:  # noqa: BLE001 - no Sleuth Kit: no native types
+        return frozenset()
+    text = f"{proc.stdout}\n{proc.stderr}"
+    # The list prints one type per line, its name first ("raw (Single or
+    # split raw file (dd))", "ewf (Expert Witness Format (EnCase))").
+    return frozenset(m.group(1).lower() for m in re.finditer(r"(?m)^\s*([A-Za-z0-9_]+)\s+\(", text))
+
+
 def _tsk_readable(image: str) -> tuple[str, Optional[dict]]:
     """``(image to read, refusal)``: an Expert Witness image is replaced by
-    its mounted raw device; when none exposes it the refusal names what to
-    mount. Anything else is read as given."""
+    its mounted raw device, or read natively when this Sleuth Kit build
+    reads EWF (``tsk_image_types``); when neither, the refusal names what
+    to mount. A disk container (VMDK, VHD, VHDX, QCOW2, VDI), or the path of
+    its raw view, is replaced by the live view (started when it is down);
+    one without a view is refused with the reason. Anything else is read as
+    given."""
     try:
-        from core.mount_plan import device_for_mount_point, ewf_device_for, is_ewf_image
+        from core.mount_plan import (device_for_mount_point, ewf_device_for, is_ewf_image,
+                                     raw_device_for)
         from core.paths import active_case_dir
     except Exception:  # noqa: BLE001
         return image, None
+    if image and not is_ewf_image(image):
+        view, why = raw_device_for(active_case_dir(), image)
+        if view:
+            return view, None
+        if why:
+            from core.raw_views import NO_HOST_VIEWS, START_FAILED, read_refusal
+            refusal = {"success": False, "error": read_refusal(image, why), "image": image}
+            if why.startswith((NO_HOST_VIEWS, START_FAILED)):
+                refusal["gate"] = "image_format"          # this host, or now: no word on the image
+            else:
+                # The container itself is refused for good (its chain, its
+                # type): this read failed on the image and counts as the
+                # failed read the image can be blocked on.
+                refusal["failure_class"] = "unsupported_format"
+            return image, refusal
     if not image or not os.path.exists(image):
         return image, None
     if os.path.isdir(image):
@@ -123,6 +201,8 @@ def _tsk_readable(image: str) -> tuple[str, Optional[dict]]:
     device = ewf_device_for(active_case_dir(), image)
     if device:
         return device, None
+    if "ewf" in tsk_image_types():
+        return image, None
     return image, {
         "success": False,
         "gate": "image_format",
@@ -224,7 +304,7 @@ def _image_missing(image: str) -> dict | None:
 
 
 def _access_workflow_refuse(tool_name: str) -> dict | None:
-    """B6/I3: refuse deep disk / fls-streak while winevt work-order pending."""
+    """Refuse deep disk / fls-streak while the winevt work order is pending."""
     try:
         from core.access_workflow import refuse_deep_disk_until_winevt
         from core.execution_log import log as _elog
@@ -258,15 +338,37 @@ def tsk_mmls(image: str) -> dict:
     """Display partition table (MBR and GPT) — get sector offsets for mounting.
 
     An image without a volume system (a superfloppy layout, a reformatted
-    removable key) is a normal answer, not a failure: the result then says
-    so and the next step is tsk.fsstat / tsk.fls on the image itself, with
-    no offset.
+    removable key) whose filesystem opens at its first sector is a normal
+    answer, not a failure: the result then says so and the next step is
+    tsk.fsstat / tsk.fls on the image itself, with no offset. When no
+    filesystem opens there either, the result is a failure that says so.
     """
     _missing = _image_missing(image)
     if _missing:
         return _missing
-    return run(["mmls", image], needs_sudo=False,
-               timeout=_metadata_timeout(image))
+    timeout = _metadata_timeout(image)
+    res = run(["mmls", image], needs_sudo=False, timeout=timeout)
+    if (res.get("success") or res.get("exit_code") != 1
+            or str(res.get("stdout") or "").strip() or str(res.get("stderr") or "").strip()):
+        return res
+    # mmls exits 1 without a word both for a volume with no partition table
+    # and for a file it cannot read at all; a filesystem at the first sector
+    # tells the two apart (fsstat: a trace entry of its own, an open attempt).
+    fs = run(["fsstat", image], needs_sudo=False, timeout=timeout)
+    if fs.get("success"):
+        m = re.search(r"File System Type:\s*(\S+)", str(fs.get("stdout") or ""))
+        kind = f"a {m.group(1)} filesystem" if m else "a filesystem"
+        return {**fs, "volume_system": "none", "stdout": (
+            f"no partition table: the image holds no volume system, and {kind} opens at sector 0 "
+            f"(fsstat, call {fs.get('_atlas_call_id')}). Read it with tsk.fls / tsk.fsstat / tsk.resolve_path "
+            "on the image without offset_sectors.")}
+    why = " ".join(str(fs.get("stderr") or fs.get("error") or "").split())[:200] or f"exit {fs.get('exit_code')}"
+    return {**fs, "success": False, "error": (
+        f"mmls finds no partition table, and no filesystem opens at sector 0 either (fsstat: {why}; call "
+        f"{fs.get('_atlas_call_id')}). The Sleuth Kit cannot read this image as it is: it holds a layout The Sleuth "
+        "Kit does not know (an encrypted volume, a logical volume manager, a container such as APFS), a format "
+        "this build cannot open, or damage. Look at its first sectors (strings.hexdump), try a reader of that "
+        "format, or mark the image blocked with this reason.")}
 
 
 @mcp.tool()
@@ -324,7 +426,69 @@ def tsk_fls(
     cmd.append(image)
     if inode is not None:
         cmd.append(str(inode))
-    return _note_volume(image, offset_sectors, run(cmd, needs_sudo=False, timeout=_metadata_timeout(image)))
+    res = _note_volume(image, offset_sectors, run(cmd, needs_sudo=False, timeout=_metadata_timeout(image)))
+    return _spill_as_summary(res, image, bodyfile)
+
+
+# A spilled listing's summary, by spill path and size: parsing a large
+# spill again for the same call output is the cost this saves.
+_SPILL_SUMMARIES: dict[tuple, list[str]] = {}
+
+
+def _spill_as_summary(res: dict, image: str, bodyfile: bool) -> dict:
+    """A listing cut at the output cap comes back as the directory summary
+    of the whole spill (ATLAS_LISTING_SHAPE) instead of its first lines;
+    the spill path stays in the result for paging."""
+    spill = str((res or {}).get("stdout_file") or "")
+    if not (res.get("truncated") and spill and os.path.isfile(spill)):
+        return res
+    from core.contents_index import directory_summary, listing_shape_on, parse_bodyfile, summary_lines
+    if not listing_shape_on():
+        return res
+    try:
+        key = (spill, os.path.getsize(spill))
+        lines = _SPILL_SUMMARIES.get(key)
+        if lines is None:
+            with open(spill, "r", encoding="utf-8", errors="replace") as fh:
+                entries = parse_bodyfile(fh) if bodyfile else _fls_entries(fh)
+            for e in entries:
+                e.setdefault("image", image)
+            shape = directory_summary(entries)
+            lines = [f"{shape['total_files']:,} files in {shape['total_dirs']:,} directories "
+                     "(the whole listing, summarised)"] + summary_lines(shape)
+            while len(_SPILL_SUMMARIES) >= 64:
+                _SPILL_SUMMARIES.pop(next(iter(_SPILL_SUMMARIES)))
+            _SPILL_SUMMARIES[key] = lines
+    except (OSError, ValueError):
+        return res
+    out = dict(res)
+    out["stdout"] = "\n".join(lines)
+    out["listing_summary"] = True
+    out["note"] = (f"The listing was longer than the output cap: above is one line per directory of the whole "
+                   f"listing; the full listing is at {spill}.")
+    return out
+
+
+def _fls_entries(lines) -> list[dict]:
+    """``fls -r`` lines (depth as leading '+') as entries with full paths."""
+    stack: list[str] = []
+    out: list[dict] = []
+    for raw in lines:
+        line = raw.rstrip("\r\n")
+        depth = len(line) - len(line.lstrip("+"))
+        m = _FLS_LINE_RE.match(line.lstrip("+ ").strip())
+        if not m:
+            continue
+        typ, deleted, _meta, _attr, _seq, name = m.groups()
+        name = name.strip()
+        del stack[depth:]
+        path = "/".join([*stack, name])
+        if typ.startswith("d") or typ.endswith("d"):
+            stack.append(name)
+            out.append({"path": path, "is_dir": 1})
+        else:
+            out.append({"path": path, "is_dir": 0, "deleted": bool(deleted)})
+    return out
 
 
 @mcp.tool()
@@ -398,6 +562,97 @@ def tsk_resolve_path(
         if entries is not None:
             out["entries"] = entries[:400]
     return _note_volume(image, offset_sectors, out)
+
+
+@mcp.tool()
+def tsk_index_find(
+    pattern: str = "",
+    host: str = "",
+    image: str = "",
+    under: str = "",
+    state: str = "",
+    limit: int = 40,
+    offset: int = 0,
+    summary: Optional[bool] = None,
+) -> dict:
+    """
+    Find files inside the case's disk images in the contents index built
+    at intake (every image listed once with fls), without running fls.
+    pattern: case-insensitive substring or glob over the path inside the
+        image, e.g. "sysmon" or "*.evtx".
+    host: a host label.
+    image: an image path (for an image no host is linked to, or one image of
+        a host).
+    under: a directory prefix inside the image.
+    state: unread, partial (timeline rows shown), read or skipped (no
+        export covers it).
+    Each row gives the image, the path inside it, size, times, the inode
+    and the export rows that cover it; total is exact, offset pages.
+    summary: when more files match than limit, the result is one line per
+        directory (file count, extensions, oldest and newest time, examples,
+        a handle) instead of a cut row list; true always, false never.
+    Answers "does this host's image hold a file like this?" in one call.
+    """
+    from core.contents_index import _public_row, find, index_on
+    from core.paths import active_case_dir
+    if not index_on():
+        return {"success": False, "error": "the contents index is off in this run (ATLAS_CONTENTS_INDEX)"}
+    for name, value in (("host", host), ("image", image)):
+        if "::" in str(value or ""):
+            # A handle is what a parser reads, not a place to search.
+            return {"success": False, "gate": "handle_in_search",
+                    "error": (f"{name} holds an image handle ({value}); pass the handle as the file argument "
+                              "of a parser to read that file, or the image path alone "
+                              f"(image=\"{str(value).split('::', 1)[0]}\") to search inside it here")}
+    if state and state not in ("unread", "partial", "read", "skipped"):
+        return {"success": False, "error": "state must be one of unread, partial, read, skipped"}
+    case = active_case_dir()
+    if not case:
+        return {"success": False, "error": "no active case"}
+    limit = max(1, min(int(limit or 40), 200))
+    offset = max(0, int(offset or 0))
+    from core.contents_index import directory_summary, find_summary, listing_shape_on, summary_lines
+    # A first page over the limit gets the summary; a later page (offset)
+    # is rows, as asked.
+    shape_wanted = summary is not False and listing_shape_on() and (summary or not offset)
+    if state and shape_wanted:
+        # The read state comes from the trace, not the table, so the state
+        # filter reads every candidate row once: one pass serves the count,
+        # the page and the summary.
+        every = find(case, pattern=pattern, host=image or host, under=under, state=state,
+                     limit=1 << 62, offset=0)
+        res = {"total": every["total"], "rows": every["rows"][offset:offset + limit]}
+    else:
+        every = None
+        res = find(case, pattern=pattern, host=image or host, under=under, state=state, limit=limit,
+                   offset=offset)
+    if shape_wanted and (summary or res["total"] > limit) and res["total"]:
+        # The shape of the matches instead of a cut row list: a directory
+        # per line, drilled into with under=.
+        if every is not None:
+            shape = directory_summary(every["rows"])
+        else:
+            shape = find_summary(case, pattern=pattern, host=image or host, under=under)
+        return {"success": True, "host": image or host, "pattern": pattern, "total": res["total"],
+                "summary": summary_lines(shape), "total_dirs": shape["total_dirs"],
+                "note": ("One line per directory. List one directory's files with under=<directory> "
+                         "(and host=), or pass summary=false for rows; a handle is the file argument "
+                         "of a parser.")}
+    out = {"success": True, "host": image or host, "pattern": pattern, "total": res["total"],
+           "offset": offset, "rows": [_public_row(r) for r in res["rows"]]}
+    if not res["total"]:
+        from core.contents_index import failed_images, listed_images
+        out["listed_images"] = len(listed_images(case))
+        failed = failed_images(case)
+        if failed:
+            out["not_listed"] = [f"{img}: {why}" for img, why in failed[:10]]
+    elif res["total"] > offset + len(out["rows"]):
+        out["next_offset"] = offset + len(out["rows"])
+    from core.contents_index import image_handles_on
+    out["note"] = ("Pass a handle as the file argument of any parser; the file is extracted first."
+                   if image_handles_on() else
+                   "Extract a file with tsk.icat(image, inode, output_path) and parse the copy.")
+    return out
 
 
 # Directory listings read while resolving paths, by image, offset and
@@ -508,10 +763,10 @@ def tsk_icat(
         cmd.append("-s")
     cmd += _offset_args(image, offset_sectors)
     cmd += [image, str(inode)]
-    return run_with_output_file(
+    return _note_volume(image, offset_sectors, run_with_output_file(
         cmd, output_path=output_path, mode="wb",
         timeout=_metadata_timeout(image), needs_sudo=False,
-    )
+    ))
 
 
 @mcp.tool()
@@ -651,6 +906,10 @@ def tsk_mactime(
     start_date / end_date: filter to a date range, format YYYY-MM-DD.
     csv_output: produce comma-separated output (easier for analysis).
     """
+    from core.input_kind import refuse_non_bodyfile
+    refusal = refuse_non_bodyfile(bodyfile)
+    if refusal:
+        return refusal
     cmd = ["mactime", "-b", bodyfile, "-z", "UTC"]
     if csv_output:
         cmd.append("-d")

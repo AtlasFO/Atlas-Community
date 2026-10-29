@@ -62,6 +62,43 @@ def extract_claims(finding: str) -> list[tuple[str, str]]:
     return claims
 
 
+_CONTROL = re.compile(r"[\x00-\x1f]")
+
+
+def value_forms(value: str) -> list[str]:
+    """The forms a value takes in evidence text, lowered: as written; JSON-
+    escaped (as json.dumps writes it, with and without ensure_ascii: a
+    backslash doubled, a quote escaped, a non-ASCII letter as \\uXXXX); and,
+    for a value the model copied in escaped form, unescaped, only when that
+    gives no control character (a raw Windows path's \\t or \\n must not
+    become a tab or a line break that meets a tab-separated text). Built from
+    the value as written, lowered after. The other escape handling sits on
+    the haystack side and is separate: quoted_text_grounding (decodes \\" \\\\
+    \\n), the incident map's row mapping and frontier quote reading (\\\\
+    only), core.indicators._unescaped (\\" and \\\\); the known-issues
+    list names them."""
+    import json
+    forms = [value]
+    for ascii_ in (False, True):
+        escaped = json.dumps(value, ensure_ascii=ascii_)[1:-1]
+        if escaped not in forms:
+            forms.append(escaped)
+    if "\\" in value:
+        try:
+            plain = json.loads('"' + value.replace('"', '\\"') + '"')
+        except ValueError:
+            plain = None
+        if isinstance(plain, str) and plain not in forms and not _CONTROL.search(plain):
+            forms.append(plain)
+    return list(dict.fromkeys(f.lower() for f in forms))
+
+
+def held_form(value: str, text_lower: str) -> str:
+    """The form (value_forms) in which the value occurs in an already
+    lowered text, "" when none does."""
+    return next((f for f in value_forms(value) if f and f in text_lower), "")
+
+
 def deterministic_cite_check(finding: str, supporting_evidence: str) -> dict:
     """Verify every citable artifact value in `finding` appears in
     `supporting_evidence`. Mirrors reason.cite_check's verdict vocabulary."""
@@ -85,7 +122,7 @@ def deterministic_cite_check(finding: str, supporting_evidence: str) -> dict:
 
     cited, uncited = [], []
     for _kind, value in claims:
-        if value.lower() in evidence:
+        if held_form(value, evidence):           # evidence is lowered above
             cited.append(value)
         else:
             uncited.append(value)

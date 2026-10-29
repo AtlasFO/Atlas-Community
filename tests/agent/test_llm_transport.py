@@ -15,7 +15,7 @@ from types import SimpleNamespace
 import pytest
 
 from agent import llm
-from agent.llm import (EXPLICIT_CAP, THINKING_BUDGET, THINKING_ENABLE,
+from agent.llm import (EXPLICIT_CAP, THINKING_ENABLE, THINKING_OUTPUT_CONFIG,
                        THINKING_NONE, THINKING_REASONING_OBJECT,
                        THINKING_TYPE, ApiCompatProfile, LLMHubClient,
                        build_chat_payload)
@@ -92,6 +92,29 @@ class TestNoCapByDefault:
         assert wire.sent[0]["max_tokens"] == 256
 
 
+class TestOneAnswerAllowanceTeachesNothing:
+    """A cut at the one-answer allowance is a runaway of this call: it never
+    lowers the level the role opens at for the rest of the run."""
+
+    def test_a_runaway_with_text_is_asked_lower_and_nothing_is_remembered(self, wire):
+        loop = {"choices": [{"message": {"content": "again " * 20}, "finish_reason": "length"}],
+                "usage": {"completion_tokens": llm.ONE_ANSWER_MAX_TOKENS}}
+        wire.replies[:] = [_Reply(loop), _Reply(_answered())]
+        c = _client()
+        resp = llm.one_answer_chat(c, MSGS, role="report_answer")
+        assert resp.content == "ok" and resp.length_cuts == 1
+        assert [p.get("max_tokens") for p in wire.sent] == [llm.ONE_ANSWER_MAX_TOKENS] * 2
+        assert wire.sent[1].get("reasoning_effort")
+        assert c.profile.level_by_role == {}
+
+    def test_a_reply_starved_at_the_allowance_teaches_no_level(self, wire):
+        wire.replies[:] = [_Reply(_starved("length"))]
+        c = _client()
+        resp = llm.one_answer_chat(c, MSGS, role="dair")
+        assert resp.content == "ok" and c.ladder_events and c.ladder_events[0]["rung"] == "lower_level"
+        assert c.profile.level_by_role == {}
+
+
 class TestStarvationLadder:
     """Measured on the hub: the same prompt starved at 8192 and answered
     with no cap; one that still starves answers at a bounded level."""
@@ -149,11 +172,34 @@ class TestStarvationLadder:
         _client().chat(MSGS, role="dair", max_tokens=8192)
         assert wire.sent[2]["reasoning_effort"] == "high"
 
+    def test_a_call_without_a_role_reads_the_analysts_level_and_teaches_nothing(self, wire):
+        """A helper that names no role runs at the analyst's level; what its
+        climb finds is not remembered, so no helper can lower the level the
+        analyst opens from. The analyst names its role and learns."""
+        llm.remember_api_compat("default", "m", ApiCompatProfile(
+            level_by_role={"agent": "low"}), persist=False)
+        wire.replies[:] = [_Reply(_starved("stop"))]
+        c = _client()
+        assert c.chat(MSGS, max_tokens=8192).content == "ok"
+        assert [p.get("reasoning_effort") for p in wire.sent] == ["low", "minimal"]
+        assert c.profile.level_by_role == {"agent": "low"}
+        wire.replies[:] = [_Reply(_starved("stop"))]
+        c.chat(MSGS, role="agent", max_tokens=8192)
+        assert c.profile.level_by_role == {"agent": "minimal"}
+        # An explicit empty role (the connection probe) asks for no level
+        # at all, so it sees the endpoint's own default, and learns nothing.
+        wire.replies[:] = [_Reply(_starved("stop"))]
+        c.chat(MSGS, role="", max_tokens=8192)
+        assert "reasoning_effort" not in wire.sent[-2]
+        assert c.profile.level_by_role == {"agent": "minimal"}
+
     def test_a_rung_reached_through_a_cut_the_client_made_is_not_remembered(self, wire):
         """A reply the client closed for runaway thinking, or that the
         connection cut, says nothing sure about the level: the rescue
         serves that call with less thinking (never "high", which from an
-        unset level would be more), and the next one opens where it did."""
+        unset level would be more), nothing is learned for good, and the
+        next run opens where it did. Within this run the helper role opens
+        at the level that answered (agent.llm._RUN_LEVEL)."""
         wire.replies[:] = [_Reply({**_starved("length"), "atlas_cut": "thinking_bound"})]
         c = _client()
         resp = c.chat(MSGS, role="dair", max_tokens=8192)
@@ -161,7 +207,10 @@ class TestStarvationLadder:
         assert [p.get("reasoning_effort") for p in wire.sent] == [None, "low"]
         assert c.profile.level_by_role == {}
         c.chat(MSGS, role="dair", max_tokens=8192)
-        assert "reasoning_effort" not in wire.sent[2]
+        assert wire.sent[2].get("reasoning_effort") == "low"
+        llm._RUN_LEVEL.clear()               # a new run
+        c.chat(MSGS, role="dair", max_tokens=8192)
+        assert "reasoning_effort" not in wire.sent[3]
 
     def test_a_level_that_answered_only_with_compacted_input_is_not_remembered(self, wire):
         llm.remember_api_compat("default", "m", ApiCompatProfile(
@@ -298,9 +347,13 @@ class TestThinkingControls:
         assert self._body(THINKING_ENABLE)["enable_thinking"] is True
         assert self._body(THINKING_ENABLE, "none")["enable_thinking"] is False
 
-    def test_budget_for_anthropic_compat(self):
-        assert self._body(THINKING_BUDGET, "high")["thinking"] == {
-            "type": "enabled", "budget_tokens": 16384}
+    def test_output_config_rides_reasoning_effort_until_the_wire(self):
+        """The Messages control is spelled on the chat request as
+        reasoning_effort; core.messages_api writes output_config.effort."""
+        assert self._body(THINKING_OUTPUT_CONFIG, "high")["reasoning_effort"] == "high"
+        mapped = build_chat_payload(model="m", messages=MSGS, thinking_level="minimal", profile=ApiCompatProfile(
+            thinking_control=THINKING_OUTPUT_CONFIG, level_map={"minimal": "low", "none": "low"}))
+        assert mapped["reasoning_effort"] == "low" and "thinking" not in mapped
 
     def test_no_control_sends_nothing(self):
         body = self._body(THINKING_NONE)
@@ -711,7 +764,7 @@ class TestReplyBounds:
     def test_the_reply_deadline_is_a_share_of_the_budget(self, wire, monkeypatch):
         seen = {}
 
-        def _assemble(lines, *, reasoning_limit=0, deadline=None):
+        def _assemble(lines, *, reasoning_limit=0, deadline=None, stats=None):
             seen["deadline"] = deadline
             return {"choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"},
                                  "finish_reason": "stop"}], "usage": {"completion_tokens": 2}}
@@ -875,13 +928,13 @@ class TestARefusedThinkingObject:
     400) is driven without one from then on; a cap below the budget is a
     different 400 and still raises the cap."""
 
-    def test_a_refused_budget_is_dropped_and_remembered(self, wire):
+    def test_a_refused_thinking_object_is_dropped_and_remembered(self, wire):
         llm.remember_api_compat("default", "m", ApiCompatProfile(
-            thinking_control=THINKING_BUDGET), persist=False)
+            thinking_control=THINKING_TYPE), persist=False)
         wire.replies[:] = [_Reply({}, 400, _REFUSED_BUDGET)]
         c = _client()
         assert c.chat(MSGS, role="reason_cite_check").content == "ok"
-        assert wire.sent[0]["thinking"] == {"type": "enabled", "budget_tokens": 2048}
+        assert wire.sent[0]["thinking"] == {"type": "enabled"}
         assert "thinking" not in wire.sent[1]
         assert c.profile.thinking_control == THINKING_NONE
         assert c.profile.needs_explicit_cap is False
@@ -909,9 +962,11 @@ class TestARefusedThinkingObject:
         prof = ApiCompatProfile.from_dict(ApiCompatProfile(thinking_control=THINKING_NONE).to_dict())
         assert prof.thinking_control == THINKING_NONE
 
-    def test_the_anthropic_preset_sends_no_temperature(self, wire):
-        body = build_chat_payload(model="example-model", messages=MSGS, provider="anthropic")
-        assert "temperature" not in body
+    def test_the_anthropic_profiles_send_no_temperature(self, wire):
+        for preset in ("anthropic", "anthropic-compat"):
+            body = build_chat_payload(model="example-model", messages=MSGS,
+                                      profile=llm.resolve_api_compat("", "example-model", preset))
+            assert "temperature" not in body
 
     def test_no_level_rungs_for_a_model_without_a_thinking_control(self, wire):
         llm.remember_api_compat("default", "m", ApiCompatProfile(
@@ -924,3 +979,140 @@ class TestARefusedThinkingObject:
             pass
         assert "lower_level" not in [e["rung"] for e in c.ladder_events]
         assert len(wire.sent) == 1
+
+
+def test_a_rate_limit_without_a_hint_backs_off(wire, monkeypatch):
+    """A 429 with neither Retry-After nor a 'try again in' hint waits longer
+    each time. Rate limits do not spend the regular attempts, so the backoff
+    is keyed on the 429s seen, not on the attempt count."""
+    slept = []
+    monkeypatch.setattr("agent.llm.time.sleep", slept.append)
+    wire.replies = [_Reply({}, status=429, text='{"error":{"code":429}}')] * 3
+    assert _client().chat(MSGS).content == "ok"
+    assert slept == [2, 4, 8]
+
+
+def test_an_overloaded_provider_is_retried(wire, monkeypatch):
+    """A 529 (overloaded) is transient like a 503: the request goes out again
+    after the backoff, and one that stays overloaded ends as a transport
+    error the caller asks again later, not as a refused request."""
+    slept = []
+    monkeypatch.setattr("agent.llm.time.sleep", slept.append)
+    busy = _Reply({}, status=529, text='{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}')
+    wire.replies = [busy]
+    assert _client().chat(MSGS).content == "ok"
+    assert len(wire.sent) == 2 and slept == [4]
+    wire.replies = [busy] * llm.MAX_RETRIES
+    with pytest.raises(llm.LLMTransportError):
+        _client().chat(MSGS)
+
+
+def test_cache_marks_never_reach_the_callers_history(wire):
+    """The breakpoints go on copies of the messages they change: the body
+    carries them, the caller's history stays as it was, so a saved session
+    and the next provider get it unmarked."""
+    history = [{"role": "system", "content": "frame"},
+               {"role": "user", "content": [{"type": "text", "text": "brief"}]},
+               {"role": "user", "content": "later"}]
+    before = json.dumps(history)
+    _client("anthropic/claude-x").chat(history)
+    assert json.dumps(history) == before
+    mark = {"type": "ephemeral"}
+    assert wire.sent[0]["messages"] == [
+        {"role": "system", "content": [{"type": "text", "text": "frame", "cache_control": mark}]},
+        {"role": "user", "content": [{"type": "text", "text": "brief", "cache_control": mark}]},
+        {"role": "user", "content": "later"}]
+    _client("z-ai/glm-5.2").chat(history)
+    assert "cache_control" not in json.dumps(wire.sent[1])
+
+
+class TestANamedOutputMaximum:
+    """A 400 that names the endpoint's largest completion limit for the
+    model: the request goes again with that maximum, and it is remembered.
+    A per-request fit (context arithmetic) is never taken for the maximum."""
+
+    ANTHROPIC = ('{"type":"error","error":{"type":"invalid_request_error","message":"max_tokens: 65536 > 64000, '
+                 'which is the maximum allowed number of output tokens for claude-haiku-4-5-20251001"}}')
+    OPENAI = ('{"error":{"message":"max_tokens is too large: 65536. This model supports at most 16384 completion '
+              'tokens, whereas you provided 65536.","type":"invalid_request_error","param":"max_tokens"}}')
+
+    @pytest.mark.parametrize("body, ceiling", [(ANTHROPIC, 64000), (OPENAI, 16384)])
+    def test_the_named_maximum_is_sent_and_remembered(self, body, ceiling):
+        out, prof = llm.adapt_payload_for_400({"model": "m", "messages": MSGS, "max_tokens": 65536}, body)
+        assert out["max_tokens"] == ceiling and prof.output_cap == ceiling
+        assert ApiCompatProfile.from_dict(prof.to_dict()).output_cap == ceiling
+
+    @pytest.mark.parametrize("message", [
+        "'max_tokens' or 'max_completion_tokens' is too large: 65536. This model's maximum context length is "
+        "32768 tokens and your request has 5000 input tokens (65536 > 32768 - 5000).",
+        "input length and `max_tokens` exceed context limit: 150000 + 65536 > 200000, decrease input length or "
+        "`max_tokens` and try again",
+        "prompt is too long: 210045 tokens > 200000 maximum",
+        "input length and max_tokens exceed context limit: 5000 + 65536 > 32768, decrease input length or "
+        "max_tokens and try again",
+        "max_tokens 65536 > 32768 (context window minus the 5000 prompt tokens)",
+        "max_tokens=65536; total tokens 70536 > 32768 context length",
+        "Invalid max_tokens: the request has at most 8000 tokens of room left in the context window"])
+    def test_a_context_fit_is_no_maximum(self, message):
+        body = '{"error":{"type":"invalid_request_error","message":' + json.dumps(message) + '}}'
+        assert llm.adapt_payload_for_400({"model": "m", "messages": MSGS, "max_tokens": 65536}, body) is None
+
+    def test_a_remembered_maximum_caps_every_later_request(self, wire):
+        llm.remember_api_compat("default", "m", ApiCompatProfile(needs_explicit_cap=True, output_cap=64000),
+                                persist=False)
+        _client().chat(MSGS, role="reason_cite_check")
+        assert wire.sent[0]["max_tokens"] == 64000
+
+
+def test_the_pacer_counts_every_input_token_unless_the_profile_says_otherwise(wire, monkeypatch):
+    monkeypatch.setenv("ATLAS_AGENT_INPUT_TPM", "400000")
+    wire.replies[:] = [_Reply({"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+                               "usage": {"prompt_tokens": 1000, "completion_tokens": 5,
+                                         "prompt_tokens_details": {"cached_tokens": 800}}})]
+    client = _client()
+    client.chat(MSGS)
+    assert [tok for _ts, tok in client._spend] == [1000]
+    assert client._paced(1000, 800, ApiCompatProfile(pace_cache_reads=False)) == 200
+
+
+class TestArgumentDeltas:
+    """An arguments delta is text appended to its call, or an object that is
+    the whole arguments: it replaces what is not yet an object and never
+    doubles one. A call that ends with no arguments says what its deltas were."""
+
+    @staticmethod
+    def _calls(*arg_deltas, key="arguments", top=False):
+        head = {"id": "c1", "index": 0, "type": "function", "function": {"name": "t"}}
+        chunks = [_chunk({"tool_calls": [head]})]
+        for a in arg_deltas:
+            tc = {"index": 0, key: a} if top else {"index": 0, "function": {key: a}}
+            chunks.append(_chunk({"tool_calls": [tc]}))
+        body = llm.assemble_stream(chunks + [_chunk({}, finish="tool_calls"), "data: [DONE]"])
+        return body, llm.parse_response(body)
+
+    def test_text_deltas_unchanged(self):
+        _b, r = self._calls('{"a": ', '1}')
+        assert r.tool_calls[0].arguments == {"a": 1} and r.empty_calls == []
+
+    def test_an_object_delta_is_the_arguments(self):
+        assert self._calls({"a": 1})[1].tool_calls[0].arguments == {"a": 1}
+        assert self._calls({"a": 1}, key="parameters")[1].tool_calls[0].arguments == {"a": 1}
+        assert self._calls({"a": 1}, top=True)[1].tool_calls[0].arguments == {"a": 1}
+
+    def test_text_then_the_same_object_is_one_object(self):
+        assert self._calls('{"a": ', '1}', {"a": 1})[1].tool_calls[0].arguments == {"a": 1}
+
+    def test_an_object_never_replaces_a_complete_one(self):
+        assert self._calls('{"a": 1}', {"b": 2})[1].tool_calls[0].arguments == {"a": 1}
+
+    def test_an_object_then_text_appends_as_before(self):
+        # The object replaces the empty slot; text after it is appended as a
+        # stack that sends text would expect (a malformed result is told).
+        r = self._calls({"a": 1}, "")[1]
+        assert r.tool_calls[0].arguments == {"a": 1}
+
+    def test_an_empty_call_carries_its_delta_kinds(self):
+        body, r = self._calls("", None)
+        assert body["atlas_empty_call_deltas"] == {"0": ["NoneType", "str", "NoneType"]}
+        assert r.tool_calls[0].arguments == {}
+        assert r.empty_calls == [{"name": "t", "raw": "''", "deltas": ["NoneType", "str", "NoneType"]}]

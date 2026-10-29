@@ -98,7 +98,7 @@ class TestReclaimOutputOwnership:
 
 class TestDetectCaseId:
     @pytest.mark.parametrize("text,expected", [
-        ("**Case ID:** NITROBA-2008\n", "NITROBA-2008"),
+        ("**Case ID:** CASE-2031\n", "CASE-2031"),
         ("**Case ID**: CASE-A\n", "CASE-A"),
         ("| **Case ID** | CASE-C |\n", "CASE-C"),
         ("case_id: WS01\n", "WS01"),
@@ -111,9 +111,9 @@ class TestDetectCaseId:
         assert detect_case_id(tmp_path) == "CASE-A"
 
     def test_dir_basename_fallback(self, tmp_path):
-        case = tmp_path / "cfreds-leak"
+        case = tmp_path / "case-a"
         case.mkdir()
-        assert detect_case_id(case) == "cfreds-leak"
+        assert detect_case_id(case) == "case-a"
 
 
 class TestVol3Bin:

@@ -25,7 +25,7 @@ def enrich_events(events: list[NormalizedTimelineEvent]) -> list[NormalizedTimel
         return events
     try:
         client = LLMHubClient(provider=name)
-        if not client.api_key:
+        if client.key_missing:
             return events
     except (providers.UnknownProvider, LLMError):
         return events

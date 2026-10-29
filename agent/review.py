@@ -18,7 +18,7 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
-from agent.llm import LLMHubClient
+from agent.llm import LLMHubClient, cut_at_allowance, one_answer_chat
 from agent.tui import UI
 from core.brain import answer_key
 
@@ -27,6 +27,10 @@ from core.brain import answer_key
 NO_RECOMMENDATIONS = "None — the run met the bar."
 
 VERDICTS = ("STRONG", "ACCEPTABLE", "NEEDS WORK")
+
+
+_CUT_REVIEW_NOTE = ("[The review reply was cut at the one-answer allowance twice; no verdict or "
+                    "status is taken from it.]")
 
 
 class CrossCaseTraceError(RuntimeError):
@@ -158,8 +162,8 @@ def reviewer_model(analyst_model: str = "") -> str:
     not the LLM hub.
 
     REASON_MODEL belongs to the reason role and is read only while the
-    reviewer has no provider of its own (which is how the reviewer used to
-    ride on the reason backend). Letting it outrank an explicit
+    reviewer has no provider of its own (the reviewer then rides on the
+    reason backend). Letting it outrank an explicit
     ATLAS_REVIEW_PROVIDER would mean that assignment is never followed.
     """
     from core import providers
@@ -190,6 +194,20 @@ def load_trace_from_disk(trace_path: Path) -> tuple[str, list[dict]]:
     import json
     data = json.loads(Path(trace_path).read_text(encoding="utf-8"))
     return data.get("case_id") or "", list(data.get("entries") or [])
+
+
+def recorded_question(case_dir: Path | str | None, trace_path: Path | str | None = None) -> str:
+    """The question the run was given, from the objective it recorded
+    (.atlas/run_objective.json: the brief's requests as the analyst got
+    them), "" when none is recorded or the record names another trace
+    than ``trace_path``. The review never grades a run against "(not
+    provided)" while the case itself holds the questions."""
+    try:
+        from core.run_state import read_objective
+        data = read_objective(case_dir, trace_path=str(trace_path) if trace_path else None)
+    except Exception:  # noqa: BLE001
+        return ""
+    return str((data or {}).get("text") or "").strip()
 
 
 def active_trace_path() -> Path | None:
@@ -349,8 +367,8 @@ def detect_stall(entries: list[dict]) -> dict:
     # counting them tripped high_failure_rate on a healthy run. expected_nonzero is a
     # comparison/search verb exiting 1 (differ / no-match) — a result, not a
     # failure. analyst_error
-    # and tool_error still count. Older traces carry no failure_class and count
-    # as before.
+    # and tool_error still count. Traces without a failure_class count
+    # every failure.
     _NON_FAILURES = {"gate_refusal", "expected_nonzero", "disk_floor"}
     failures = sum(1 for e in tool_calls
                    if not e.get("success", True)
@@ -533,7 +551,7 @@ is actually healthy, say so and keep this to a single line.>
 class Reviewer:
     """Grades a completed run and writes reports/<CASE_ID>_run_review.md."""
 
-    def __init__(self, client: LLMHubClient, case_dir: Path,
+    def __init__(self, client: LLMHubClient | None, case_dir: Path,
                  ui: UI | None = None, gt_dir: Path | None = None):
         self.client = client
         self.case_dir = case_dir
@@ -925,7 +943,8 @@ class Reviewer:
         if v is not None:
             return v
         try:
-            resp = self.client.chat(
+            resp = one_answer_chat(
+                self.client,
                 [{"role": "system", "content":
                   "You are grading a DFIR run review. Read it and reply with "
                   "EXACTLY one line and nothing else: "
@@ -965,10 +984,13 @@ class Reviewer:
         else:
             entries, case_id = self._resolve_run_trace()
             metrics = self.objective_metrics_data()
+        # No question given: the one the run recorded for this trace.
+        question = question or recorded_question(self.case_dir, trace_path or active_trace_path())
         context = self._build_context(run_stats, question, metrics=metrics,
                                       entries=entries, case_id=case_id)
         self.ui.info(f"reviewer model: {self.client.model} (independent pass)")
-        resp = self.client.chat(
+        resp = one_answer_chat(
+            self.client,
             [{"role": "system", "content": REVIEW_SYSTEM_PROMPT},
              {"role": "user", "content": context}])
         review_text = (resp.content or "").strip()
@@ -977,7 +999,13 @@ class Reviewer:
         # artifact — it must never carry the raw key.
         review_text, _ = answer_key.redact(review_text,
                                            self._answer_key_secrets())
-        verdict = self._verdict_or_repair(review_text)
+        if cut_at_allowance(resp):
+            # Half a review is no verdict: the grade is the one a review
+            # without a verdict line gets, and the text says why.
+            review_text = _CUT_REVIEW_NOTE + "\n\n" + review_text
+            verdict = "NEEDS WORK"
+        else:
+            verdict = self._verdict_or_repair(review_text)
 
         # case_id is bound to the run's own trace (see _resolve_run_trace) —
         # never re-read from the process-global singleton here.
@@ -1051,10 +1079,17 @@ class Reviewer:
         return "\n".join(lines)
 
     def review_live(self, trace_path: Path | None = None,
-                    question: str = "") -> dict:
+                    question: str = "", client_factory=None) -> dict:
         """Review an in-flight investigation from its on-disk trace (never the
         live singleton, so it is safe to run from a separate process while the
-        investigation continues). Writes reports/<CASE_ID>_live_review.md."""
+        investigation continues). Writes reports/<CASE_ID>_live_review.md.
+
+        The deterministic stall check decides; the reviewer model is asked
+        only for a run it calls stalled, for the unstick steps. A run that is
+        not stalled gets the check's own report and costs no model call.
+        ``client_factory`` gives the reviewer client when one is needed and
+        the reviewer was built without one; it returns None when no reviewer
+        can be used, and the stalled run then gets the check's report too."""
         if trace_path is None:
             trace_path = active_trace_path()
         if trace_path is None or not Path(trace_path).is_file():
@@ -1065,10 +1100,39 @@ class Reviewer:
         except (OSError, ValueError) as e:
             return {"error": f"cannot read trace {trace_path}: {e}"}
         case_id = case_id or self.case_dir.name
+        question = question or recorded_question(self.case_dir, trace_path)
 
         stall = detect_stall(entries)
-        _, trace_digest = self._summarize_trace(entries=entries, case_id=case_id)
         stall_report = self._stall_report_text(stall)
+        out_dir = self.case_dir / "reports"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        path = out_dir / f"{case_id}_live_review.md"
+        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        if stall["stalled"] and self.client is None and client_factory is not None:
+            self.client = client_factory()
+        if not stall["stalled"] or self.client is None:
+            status = ("STALLED" if stall["stalled"]
+                      else "AT RISK" if stall["hits"] else "HEALTHY")
+            why = ("no reviewer model could be used" if stall["stalled"]
+                   else "the run shows no stall")
+            review_text = (f"STATUS: {status}\n\n## Stall report (deterministic pre-check)\n"
+                           f"{stall_report}")
+            header = (f"# Live Run Review — {case_id}\n\n"
+                      f"_Deterministic stall pre-check on {stamp}: {stall['severity']} "
+                      f"({', '.join(stall['hits']) or 'no signals'}). No model was asked: "
+                      f"{why}._\n\n")
+            path.write_text(header + review_text + "\n", encoding="utf-8")
+            return {
+                "status": status,
+                "stalled": stall["stalled"],
+                "severity": stall["severity"],
+                "hits": stall["hits"],
+                "review": review_text,
+                "path": str(path),
+                "reviewer_model": "",
+                "trace_path": str(trace_path),
+            }
+        _, trace_digest = self._summarize_trace(entries=entries, case_id=case_id)
         context = (
             f"CASE: {case_id}\n"
             f"CASE QUESTION: {question or '(not provided)'}\n\n"
@@ -1077,24 +1141,24 @@ class Reviewer:
 
         self.ui.info(f"live reviewer model: {self.client.model} "
                      f"(stall severity: {stall['severity']})")
-        resp = self.client.chat(
+        resp = one_answer_chat(
+            self.client,
             [{"role": "system", "content": LIVE_REVIEW_SYSTEM_PROMPT},
              {"role": "user", "content": context}])
         review_text = (resp.content or "").strip()
         review_text, _ = answer_key.redact(review_text,
                                            self._answer_key_secrets())
         status = "STALLED"
-        for line in review_text.splitlines():
+        if cut_at_allowance(resp):
+            # No status is read from half a review: the default stands.
+            review_text = _CUT_REVIEW_NOTE + "\n\n" + review_text
+        for line in ([] if cut_at_allowance(resp) else review_text.splitlines()):
             if line.strip().upper().startswith("STATUS"):
                 up = line.upper()
                 status = ("HEALTHY" if "HEALTHY" in up
                           else "AT RISK" if "AT RISK" in up else "STALLED")
                 break
 
-        out_dir = self.case_dir / "reports"
-        out_dir.mkdir(parents=True, exist_ok=True)
-        path = out_dir / f"{case_id}_live_review.md"
-        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         header = (f"# Live Run Review — {case_id}\n\n"
                   f"_Independent mid-run review by `{self.client.model}` on "
                   f"{stamp}. Stall pre-check: {stall['severity']} "

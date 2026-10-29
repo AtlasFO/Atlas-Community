@@ -34,7 +34,11 @@ ENV_DB = "ATLAS_USAGE_DB"
 ENV_CONTEXT = "ATLAS_USAGE_CONTEXT"
 DEFAULT_DB = "~/.config/atlas/usage.db"
 FIELDS = ("case_id", "run_id", "command", "started_by")
-STATUSES = ("ok", "starved", "cut")
+# "lost": a request whose stream the provider or the connection cut before
+# a reply arrived (no tokens, never priced); counted apart from the calls.
+# "refused": the provider declined the request (a safety classifier, a
+# content filter); a call, priced on the tokens the provider reported.
+STATUSES = ("ok", "starved", "cut", "lost", "refused")
 _TIMEOUT = 3.0
 
 _SCHEMA = """
@@ -53,7 +57,8 @@ CREATE TABLE IF NOT EXISTS llm_usage (
     cached_tokens INTEGER NOT NULL,
     reasoning_tokens INTEGER NOT NULL,
     usage_reported INTEGER NOT NULL,
-    status TEXT NOT NULL
+    status TEXT NOT NULL,
+    cache_write_tokens INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_usage_ts ON llm_usage(ts);
 CREATE INDEX IF NOT EXISTS idx_usage_case ON llm_usage(case_id, run_id);
@@ -68,8 +73,10 @@ CREATE TABLE IF NOT EXISTS settled_runs (
 """
 _INSERT = ("INSERT INTO llm_usage (ts, case_id, run_id, command, started_by, "
            "role, provider, model, input_tokens, output_tokens, cached_tokens, "
-           "reasoning_tokens, usage_reported, status) "
-           "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+           "reasoning_tokens, usage_reported, status, cache_write_tokens) "
+           "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+# Columns added after ledgers were created: (name, definition).
+_ADDED = (("cache_write_tokens", "INTEGER NOT NULL DEFAULT 0"),)
 
 _ctx: contextvars.ContextVar[Optional[dict]] = contextvars.ContextVar(
     "atlas_usage_context", default=None)
@@ -108,10 +115,26 @@ def _connect() -> sqlite3.Connection:
     try:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.executescript(_SCHEMA)
+        _migrate(conn)
     except BaseException:
         conn.close()
         raise
     return conn
+
+
+def _missing(conn: sqlite3.Connection) -> list[tuple[str, str]]:
+    have = {r[1] for r in conn.execute("PRAGMA table_info(llm_usage)")}
+    return [c for c in _ADDED if c[0] not in have]
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Add the columns a ledger from before them lacks; its rows read 0 there."""
+    for name, definition in _missing(conn):
+        try:
+            conn.execute(f"ALTER TABLE llm_usage ADD COLUMN {name} {definition}")
+        except sqlite3.OperationalError as exc:
+            if "duplicate column" not in str(exc):     # another writer added it first
+                raise
 
 
 @contextmanager
@@ -146,6 +169,12 @@ def current() -> dict:
     return dict(ctx) if ctx is not None else _from_env()
 
 
+def own_context() -> dict:
+    """The context this process set itself; {} when it only inherited one
+    through the environment."""
+    return dict(_ctx.get() or {})
+
+
 def configure(**fields: Any) -> dict:
     """Merge fields into the context and export it to the environment, so a
     child process inherits it."""
@@ -176,7 +205,11 @@ def reset() -> None:
 
 def record(*, role: str, provider: str, model: str, input_tokens: int,
            output_tokens: int, cached_tokens: int = 0, reasoning_tokens: int = 0,
-           usage_reported: bool = True, status: str = "ok") -> bool:
+           usage_reported: bool = True, status: str = "ok",
+           cache_write_tokens: int = 0) -> bool:
+    """One request. ``input_tokens`` is the whole prompt; ``cached_tokens``
+    (read from the provider's prompt cache) and ``cache_write_tokens``
+    (written to it) are parts of it."""
     ctx = current()
     if not ctx.get("case_id"):
         return False
@@ -189,7 +222,7 @@ def record(*, role: str, provider: str, model: str, input_tokens: int,
                 str(model or ""), int(input_tokens or 0), int(output_tokens or 0),
                 int(cached_tokens or 0), int(reasoning_tokens or 0),
                 1 if usage_reported else 0,
-                status if status in STATUSES else "ok"))
+                status if status in STATUSES else "ok", int(cache_write_tokens or 0)))
         finally:
             conn.close()
         return True
@@ -206,27 +239,42 @@ def _open_reader() -> Optional[sqlite3.Connection]:
         return None
     conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=_TIMEOUT)
     conn.row_factory = sqlite3.Row
+    if _missing(conn):
+        # A ledger from before a column: a writer's connect adds it.
+        conn.close()
+        _connect().close()
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=_TIMEOUT)
+        conn.row_factory = sqlite3.Row
     return conn
 
 
-def daily_rows(since: str) -> list[dict]:
+def daily_rows(since: str, long_over: Optional[dict] = None) -> list[dict]:
     """Rows grouped by UTC day, case, run, command, user, provider and
-    model, from the ISO date `since` on. A missing file reads as empty; a
-    locked or corrupt one raises, so the page says so instead of showing
-    nothing."""
+    model, from the ISO date `since` on. ``long_over`` ({price key: tokens})
+    names the models priced higher for a long prompt: their requests over
+    that many input tokens (cache reads and writes included) group apart,
+    with ``long`` 1. A missing file reads as empty; a locked or corrupt one
+    raises, so the page says so instead of showing nothing."""
     conn = _open_reader()
     if conn is None:
         return []
+    tiers = sorted((long_over or {}).items())
+    long_sql = ("CASE WHEN " + " OR ".join(
+        "(provider || '|' || model = ? AND input_tokens > ?)" for _ in tiers) + " THEN 1 ELSE 0 END"
+        if tiers else "0")
     try:
         rows = conn.execute(
             "SELECT substr(ts, 1, 10) AS day, case_id, run_id, command, "
-            "started_by, provider, model, COUNT(*) AS calls, "
+            f"started_by, provider, model, {long_sql} AS long, "
+            "SUM(CASE WHEN status = 'lost' THEN 0 ELSE 1 END) AS calls, "
             "SUM(input_tokens) AS input, SUM(output_tokens) AS output, "
-            "SUM(cached_tokens) AS cached, SUM(reasoning_tokens) AS reasoning, "
-            "SUM(CASE WHEN usage_reported = 0 THEN 1 ELSE 0 END) AS unreported, "
+            "SUM(cached_tokens) AS cached, SUM(cache_write_tokens) AS cache_write, "
+            "SUM(reasoning_tokens) AS reasoning, "
+            "SUM(CASE WHEN usage_reported = 0 AND status != 'lost' THEN 1 ELSE 0 END) AS unreported, "
+            "SUM(CASE WHEN status = 'lost' THEN 1 ELSE 0 END) AS lost, "
             "MIN(ts) AS first_ts FROM llm_usage WHERE ts >= ? "
-            "GROUP BY day, case_id, run_id, command, started_by, provider, model",
-            (since,)).fetchall()
+            "GROUP BY day, case_id, run_id, command, started_by, provider, model, long",
+            [x for key, over in tiers for x in (key, int(over))] + [since]).fetchall()
     except sqlite3.OperationalError as exc:
         if "no such table" in str(exc):
             return []
@@ -240,11 +288,12 @@ def totals(case_id: str, run_id: str = "") -> dict:
     """Input, output and cached tokens and the number of calls the ledger
     holds for a case, or for one run of it (the case/run index answers it).
     A missing ledger reads as zeros."""
-    out = {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0, "calls": 0}
+    out = {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0, "calls": 0, "lost": 0}
     conn = _open_reader()
     if conn is None:
         return out
-    sql = ("SELECT COUNT(*), SUM(input_tokens), SUM(output_tokens), SUM(cached_tokens) "
+    sql = ("SELECT SUM(CASE WHEN status = 'lost' THEN 0 ELSE 1 END), SUM(input_tokens), "
+           "SUM(output_tokens), SUM(cached_tokens), SUM(CASE WHEN status = 'lost' THEN 1 ELSE 0 END) "
            "FROM llm_usage WHERE case_id = ?")
     args: list = [case_id]
     if run_id:
@@ -259,7 +308,8 @@ def totals(case_id: str, run_id: str = "") -> dict:
     finally:
         conn.close()
     out.update(calls=int(row[0] or 0), input_tokens=int(row[1] or 0),
-               output_tokens=int(row[2] or 0), cached_tokens=int(row[3] or 0))
+               output_tokens=int(row[2] or 0), cached_tokens=int(row[3] or 0),
+               lost=int(row[4] or 0))
     return out
 
 
@@ -301,7 +351,8 @@ def import_run(case_id: str, run_id: str, rows: list[dict]) -> bool:
                 int(r.get("input_tokens") or 0), int(r.get("output_tokens") or 0),
                 int(r.get("cached_tokens") or 0), int(r.get("reasoning_tokens") or 0),
                 1 if r.get("usage_reported", True) else 0,
-                r.get("status") if r.get("status") in STATUSES else "ok")
+                r.get("status") if r.get("status") in STATUSES else "ok",
+                int(r.get("cache_write_tokens") or 0))
                 for r in rows])
             conn.execute("INSERT INTO settled_runs (case_id, run_id, how, row_count, ts) "
                          "VALUES (?, ?, 'imported', ?, ?)",
@@ -393,31 +444,51 @@ def window_start(period: str, months: int, today: Optional[date] = None) -> date
     return first
 
 
+def long_over(prices: dict) -> dict:
+    """{price key: tokens} of the prices with a higher price for long
+    prompts, for daily_rows."""
+    out = {}
+    for key, p in prices.items():
+        try:
+            over = int((p or {}).get("long_over") or 0)
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if over > 0:
+            out[key] = over
+    return out
+
+
 def row_cost(row: dict, prices: dict) -> Optional[float]:
-    """Cost of an aggregated row at today's prices, or None without a price.
-    Cached tokens sit inside the input count on OpenAI-compatible endpoints
-    and are priced at the cached rate; the clamp covers a gateway that
-    reports them outside the count."""
+    """Cost of an aggregated row at the current prices, or None without a price.
+    Cache reads and writes sit inside the input count and are priced at
+    their own rates (the input rate where none is set); the clamp covers a
+    gateway that reports them outside the count. A row of long prompts
+    (``long``) takes the long-prompt prices."""
     p = prices.get(price_key(row.get("provider", ""), row.get("model", "")))
     if not p:
         return None
-    p_in = float(p.get("input") or 0.0)
-    p_out = float(p.get("output") or 0.0)
-    cached_price = p.get("cached")
-    p_cached = p_in if cached_price in (None, "") else float(cached_price)
+    if row.get("long") and p.get("long_input") not in (None, ""):
+        p = {f: p.get(f"long_{f}") for f in ("input", "cached", "cache_write", "output")}
+
+    def rate(field: str, default: float) -> float:
+        value = p.get(field)
+        return default if value in (None, "") else float(value)
+    p_in = rate("input", 0.0)
     inp = int(row.get("input") or 0)
     cached = int(row.get("cached") or 0)
+    write = int(row.get("cache_write") or 0)
     out = int(row.get("output") or 0)
-    return (max(inp - cached, 0) * p_in + cached * p_cached + out * p_out) / 1e6
+    return (max(inp - cached - write, 0) * p_in + cached * rate("cached", p_in)
+            + write * rate("cache_write", p_in) + out * rate("output", 0.0)) / 1e6
 
 
 def _bucket() -> dict:
-    return {"calls": 0, "input": 0, "output": 0, "cached": 0, "reasoning": 0,
-            "unreported": 0, "cost": 0.0, "unpriced": 0}
+    return {"calls": 0, "input": 0, "output": 0, "cached": 0, "cache_write": 0, "reasoning": 0,
+            "unreported": 0, "lost": 0, "cost": 0.0, "unpriced": 0}
 
 
 def _add(bucket: dict, row: dict, cost: Optional[float]) -> None:
-    for k in ("calls", "input", "output", "cached", "reasoning", "unreported"):
+    for k in ("calls", "input", "output", "cached", "cache_write", "reasoning", "unreported", "lost"):
         bucket[k] += int(row.get(k) or 0)
     if cost is None:
         bucket["unpriced"] += int(row.get("calls") or 0)
@@ -435,7 +506,8 @@ def aggregate(rows: list[dict], period: str, prices: dict) -> dict:
     for row in rows:
         cost = row_cost(row, prices)
         key = price_key(row.get("provider", ""), row.get("model", ""))
-        if cost is None:
+        if cost is None and int(row.get("calls") or 0):
+            # A group of lost requests only has nothing to price.
             unpriced_models.add(key)
         pk = period_key(row["day"], period)
         per = periods.setdefault(pk, {"key": pk, "runs": {}, **_bucket()})

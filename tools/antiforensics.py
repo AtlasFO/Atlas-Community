@@ -220,7 +220,7 @@ def _first(row: dict, *names: str) -> str:
     return ""
 
 
-@mcp.tool()
+@mcp.tool(meta={"input_from": ["ez_mftecmd"]})
 @output_safe
 def af_timestomp_drift(
     mft_csv_path: Optional[str] = None,
@@ -493,7 +493,7 @@ def af_sysmon_evasion(system_hive_csv: Optional[str] = None) -> dict:
     }
 
 
-@mcp.tool()
+@mcp.tool(meta={"input_from": ["ez_mftecmd_usn"]})
 @output_safe
 def af_usn_gaps(usn_csv_path: Optional[str] = None, gap_threshold: int = 100) -> dict:
     """
@@ -667,7 +667,7 @@ def _bool_col(row: dict, *names: str) -> Optional[bool]:
     return v.strip().lower() in ("true", "1", "yes")
 
 
-@mcp.tool()
+@mcp.tool(meta={"input_from": ["ez_mftecmd"]})
 @output_safe
 def af_usn_journal_deleted(mft_csv_path: Optional[str] = None) -> dict:
     """
@@ -759,7 +759,7 @@ _ADS_EXEC_EXT = (".exe", ".dll", ".ps1", ".bat", ".cmd", ".vbs", ".vbe",
                  ".scr", ".js", ".jse", ".hta", ".com", ".pif", ".sys")
 
 
-@mcp.tool()
+@mcp.tool(meta={"input_from": ["ez_mftecmd"]})
 @output_safe
 def af_ads_enumeration(mft_csv_path: Optional[str] = None) -> dict:
     """
@@ -873,30 +873,36 @@ def af_zone_identifier_read(stream_path: str) -> dict:
     import configparser
 
     try:
-        with open(stream_path, encoding="utf-8", errors="replace") as f:
+        # utf-8-sig: a stream written with a byte-order mark parses too.
+        with open(stream_path, encoding="utf-8-sig", errors="replace") as f:
             raw = f.read()
     except OSError as e:
         return {"success": False, "error": f"read failed: {e}"}
 
-    cp = configparser.ConfigParser()
+    # The values are evidence text, never templates: with interpolation a
+    # "%" in a signed URL's query raised on get(). strict=False keeps the
+    # last of a repeated key instead of refusing the stream.
+    cp = configparser.ConfigParser(interpolation=None, strict=False)
     try:
         cp.read_string(raw)
+        if not cp.has_section("ZoneTransfer"):
+            return {"success": False,
+                    "error": "no [ZoneTransfer] section found — not a "
+                             "Zone.Identifier stream"}
+        zt = cp["ZoneTransfer"]
+        zone_id = zt.get("ZoneId")
+        host_url, referrer_url = zt.get("HostUrl"), zt.get("ReferrerUrl")
     except configparser.Error as e:
+        # The parser's message quotes the offending line; a line of
+        # evidence is cut, never echoed whole into the model's context.
         return {"success": False,
-                "error": f"not a valid Zone.Identifier stream: {e}"}
-    if not cp.has_section("ZoneTransfer"):
-        return {"success": False,
-                "error": "no [ZoneTransfer] section found — not a "
-                         "Zone.Identifier stream"}
-
-    zt = cp["ZoneTransfer"]
-    zone_id = zt.get("ZoneId")
+                "error": f"not a valid Zone.Identifier stream: {type(e).__name__}: {str(e)[:120]}"}
     return {
         "success": True,
         "zone_id": zone_id,
         "zone_meaning": _ZONE_MEANING.get(zone_id, "unknown"),
-        "host_url": zt.get("HostUrl"),
-        "referrer_url": zt.get("ReferrerUrl"),
+        "host_url": host_url,
+        "referrer_url": referrer_url,
     }
 
 

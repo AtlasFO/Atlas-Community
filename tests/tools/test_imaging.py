@@ -126,14 +126,21 @@ class TestChainInfoAnswersAboutTheDiskAsked:
             {"recommended_descriptor": str(disk_a)},
             {"recommended_descriptor": str(disk_b)},
         ]
+        probed = []
+
+        def _probe(path):
+            probed.append(path)
+            return {"chain": [{"path": path, "format": "vmdk", "virtual_size": 1, "actual_size": 1}]}
+
         with patch("core.vmdk.analyze_vm_dir",
                    return_value={"success": True, "analysis_targets": targets}), \
-             patch("tools.imaging.shutil.which", return_value="/usr/bin/qemu-img"):
+             patch("tools.imaging.shutil.which", return_value="/usr/bin/qemu-img"), \
+             patch("core.raw_views.probe", side_effect=_probe):
             res = vmdk_chain_info(str(disk_b))
 
         assert res["qemu_img_backing_chain_of"] == str(disk_b), \
             "the corroboration must describe the disk that was asked about"
-        assert str(disk_b) in mock_run.call_args[0][0]
+        assert probed == [str(disk_b)] and str(disk_b) in res["qemu_img_backing_chain"]
         # And the caller is told one call covers the whole directory.
         assert res["scope"] == "directory"
         assert "sibling disk needs no second call" in res["scope_note"]

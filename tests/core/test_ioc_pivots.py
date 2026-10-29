@@ -12,6 +12,11 @@ import json
 from core import ioc_pivots as ip
 
 
+import pytest
+
+pytestmark = pytest.mark.usefixtures("todays_pivots")
+
+
 def _case(tmp_path, *, sources=(), claims=()):
     (tmp_path / ".atlas").mkdir(parents=True, exist_ok=True)
     for rel in sources:
@@ -26,6 +31,9 @@ def _case(tmp_path, *, sources=(), claims=()):
     (tmp_path / ".atlas" / "claim_graph.json").write_text(
         json.dumps({"schema_version": "1.0", "nodes": nodes, "edges": []}),
         encoding="utf-8")
+    # The incident frame the pivots are pinned in is the brief's statement.
+    if not (tmp_path / "CASE.md").exists():
+        (tmp_path / "CASE.md").write_text("**Case ID:** CASE-A\n**System owner:** victim\n", encoding="utf-8")
     return tmp_path
 
 
@@ -199,6 +207,267 @@ class TestNudge:
         text = ip.format_pivot_nudge(ip.open_pivots(case))
         assert "record_agent_message" in text and "disposition=True" in text
         assert "record_finding" in text
+
+
+
+class TestOneSearchPerSource:
+    """The nudge asks for one search per source with a pattern naming every
+    indicator owed there, and that one call credits each of them."""
+
+    PIVOTS = [
+        {"ioc": "ip:203.0.113.44", "origin": "C0001",
+         "pending": ["evidence/timeline.csv", "evidence/fw/firewall.log"]},
+        {"ioc": "domain:update.example.com", "origin": "C0002",
+         "pending": ["evidence/timeline.csv"]},
+        # as core.entities.extract stores them: lower case, forward slashes
+        {"ioc": "path:c:/users/public/upd(1).exe", "origin": "C0003",
+         "pending": ["evidence/timeline.csv"]},
+        {"ioc": "reg:hklm/software/microsoft/windows/currentversion/run/updater",
+         "origin": "C0003", "pending": ["evidence/timeline.csv"]},
+    ]
+
+    @staticmethod
+    def _searches(text):
+        return [line for line in text.splitlines() if " owed): pattern " in line]
+
+    def test_sources_owing_the_most_come_first_with_one_pattern_each(self):
+        text = ip.format_pivot_nudge(self.PIVOTS)
+        searches = self._searches(text)
+        assert searches[0].startswith("- evidence/timeline.csv (4 owed): pattern ")
+        assert searches[1] == "- evidence/fw/firewall.log (1 owed): pattern 203.0.113.44"
+        assert "203.0.113.44 (from C0001)" in text and text.count("- ip 203.0.113.44") == 1
+        assert "terms_with_no_row" in text and "coverage.mark_blocked(path, reason)" in text
+
+    def test_the_capped_result_wording_follows_the_view_switch(self, monkeypatch):
+        """With the compact view off the result holds the alternatives block
+        and none of the view's keys, so the nudge names that block."""
+        monkeypatch.setenv("ATLAS_RESULT_VIEW", "0")
+        text = ip.format_pivot_nudge(self.PIVOTS)
+        assert "lists the pattern's alternatives" in text
+        assert "terms_with_no_row" not in text and "terms_not_settled" not in text
+
+    def test_every_pattern_compiles_and_finds_each_of_its_indicators(self):
+        import re
+        for line in self._searches(ip.format_pivot_nudge(self.PIVOTS)):
+            source, pattern = line[2:].split(" owed): pattern ", 1)
+            rx = re.compile(pattern, re.IGNORECASE)
+            owed = [p for p in self.PIVOTS if source.split(" (")[0] in p["pending"]]
+            for p in owed:
+                # the row form a Windows record writes: backslashes, any case
+                row = ip.ioc_value(p["ioc"]).replace("/", "\\").upper()
+                assert rx.search(row), (p["ioc"], pattern)
+
+    def test_the_printed_pattern_credits_every_indicator_it_names(self, tmp_path):
+        (tmp_path / ".atlas").mkdir()
+        ip.save_pivots(tmp_path, {"pivots": {
+            p["ioc"]: {"origin": p["origin"], "targets": {t: "pending" for t in p["pending"]}}
+            for p in self.PIVOTS}})
+        line = self._searches(ip.format_pivot_nudge(self.PIVOTS))[0]
+        pattern = line.split(" owed): pattern ", 1)[1]
+        closed = ip.observe_search(tmp_path, blob="table_grep " + json.dumps(
+            {"path": "evidence/timeline.csv", "pattern": pattern}))
+        assert sorted(closed) == sorted(f"{p['ioc']} -> evidence/timeline.csv"
+                                        for p in self.PIVOTS)
+        listed = ip.observe_search(tmp_path, blob="strings_grep " + json.dumps(
+            {"file_path": "evidence/fw/firewall.log", "pattern": ["203\\.0\\.113\\.44"]}))
+        assert listed == ["ip:203.0.113.44 -> evidence/fw/firewall.log"]
+        assert ip.pivot_stats(tmp_path)["pending"] == 0
+
+    def test_a_path_or_key_is_searched_by_its_last_component(self, tmp_path):
+        import re
+        pivots = [
+            {"ioc": "path:c:/users/jane.doe/downloads/kit/tool.exe", "origin": "C0001",
+             "pending": ["evidence/timeline.csv"]},
+            {"ioc": "file:tool.exe", "origin": "C0001", "pending": ["evidence/timeline.csv"]},
+            {"ioc": "reg:hklm/software/microsoft/windows/currentversion/run/updater",
+             "origin": "C0002", "pending": ["evidence/timeline.csv"]},
+        ]
+        line = self._searches(ip.format_pivot_nudge(pivots))[0]
+        pattern = line.split(" owed): pattern ", 1)[1]
+        assert pattern == "tool.exe|updater" and "/" not in pattern
+        rx = re.compile(pattern, re.IGNORECASE)
+        assert rx.search("C:\\Users\\jane.doe\\Downloads\\kit\\tool.exe")
+        assert rx.search("c:/users/jane.doe/downloads/kit/tool.exe")
+        assert rx.search("HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Run: Updater")
+        (tmp_path / ".atlas").mkdir()
+        ip.save_pivots(tmp_path, {"pivots": {
+            p["ioc"]: {"origin": p["origin"], "targets": {"evidence/timeline.csv": "pending"}}
+            for p in pivots}})
+        closed = ip.observe_search(tmp_path, blob="table_table_grep " + json.dumps(
+            {"path": "evidence/timeline.csv", "pattern": pattern}, ensure_ascii=False))
+        assert len(closed) == 3
+
+    def test_every_printed_term_is_a_credited_term(self):
+        import re
+        for ioc in ("path:c:/users/public/setup (1).exe", "path:c:/tools/kit/", "path:/temp/ab",
+                    "reg:hklm/software/microsoft/windows/currentversion/run/updater",
+                    "path:C:\\Users\\Public\\upd[2].exe", "ip:203.0.113.44"):
+            term = ip.pattern_term(ioc)
+            assert re.sub(r"\\(.)", r"\1", term) in ip._search_terms(ioc), (ioc, term)
+            row = ip.ioc_value(ioc).replace("/", "\\").upper()
+            if ip.ioc_type(ioc) != "path" or len(ip._search_terms(ioc)) > 1:
+                assert re.compile(term, re.IGNORECASE).search(row), (ioc, term)
+
+    def test_a_source_that_does_not_fit_is_left_out_whole_and_counted(self):
+        many = [{"ioc": f"domain:host{i:03d}." + "a" * 60 + ".example.com", "origin": "C0001",
+                 "pending": ["evidence/big.csv"]} for i in range(60)]
+        other = [{"ioc": f"domain:other{i:03d}." + "b" * 60 + ".example.com",
+                  "origin": "C0001", "pending": ["evidence/other.csv"]} for i in range(59)]
+        text = ip.format_pivot_nudge(many + other)
+        searches = self._searches(text)
+        assert len(searches) == 1 and searches[0].startswith("- evidence/big.csv (60 owed)")
+        assert searches[0].count("|") == 59
+        assert "(1 more source, 59 more indicator searches: in a later reminder)" in text
+
+    def test_an_analyst_named_indicator_is_listed_once(self):
+        from core.case_knowledge import ORIGIN
+        text = ip.format_pivot_nudge([{"ioc": "ip:10.0.0.5", "origin": ORIGIN,
+                                       "pending": ["evidence/a.csv", "evidence/b.csv"]}])
+        assert text.count("- ip 10.0.0.5, named by the analyst in CASE.md") == 1
+        assert len(self._searches(text)) == 2
+        assert "corroborating hit is a finding" not in text
+
+
+
+class TestASearchThatStoppedEarly:
+    """A table search stopped at its hit cap saw only the rows before it: the
+    indicators its result does not show stay owed, whatever its pattern
+    named. Results are rendered as the toolbox renders them."""
+
+    IOCS = ("ip:203.0.113.44", "domain:update.example.com", "account:corp/jdoe")
+    SOURCE = "evidence/timeline.csv"
+
+    def _ledger(self, tmp_path, iocs=None):
+        (tmp_path / ".atlas").mkdir()
+        ip.save_pivots(tmp_path, {"pivots": {
+            i: {"origin": "C0001", "targets": {self.SOURCE: "pending"}}
+            for i in (iocs or self.IOCS)}})
+        return tmp_path
+
+    @staticmethod
+    def _rendered(args, rows, *, capped):
+        return json.dumps({"success": True, "path": args["path"], "pattern": args["pattern"],
+                           "hits": [{"_row": n, "Description": r} for n, r in enumerate(rows)],
+                           "hit_count": len(rows), "max_hits": 50,
+                           "hit_cap_reached": capped, "scan_capped": False},
+                          indent=2, default=str, ensure_ascii=False)
+
+    def _call(self, case, pattern, rows, *, capped=True, truncate=None):
+        args = {"path": self.SOURCE, "pattern": pattern}
+        result = self._rendered(args, rows, capped=capped)
+        if truncate:
+            from agent.toolbox import _truncate
+            result = _truncate(result, limit=truncate)
+        blob = "table_table_grep " + json.dumps(args, default=str, ensure_ascii=False)
+        return ip.observe_search(case, blob=blob, result=result)
+
+    def test_only_the_indicators_a_capped_result_shows_are_credited(self, tmp_path):
+        case = self._ledger(tmp_path)
+        closed = self._call(case, "203.0.113.44|update.example.com|corp/jdoe",
+                            ["logon from 203.0.113.44"] * 50)
+        assert closed == ["ip:203.0.113.44 -> evidence/timeline.csv"]
+        assert {p["ioc"] for p in ip.open_pivots(case)} == {
+            "domain:update.example.com", "account:corp/jdoe"}
+
+    def test_a_search_that_ran_to_the_end_credits_every_indicator_it_named(self, tmp_path):
+        case = self._ledger(tmp_path)
+        assert len(self._call(case, "203.0.113.44|update.example.com|corp/jdoe",
+                              ["logon from 203.0.113.44"], capped=False)) == 3
+        assert ip.open_pivots(case) == []
+
+    def test_a_single_term_shown_in_the_rows_is_credited(self, tmp_path):
+        case = self._ledger(tmp_path, iocs=("domain:update.example.com", "host:CORP-DC01"))
+        assert self._call(case, "update.example.com", ["dns update.example.com"] * 50) == [
+            "domain:update.example.com -> evidence/timeline.csv"]
+        assert self._call(case, "CORP-DC01", ["logon to CORP-DC01"] * 50) == [
+            "host:CORP-DC01 -> evidence/timeline.csv"]
+
+    def test_the_parts_of_a_path_in_the_rows_do_not_show_the_path(self, tmp_path):
+        path = "path:C:\\Users\\Public\\1.exe"
+        case = self._ledger(tmp_path, iocs=(path, "ip:203.0.113.44"))
+        closed = self._call(case, "C:\\\\Users\\\\Public\\\\1\\.exe|203\\.0\\.113\\.44",
+                            ["C:\\Users\\Public\\setup.exe from 203.0.113.44"] * 50)
+        assert closed == ["ip:203.0.113.44 -> evidence/timeline.csv"]
+
+    def test_a_non_ascii_value_is_read_as_written(self, tmp_path):
+        case = self._ledger(tmp_path, iocs=("account:corp/müller", "domain:update.example.com"))
+        closed = self._call(case, "müller|update\\.example\\.com",
+                            ["logon by corp/müller"] * 50)
+        assert closed == ["account:corp/müller -> evidence/timeline.csv"]
+
+    def test_a_result_cut_in_its_middle_still_shows_what_it_kept(self, tmp_path):
+        case = self._ledger(tmp_path)
+        closed = self._call(case, "203.0.113.44|update.example.com|corp/jdoe",
+                            ["logon from 203.0.113.44"] * 50, truncate=1200)
+        assert closed == ["ip:203.0.113.44 -> evidence/timeline.csv"]
+
+    def test_a_capped_search_credits_every_alternative_its_scan_resolved(self, tmp_path):
+        """A table search that stopped at its cap still says which of its
+        alternatives occur in the file: an indicator it found nowhere in the
+        whole file is searched, one past a row bound is not."""
+        case = self._ledger(tmp_path)
+        args = {"path": self.SOURCE, "pattern": r"203\.0\.113\.44|update\.example\.com|corp/jdoe"}
+        blob = "table_table_grep " + json.dumps(args)
+
+        def result(alternatives):
+            return json.dumps({"success": True, **args, "alternatives": alternatives,
+                               "hits": [{"_row": n, "Description": "logon from 203.0.113.44"}
+                                        for n in range(50)],
+                               "hit_count": 50, "hit_cap_reached": True, "scan_capped": False})
+        closed = ip.observe_search(case, blob=blob, result=result(
+            {"matched": [r"203\.0\.113\.44"], "unresolved": 2}))
+        assert closed == ["ip:203.0.113.44 -> evidence/timeline.csv"]
+        # A term the block calls matched but whose rows were not shown stays
+        # owed (the view says terms_matched_not_returned); a term no row of
+        # the whole file holds is settled.
+        closed = ip.observe_search(case, blob=blob, result=result(
+            {"matched": [r"203\.0\.113\.44", r"update\.example\.com"], "unmatched": ["corp/jdoe"]}))
+        assert closed == ["account:corp/jdoe -> evidence/timeline.csv"]
+        assert [p["ioc"] for p in ip.open_pivots(case)] == ["domain:update.example.com"]
+
+    def test_the_views_annotation_decides_what_a_search_showed(self, tmp_path, monkeypatch):
+        """With the call id on the result and the view's annotation on the
+        trace entry, a matched term with no shown row stays owed, a shown
+        term is credited, a term with no row is credited as searched, and a
+        complete view credits every term it named."""
+        from core.execution_log import ExecutionLog
+        case = self._ledger(tmp_path)
+        (case / "analysis").mkdir()
+        log = ExecutionLog()
+        log.configure("CASE-A", str(case / "analysis" / "trace.json"))
+        monkeypatch.setattr("core.execution_log.log", log)
+        args = {"path": self.SOURCE, "pattern": r"203\.0\.113\.44|update\.example\.com|corp/jdoe"}
+        blob = "table_table_grep " + json.dumps(args)
+        cid = log.record_tool_call("<py>:table_table_grep", True, False, 0, 0, stdout_excerpt="{}")
+        log.annotate_tool_call(cid, view_terms_shown=[r"203\.0\.113\.44"], view_complete=False,
+                               view_rows_shown=5, view_rows_returned=50)
+        view = json.dumps({"_atlas_call_id": cid, "success": True, **args, "hit_cap_reached": True,
+                           "terms_with_no_row": ["corp/jdoe"], "terms_matched_not_returned": [r"update\.example\.com"],
+                           "rows": ["#1 2031-03-04 10:16:00 | logon from 203.0.113.44"]})
+        closed = ip.observe_search(case, blob=blob, result=view)
+        assert sorted(closed) == ["account:corp/jdoe -> evidence/timeline.csv",
+                                  "ip:203.0.113.44 -> evidence/timeline.csv"]
+        assert [p["ioc"] for p in ip.open_pivots(case)] == ["domain:update.example.com"]
+        log.annotate_tool_call(cid, view_complete=True)
+        assert ip.observe_search(case, blob=blob, result=view) == ["domain:update.example.com -> evidence/timeline.csv"]
+
+    def test_a_term_line_alone_credits_nothing_on_the_text_path(self, tmp_path):
+        """A result that stopped early and names every term in its term lines
+        (or its echoed pattern) credits only the indicators its rows show."""
+        case = self._ledger(tmp_path)
+        args = {"path": self.SOURCE, "pattern": r"203\.0\.113\.44|update\.example\.com|corp/jdoe"}
+        blob = "table_table_grep " + json.dumps(args)
+        result = json.dumps({"success": True, **args, "hit_cap_reached": True,
+                             "terms": ["203\\.0\\.113\\.44: 50 rows", "update\\.example\\.com: 3 rows"],
+                             "hits": [{"_row": 1, "Description": "logon from 203.0.113.44"}]})
+        assert ip.observe_search(case, blob=blob, result=result) == ["ip:203.0.113.44 -> evidence/timeline.csv"]
+
+    def test_a_call_that_cannot_be_read_back_is_credited_as_before(self, tmp_path):
+        case = self._ledger(tmp_path)
+        closed = ip.observe_search(
+            case, blob="grep 203.0.113.44|update.example.com|corp/jdoe evidence/timeline.csv",
+            result='{"hit_cap_reached": true}')
+        assert len(closed) == 3
 
 
 class TestDispositionsOpenNoPivots:
@@ -454,3 +723,42 @@ class TestIndicatorsThatFit:
         from core.entities import extract
         assert extract("The user visited example.com daily.") == set()
         assert "file:x.com" in extract("It ran C:\\Windows\\x.com at logon.")
+
+
+class TestTheReportSaysWhatWasNotSearched:
+    """Evidence Gaps names the indicators not searched for in every relevant
+    source, the most owed first, capped; a host's report counts its own
+    sources only."""
+
+    def _pending(self, monkeypatch, pivots):
+        monkeypatch.setattr(ip, "open_pivots", lambda case_dir: pivots)
+
+    def test_nothing_open_means_no_line(self, monkeypatch, tmp_path):
+        self._pending(monkeypatch, [])
+        assert ip.gap_lines(tmp_path) == []
+
+    def test_the_line_names_the_indicators_and_their_sources(self, monkeypatch, tmp_path):
+        pivots = [{"ioc": f"ip:203.0.113.{i}", "origin": "",
+                   "pending": [f"analysis/CORP-WS0{j}_security.csv" for j in range(1, 3 if i else 4)]}
+                  for i in range(8)]
+        self._pending(monkeypatch, pivots)
+        line, = ip.gap_lines(tmp_path)
+        assert line.startswith("- Not searched for in every relevant source (8 indicator(s)): "
+                               "`203.0.113.0` (3 sources), `203.0.113.1` (2 sources)")
+        assert line.endswith(" and 2 more")
+        de, = ip.gap_lines(tmp_path, "de")
+        assert de.startswith("- Nicht in jeder relevanten Quelle gesucht (8 Indikator(en)): "
+                             "`203.0.113.0` (3 Quellen)") and de.endswith(" und 2 weitere")
+
+    def test_an_indicator_the_analyst_named_is_marked(self, monkeypatch, tmp_path):
+        self._pending(monkeypatch, [{"ioc": "user:jane.doe", "origin": ip._ANALYST_ORIGIN,
+                                     "pending": ["analysis/CORP-WS01_security.csv"]}])
+        assert "`jane.doe` (1 source, named in the brief)" in ip.gap_lines(tmp_path)[0]
+        assert "(1 Quelle, in der Fallbeschreibung genannt)" in ip.gap_lines(tmp_path, "de")[0]
+
+    def test_a_hosts_report_counts_its_own_sources(self, monkeypatch, tmp_path):
+        self._pending(monkeypatch, [
+            {"ioc": "user:jane.doe", "origin": "", "pending": ["analysis/CORP-WS01_security.csv"]},
+            {"ioc": "ip:203.0.113.9", "origin": "", "pending": ["analysis/CORP-WS02_security.csv"]}])
+        line, = ip.gap_lines(tmp_path, host="CORP-WS02")
+        assert "`203.0.113.9` (1 source)" in line and "jane.doe" not in line

@@ -1,7 +1,7 @@
-"""A caller that names no case (review without --case, an MCP server
-restarted outside a case, an enrichment lookup with no trace) does not
-follow the host-wide session beacon while more than one run is alive: the
-beacon names only the run started last."""
+"""The host-wide session beacon names only the run started last. A review
+without --case does not follow it while more than one run is alive; a
+process that bound no case (an MCP server restarted outside a case, a
+probe, an enrichment lookup) never binds or writes the beacon's case."""
 from __future__ import annotations
 
 import json
@@ -56,40 +56,40 @@ def test_review_without_a_case_names_the_live_runs(monkeypatch):
     assert "/cases/CASE-A" in str(stop.value) and "--case" in str(stop.value)
 
 
-def _restore(tmp_path, monkeypatch, trace):
-    monkeypatch.setattr(elog, "_BINDING_NOTED", set())
+def _beacon(trace):
     with open(elog._SESSION_FILE, "w") as f:
         json.dump({"case_id": "CASE-A", "path": trace}, f)
-    outside = tmp_path / "elsewhere"
-    outside.mkdir()
-    monkeypatch.chdir(outside)
-    return elog.ExecutionLog()
 
 
-def test_an_mcp_restore_outside_a_case_does_not_guess(tmp_path, monkeypatch, capsys):
-    _, trace = _run(tmp_path, "CASE-A")
-    _run(tmp_path, "CASE-B")
-    log = _restore(tmp_path, monkeypatch, trace)
-    assert log.case_dir() is None and log.case_dir() is None
-    assert capsys.readouterr().err.count("session beacon not followed") == 1
-
-
-def test_an_mcp_restore_into_a_live_run_says_so(tmp_path, monkeypatch, capsys):
-    # Another live process stands for the run (the parent pid is 0 when the
-    # suite runs as a container's init process).
+@pytest.mark.parametrize("live", [0, 1, 2])
+def test_a_process_outside_every_case_never_writes_the_beacons_case(tmp_path, monkeypatch, live):
+    # The beacon's run finished (0), is live in another process (1), or is
+    # one of two live runs (2). Another live process stands for a run (the
+    # parent pid is 0 when the suite runs as a container's init process).
     run = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
     try:
-        a, trace = _run(tmp_path, "CASE-A", pid=run.pid)
-        log = _restore(tmp_path, monkeypatch, trace)
-        assert os.path.realpath(log.case_dir()) == os.path.realpath(a)
-        assert f"whose run is live in pid {run.pid}" in capsys.readouterr().err
+        _, trace = _run(tmp_path, "CASE-A", pid=run.pid if live else _dead_pid(),
+                        stopped="running" if live else "finished")
+        if live == 2:
+            _run(tmp_path, "CASE-B", pid=run.pid)
+        _beacon(trace)
+        before = open(trace, encoding="utf-8").read()
+        (tmp_path / "elsewhere").mkdir()
+        monkeypatch.chdir(tmp_path / "elsewhere")
+        log = elog.ExecutionLog()
+        assert log.case_dir() is None
+        with pytest.raises(RuntimeError, match="trace log not configured"):
+            log.record_tool_call(cmd="probe --version", success=True, truncated=False, retries=0,
+                                 exit_code=0, stderr="", elapsed_seconds=0.0, stdout_excerpt="")
+        assert open(trace, encoding="utf-8").read() == before
     finally:
         run.kill()
         run.wait()
 
 
-def test_an_enrichment_lookup_with_no_case_persists_nowhere(monkeypatch):
+def test_an_enrichment_lookup_with_no_case_persists_nowhere(tmp_path, monkeypatch):
     from tools import enrichment
+    _, trace = _run(tmp_path, "CASE-A", pid=_dead_pid(), stopped="finished")
+    _beacon(trace)
     monkeypatch.setattr(elog.log, "_path", None)
-    monkeypatch.setattr(run_state, "live_runs", lambda: ["/cases/CASE-A", "/cases/CASE-B"])
     assert enrichment._analysis_dir() is None

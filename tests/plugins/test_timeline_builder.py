@@ -106,6 +106,64 @@ class TestTimelineMapper:
         merged = builder.merged_sorted_deduped()
         assert len(merged) == 2
 
+    def test_a_second_read_of_the_same_rows_adds_no_event(self, evtx_csv):
+        """Every call naming the table maps its rows again; the builder
+        holds each event once, in memory and in events.jsonl, and the
+        count reported is of the events added. A row shown inline carries
+        the file's row number (_row), so it is the artifact row's event,
+        not a second one at its place in the result."""
+        import csv
+        from plugins.timeline_builder.builder import TimelineBuilder
+        from plugins.timeline_builder.mapper.dispatch import process_tool_result
+
+        case = evtx_csv.parent
+        (case / "analysis").mkdir()
+        (case / "CASE.md").write_text("**Case ID**: TEST\n")
+        from core.execution_log import log
+        log.configure("TEST", str(case / "analysis" / "T_trace.json"),
+                      save_session=False)
+        TimelineBuilder.for_case(case).clear()
+        with open(evtx_csv, newline="", encoding="utf-8") as fh:
+            rows = list(csv.DictReader(fh))
+        shown = [{"_sheet": "-", "_row": 2, **rows[1]}]      # the second data row, as table_query shows it
+        path = str(evtx_csv)
+        first = process_tool_result("table_table_query", {"path": path},
+                                    {"success": True, "path": path, "rows": shown})
+        assert first == 2
+        again = process_tool_result("table_table_grep", {"path": path},
+                                    {"success": True, "path": path, "hits": shown})
+        assert again == 0
+        builder = TimelineBuilder.for_case(case)
+        assert len(builder.all_events()) == 2
+        assert len(builder.events_path.read_text(encoding="utf-8").splitlines()) == 2
+        assert len(builder.merged_sorted_deduped()) == 2
+
+    def test_a_restart_holds_the_stored_events_keys(self, evtx_csv):
+        """A new builder over the same directory (a resumed run, nothing in
+        memory) loads events.jsonl and refuses the same events again."""
+        import os
+        from plugins.timeline_builder import builder as B
+        from plugins.timeline_builder.config import TimelineConfig
+        from plugins.timeline_builder.mapper.forensic import MapContext, map_record
+        from plugins.timeline_builder.mapper.readers import EvtxCsvReader
+
+        case = evtx_csv.parent
+        builder = B.TimelineBuilder.for_case(case)
+        builder.clear()
+        builder = B.TimelineBuilder.for_case(case)
+        ctx = MapContext(original_tool="table_table_query", evidence_reference="evidence/x")
+        events = []
+        for rec in EvtxCsvReader.read_rows(evtx_csv):
+            ev = map_record(rec, ctx, TimelineConfig())
+            events.extend(ev if isinstance(ev, list) else [ev])
+        assert builder.append_many(events) == 2
+        B._INSTANCES.pop(os.path.abspath(str(case)), None)       # a fresh process
+        fresh = B.TimelineBuilder.for_case(case)
+        assert fresh is not builder
+        assert fresh.append_many(events) == 0
+        assert len(fresh.all_events()) == 2
+        assert len(fresh.events_path.read_text(encoding="utf-8").splitlines()) == 2
+
     def test_export_tsv(self, tmp_path):
         from plugins.timeline_builder.export import write_master_timeline
         from plugins.timeline_builder.models import NormalizedTimelineEvent

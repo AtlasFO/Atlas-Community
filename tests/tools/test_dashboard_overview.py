@@ -22,6 +22,13 @@ import pytest
 
 from dashboard import read_models as rm
 
+@pytest.fixture(autouse=True)
+def _todays_answer_path(monkeypatch):
+    """This module pins the answer path before the composer: the scaffold,
+    the prose pass, the conclusion lead (ATLAS_ANSWER_COMPOSE=0)."""
+    monkeypatch.setenv("ATLAS_ANSWER_COMPOSE", "0")
+
+
 DASH_SRC = Path(__file__).resolve().parents[2] / "dashboard"
 
 
@@ -725,9 +732,9 @@ class TestSharedShell:
 
     @pytest.mark.parametrize("page", CASE_PAGES)
     def test_no_page_local_case_selector(self, page):
-        """Regression: the Board bug (c.dir || c.path || c.name against an
-        API returning case_dir/case_id) came from page-local case pickers.
-        Case selection now lives ONLY in the shell."""
+        """Page-local case pickers break case selection (c.dir || c.path ||
+        c.name against an API returning case_dir/case_id). Case selection
+        lives ONLY in the shell."""
         body = (DASH_SRC / page).read_text(encoding="utf-8")
         assert 'id="case-select"' not in body, page
         assert "c.dir || c.path" not in body, page

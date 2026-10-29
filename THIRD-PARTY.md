@@ -87,6 +87,7 @@ GIFT (Plaso), the Zeek OBS repository, the Microsoft package repository
 | RegRipper 4.0 | github.com/keydet89/RegRipper4.0 | see upstream |
 | Didier Stevens Suite (pdfid, pdf-parser) | github.com/DidierStevens/DidierStevensSuite | see upstream (per-tool terms) |
 | INDXParse | github.com/williballenthin/INDXParse | see upstream |
+| ccl_chromium_reader, ccl_simplesnappy (pip, pinned commits; with Brotli, zstd from PyPI) | github.com/cclgroupltd | MIT (Brotli MIT, zstd BSD) |
 | DensityScout | cert.at | see upstream (freeware) |
 | EZ Tools (Eric Zimmerman) | ericzimmerman.github.io | freeware, see upstream terms |
 | jphide/jpseek | github.com/h3xx/jphs | see upstream |
@@ -97,6 +98,13 @@ GIFT (Plaso), the Zeek OBS repository, the Microsoft package repository
 None of these are redistributed by this repository. The installer records
 what it placed on the machine in `~/.cache/atlas/install_report.json` and
 `.install-manifest.json`, and `uninstall.sh` removes it again.
+
+## Bundled with the dashboard (redistributed; notices in NOTICE)
+
+| Library | File | Licence | Used for |
+|---|---|---|---|
+| Cytoscape.js 3.28.1 | `dashboard/vendor/cytoscape.min.js` | MIT | claim graph, investigation chain and knowledge globe rendering |
+| dagre 0.8.5 (with graphlib 2.1.8 and Lodash) | `dashboard/vendor/dagre.min.js` | MIT | layered graph layout |
 
 ## Points that need a decision, not a credit
 

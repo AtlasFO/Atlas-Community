@@ -14,7 +14,7 @@ Resources (inputs):
 Outputs feed ``investigation_plan.candidates`` and a ``resources`` snapshot.
 Ranking is deterministic metadata scoring (no hardcoded decision trees).
 When top scores are flat, an optional LLM refine may reorder *only among
-the existing candidate list* (Phase 4). Continuous stewardship (Phase 3)
+the existing candidate list*. Continuous stewardship
 re-runs via ``refresh_orchestration`` each agent turn / after claim updates.
 """
 from __future__ import annotations
@@ -111,8 +111,11 @@ def gather_resources(
     messages: Optional[list] = None,
     model: str = "",
     provider: str = "",
+    persist: bool = True,
 ) -> dict[str, Any]:
-    """Snapshot all planning inputs for the orchestrator / plan brief."""
+    """Snapshot all planning inputs for the orchestrator / plan brief.
+    ``persist`` False (a dry plan) computes the context budget without
+    saving it."""
     root = Path(case_dir).resolve()
     plane = plane_a_result or {}
     tasks = ordered_tasks or []
@@ -126,7 +129,7 @@ def gather_resources(
             budget = context_budget
         elif messages is not None:
             budget = _cb.compute(
-                root, persist=True, messages=messages,
+                root, persist=persist, messages=messages,
                 model=model, provider=provider)
         else:
             loaded = _cb.load_budget(root)
@@ -134,7 +137,7 @@ def gather_resources(
                 budget = loaded
             else:
                 budget = _cb.compute(
-                    root, persist=True, model=model, provider=provider)
+                    root, persist=persist, model=model, provider=provider)
     except Exception:
         budget = {}
 
@@ -303,15 +306,13 @@ def suggest_tools_for_path(
             continue
         primary = _CAP_PRIMARY_TOOL.get(cid) or (tools[0] if tools else "")
         if cid == "disk_filesystem_timeline":
-            # Prefer chain-info on VMDK; tsk.mmls on already-flattened raw.
+            # TSK opens raw images and disk containers alike (a container
+            # through its raw view); EWF has its own mount helper.
             try:
                 from core.runtime_capabilities import disk_open_tool_for_path
                 primary = disk_open_tool_for_path(path)
             except Exception:
-                if path.lower().endswith(".vmdk"):
-                    primary = "img.vmdk_chain_info"
-                elif path.lower().endswith((".raw", ".dd", ".img")):
-                    primary = "tsk.mmls"
+                primary = "tsk.mmls"
         score = 2.0 + float(theme.get(cid, 0.0))
         # Prefer tabular query when CSV already on disk
         if cid == "tabular_export_analysis" and path.lower().endswith((".csv", ".tsv")):
@@ -400,7 +401,7 @@ def score_candidate(
             inv_value += path_link_boost(path, case_dir)
         except Exception:
             pass
-        # Soft coverage / task debt (B4/B5): pull unseen HV + open-task paths;
+        # Soft coverage / task debt: pull unseen HV + open-task paths;
         # lightly demote already-probed sticky re-touches.
         try:
             from core.coverage_ledger import load_ledger
@@ -423,7 +424,7 @@ def score_candidate(
                 if path_toks & link_tokens(str(t.get("text") or "")):
                     inv_value += 2.5
                     break
-            # Soft disk/tabular mix (B6): after Access has opened media, do not
+            # Soft disk/tabular mix: after Access has opened media, do not
             # let disk FS tools starve remaining unseen tabular/HV units.
             try:
                 from core.evidence_access import media_blocks_degraded_exit
@@ -504,7 +505,7 @@ def format_resources_for_brief(resources: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-# ── Phase 3: continuous stewardship ─────────────────────────────────────
+# ── continuous stewardship ──────────────────────────────────────────────
 
 def _dirty_path(case_dir: str | os.PathLike) -> Path:
     return Path(case_dir).resolve() / ".atlas" / "orchestrator.dirty"
@@ -637,7 +638,7 @@ def refresh_orchestration(
     }
 
 
-# ── Phase 4: LLM-assisted ranking (flat scores only) ────────────────────
+# ── LLM-assisted ranking (flat scores only) ─────────────────────────────
 
 def scores_are_flat(
     candidates: list[dict[str, Any]],
@@ -776,12 +777,15 @@ def llm_refine_ranking(
         f"Investigation focus:\n{(focus_text or '')[:1200]}\n\n"
         f"Candidates:\n{json.dumps(payload, indent=2)}\n"
     )
-    resp = llm_client.chat(
+    from agent.llm import cut_at_allowance, one_answer_chat
+    resp = one_answer_chat(
+        llm_client,
         [{"role": "user", "content": prompt}],
         tools=None,
         temperature=0.0,
+        role="orchestrator_rank",   # its own thinking level, never the analyst's
     )
-    content = getattr(resp, "content", None) or ""
+    content = "" if cut_at_allowance(resp) else (getattr(resp, "content", None) or "")
     order = _parse_index_order(content, len(subset))
     if not order:
         return candidates
@@ -800,8 +804,11 @@ def maybe_llm_refine_ranking(
     turn: int = 0,
 ) -> tuple[dict[str, Any], bool]:
     """Apply LLM ranking when enabled and scores are flat. Fail-open."""
-    mode = (os.environ.get("ATLAS_ORCH_LLM_RANK") or "auto").strip().lower()
-    if mode in ("0", "off", "false", "no"):
+    # Off unless asked: the ranking has no consumer in the loop; in auto mode
+    # it runs every fifth turn when the scores tie, on a reasoning model it can
+    # run to the output limit, and nothing waits for its answer.
+    mode = (os.environ.get("ATLAS_ORCH_LLM_RANK") or "off").strip().lower()
+    if mode in ("0", "off", "false", "no", ""):
         return plan, False
     cands = list(plan.get("candidates") or [])
     if not scores_are_flat(cands):

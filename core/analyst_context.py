@@ -164,6 +164,22 @@ def entry_by_id(case_dir: str | os.PathLike, context_id: str) -> dict[str, Any]:
     raise KeyError(f"analyst context id not found: {context_id}")
 
 
+def check_feedback_args(
+    case_dir: str | os.PathLike, *, withdraw_id: str | None = None,
+    correct_id: str | None = None, text: str | None = None,
+) -> None:
+    """The rerun arguments that name analyst context, checked before any work
+    is done: --correct-context needs the replacement text, and an id to
+    withdraw or correct must name an entry. Reads only; raises ValueError or
+    KeyError with the reason."""
+    if correct_id and not (text or "").strip():
+        raise ValueError("--correct-context requires -q / --question "
+                         "with the replacement context text")
+    for context_id in (withdraw_id, correct_id):
+        if context_id:
+            entry_by_id(case_dir, context_id)
+
+
 def link_supersedes(
     case_dir: str | os.PathLike, new_id: str, old_id: str,
 ) -> dict[str, Any]:

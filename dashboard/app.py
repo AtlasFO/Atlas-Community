@@ -1065,6 +1065,18 @@ def _get_capabilities(ctx, request, q):
     return _json({"timeline_plugin_active": active})
 
 
+def _get_coverage(ctx, request, q):
+    full = _safe_case_dir(ctx.cases_root, q.get("case", ""))
+    if full is None:
+        return _case_404(q.get("case", ""))
+    # Read-only on every request: the ledger is written by the run alone.
+    try:
+        from dashboard.read_models import coverage
+        return _json(coverage(full))
+    except Exception as e:  # noqa: BLE001
+        return _error_json("coverage failed", e)
+
+
 def _get_config_llm(ctx, request, q):
     from dashboard import config_llm
     return _json(config_llm.list_providers())
@@ -1196,7 +1208,7 @@ def _get_case_run_status(ctx, request, q):
     # dashboard/run_manager.py has no Popen handle for it and can't safely
     # start a second run over it or stop it. A session whose own process
     # has ended is consulted only when nothing else is running: reporting
-    # it first showed "run finished" over a live run started from the CLI
+    # it first would show "run finished" over a live run started from the CLI
     # after the dashboard's own run had been stopped.
     from dashboard import read_models
     running = read_models.run_process_alive(full)
@@ -1274,7 +1286,8 @@ def _usage_prices() -> tuple[dict, str]:
         prices = {}
     if not isinstance(prices, dict):
         prices = {}
-    return prices, (auth.get_setting("llm_price_currency", "EUR") or "EUR")
+    from dashboard.usage_prices import CURRENCY, DEFAULT_CURRENCY
+    return prices, (auth.get_setting(CURRENCY, DEFAULT_CURRENCY) or DEFAULT_CURRENCY)
 
 
 def _usage_window(q):
@@ -1295,7 +1308,8 @@ def _get_config_usage(ctx, request, q):
     period, months = _usage_window(q)
     prices, currency = _usage_prices()
     since = usage_ledger.window_start(period, months).isoformat()
-    data = usage_ledger.aggregate(usage_ledger.daily_rows(since), period, prices)
+    data = usage_ledger.aggregate(usage_ledger.daily_rows(since, usage_ledger.long_over(prices)),
+                                  period, prices)
     data.update({"currency": currency, "since": since, "months": months,
                  "imported": imported})
     return _json(data)
@@ -1311,32 +1325,36 @@ def _get_config_usage_export(ctx, request, q):
     prices, currency = _usage_prices()
     since = usage_ledger.window_start(period, months).isoformat()
     merged: dict = {}
-    for r in usage_ledger.daily_rows(since):
+    for r in usage_ledger.daily_rows(since, usage_ledger.long_over(prices)):
         # Each day counts in its own period, as on the page: a run that
-        # crosses a period boundary is one row in each.
+        # crosses a period boundary is one row in each. Each day's row is
+        # priced on its own (a long-prompt row at its own prices).
         pk = usage_ledger.period_key(r["day"], period)
         k = (pk, r["case_id"], r["run_id"], r["command"], r["started_by"],
              r["provider"], r["model"])
         m = merged.setdefault(k, {**r, "period": pk, "calls": 0, "input": 0,
-                                  "output": 0, "cached": 0, "reasoning": 0,
-                                  "unreported": 0})
-        for f in ("calls", "input", "output", "cached", "reasoning", "unreported"):
+                                  "output": 0, "cached": 0, "cache_write": 0, "reasoning": 0,
+                                  "unreported": 0, "lost": 0, "cost": 0.0})
+        for f in ("calls", "input", "output", "cached", "cache_write", "reasoning", "unreported", "lost"):
             m[f] += int(r.get(f) or 0)
+        cost = usage_ledger.row_cost(r, prices)
+        m["cost"] = None if cost is None or m["cost"] is None else m["cost"] + cost
         m["first_ts"] = min(m["first_ts"], r["first_ts"])
     buf = io.StringIO()
     writer = csv.writer(buf)
     writer.writerow(("period", "case_id", "run_id", "started", "command",
                      "started_by", "provider", "model", "calls",
                      "calls_without_usage", "input_tokens", "output_tokens",
-                     "cached_tokens", "reasoning_tokens", "cost", "currency"))
+                     "cached_tokens", "reasoning_tokens", "cost", "currency", "calls_lost",
+                     "cache_write_tokens"))
     for m in sorted(merged.values(), key=lambda x: x["first_ts"], reverse=True):
-        cost = usage_ledger.row_cost(m, prices)
+        cost = m["cost"]
         writer.writerow([csv_safe(v) for v in (
             m["period"], m["case_id"],
             m["run_id"], m["first_ts"], m["command"], m["started_by"],
             m["provider"], m["model"], m["calls"], m["unreported"], m["input"],
             m["output"], m["cached"], m["reasoning"],
-            "" if cost is None else f"{cost:.4f}", currency)])
+            "" if cost is None else f"{cost:.4f}", currency, m["lost"], m["cache_write"])])
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     return _bytes(buf.getvalue().encode("utf-8"),
                   content_type="text/csv; charset=utf-8",
@@ -1443,6 +1461,7 @@ GET_ROUTES = {
     "config/plugins": _get_config_plugins,
     "config/tools": _get_config_tools,
     "case/iocs": _get_case_iocs,
+    "case/coverage": _get_coverage,
     "case/recommendations": _get_case_recommendations,
     "case/case_md": _get_case_md,
     "case/run/options": _get_case_run_options,
@@ -1569,7 +1588,8 @@ def _post_config_llm_probe(ctx, request, body):
         auth_header=str(body.get("auth_header") or ""),
         auth_prefix=body.get("auth_prefix"),
         model=str(body.get("model") or ""),
-        name=str(body.get("name") or "")))
+        name=str(body.get("name") or ""),
+        preset_id=str(body.get("preset_id") or "")))
 
 
 def _post_config_llm_save(ctx, request, body):
@@ -1847,7 +1867,9 @@ def _post_case_create(ctx, request, body):
             language=str(body.get("language") or ""))
     except case_admin.CaseAdminError as exc:
         return _json({"error": str(exc)}, 400)
-    return _json({"success": True, "case_dir": str(case_dir)})
+    # The case's folder name: the key every other route and the case list
+    # use (list_cases, _safe_case_dir). Its path on the server is no key.
+    return _json({"success": True, "case_dir": case_dir.name})
 
 
 def _post_case_recommendation_state(ctx, request, body):
@@ -1875,9 +1897,19 @@ def _post_case_md_save(ctx, request, body):
     case = str(body.get("case") or "").strip()
     if _safe_case_dir(ctx.cases_root, case) is None:
         return _case_404(case)
+    # The version of the text the editor started from. A save without one
+    # cannot tell a stale tab from a fresh one, so it is refused rather than
+    # allowed to overwrite whatever was saved since.
+    version = str(body.get("version") or "").strip()
+    if not version:
+        return _json({"error": "reload the brief: this save does not say which "
+                               "version of it was edited"}, 400)
     try:
         return _json(case_admin.write_case_md(
-            ctx.cases_root, case, str(body.get("content") or "")))
+            ctx.cases_root, case, str(body.get("content") or ""), version))
+    except case_admin.BriefConflict as exc:
+        return _json({"error": str(exc), "conflict": True,
+                      "content": exc.current, "version": exc.version}, 409)
     except case_admin.CaseAdminError as exc:
         return _json({"error": str(exc)}, 400)
 
@@ -1906,7 +1938,7 @@ def _post_case_md_autofill_propose(ctx, request, body):
             _ = client.provider
         except Exception as e:  # noqa: BLE001
             return _json({"error": str(e)}, 400)
-        if not client.api_key:
+        if client.key_missing:
             return _json({"error": "no API key for the configured analyst "
                                    "provider"}, 400)
         import time as _time
@@ -1929,6 +1961,7 @@ def _post_case_md_autofill_propose(ctx, request, body):
         except LLMError as e:
             return _json({"error": f"LLM call failed: {e}"}, 502)
     return _json({
+        "version": proposal["version"],
         "rows": proposal["rows"],
         "unsure": resolved,
         "investigation_requests_empty":
@@ -1961,6 +1994,14 @@ def _post_case_md_autofill_preview(ctx, request, body):
     bullets = [str(b) for b in prior.get("bullets") or [] if str(b).strip()]
     moved = [str(r) for r in prior.get("requests") or [] if str(r).strip()]
     current_md = read_case_md(case_dir)
+    # The proposal was made from the brief as it was then; the rewrite of
+    # its prior-knowledge section replaces that section whole, so it is
+    # spliced only onto the same text, never onto a brief saved since.
+    from core.investigation_tasks import case_markdown_version
+    version = case_markdown_version(current_md)
+    if str(body.get("version") or "") != version:
+        return _json({"error": "the brief changed since Autofill read it; run Autofill again",
+                      "conflict": True, "content": current_md, "version": version}, 409)
     try:
         content = case_autofill.splice_case_md(
             current_md, rows,
@@ -1970,31 +2011,49 @@ def _post_case_md_autofill_preview(ctx, request, body):
                 content, bullets, requests=moved)
     except ValueError as e:
         return _json({"error": str(e)}, 400)
-    return _json({"content": content})
+    return _json({"content": content, "version": version})
 
 
 def _post_case_delete(ctx, request, body):
     from dashboard import case_admin
     if body is None:
         return _json({"error": "invalid request body"}, 400)
+    case_id = str(body.get("case_id") or "").strip()
+    purge = bool(body.get("purge"))
+    # A purge removes the case and its evidence for good: it acts only on
+    # the case the request names twice, as a start that wipes a case does.
+    if purge and str(body.get("confirm_case") or "").strip() != case_id:
+        return _json({"error": f"purging removes {case_id!r} and its evidence for good; "
+                               "confirm the case name",
+                      "confirm_case_required": True, "case": case_id}, 400)
+    user = _current_user(request)
+
+    def _record(event: str) -> None:
+        auth.log_event(event, user=user, case_id=case_id, ip=_client_ip(request))
     try:
-        return _json(case_admin.delete_case(
-            ctx.cases_root, str(body.get("case_id") or "").strip(),
-            purge=bool(body.get("purge"))))
+        result = case_admin.delete_case(
+            ctx.cases_root, case_id, purge=purge,
+            on_committed=lambda: _record("case_purge" if purge else "case_delete"))
+    except case_admin.PurgeIncomplete as exc:
+        return _json({"error": str(exc)}, 500)
     except case_admin.CaseAdminError as exc:
         return _json({"error": str(exc)}, 400)
+    return _json(result)
 
 
 def _post_case_move(ctx, request, body):
     from dashboard import case_admin
     if body is None:
         return _json({"error": "invalid request body"}, 400)
+    case_id = str(body.get("case_id") or "").strip()
+    new_case_id = str(body.get("new_case_id") or "").strip()
     try:
-        return _json(case_admin.move_case(
-            ctx.cases_root, str(body.get("case_id") or "").strip(),
-            str(body.get("new_case_id") or "").strip()))
+        result = case_admin.move_case(ctx.cases_root, case_id, new_case_id)
     except case_admin.CaseAdminError as exc:
         return _json({"error": str(exc)}, 400)
+    auth.log_event("case_move", user=_current_user(request), case_id=case_id,
+                   detail=f"renamed to {new_case_id}", ip=_client_ip(request))
+    return _json(result)
 
 
 def _post_case_run_start(ctx, request, body):
@@ -2002,12 +2061,23 @@ def _post_case_run_start(ctx, request, body):
     if body is None:
         return _json({"error": "invalid request body"}, 400)
     case = str(body.get("case") or "").strip()
-    if _safe_case_dir(ctx.cases_root, case) is None:
+    full = _safe_case_dir(ctx.cases_root, case)
+    if full is None:
         return _case_404(case)
     mode = str(body.get("mode") or "run").strip()
     options = body.get("options")
     if not isinstance(options, dict):
         options = {}
+    # A start that removes the case's working files (a run that is not a
+    # resume, started fresh or over a prior run: agent/cli.py's clear) acts
+    # only on the case the request names twice: a stale page or a request
+    # that skipped the dialog cannot wipe another case.
+    start_mode = str(options.get("start_mode") or "").strip()
+    if mode == "run" and start_mode != "resume" and str(body.get("confirm_case") or "").strip() != case:
+        from core.run_state import prior_run_exists
+        if start_mode == "fresh" or prior_run_exists(full):
+            return _json({"error": f"starting over removes the working files of {case!r}; confirm the case name",
+                          "confirm_case_required": True, "case": case}, 400)
     # Whoever pressed Start gets the mail when it ends — a run outlives the
     # tab. No address, or no mail server, simply means no notification.
     user = _current_user(request)
@@ -2033,6 +2103,10 @@ def _post_case_run_stop(ctx, request, body):
     if body is None:
         return _json({"error": "invalid request body"}, 400)
     case = str(body.get("case") or "").strip()
+    # An unknown name is refused before the manager; a run the manager
+    # tracks is always stoppable, also when its folder went away meanwhile.
+    if _safe_case_dir(ctx.cases_root, case) is None and run_manager.MANAGER.get(case) is None:
+        return _case_404(case)
     user = _current_user(request)
     try:
         result = run_manager.MANAGER.stop(

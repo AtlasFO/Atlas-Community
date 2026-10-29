@@ -1,4 +1,4 @@
-"""Access workflow — consume mount_plan next_work_order (B6 / I3).
+"""Access workflow — consume mount_plan next_work_order.
 
 After disk media is opened, deep carving (sigfind / blind FS hunt) must wait
 until the export work-order's Security-event-log step is disposed: searched
@@ -27,7 +27,7 @@ DEEP_DISK_TOOLS = frozenset({
     "tsk.tsk_indxparse",
 })
 
-# Orientation fls is allowed; a streak while winevt WO is pending is the B6 tunnel.
+# Orientation fls is allowed; a streak while the winevt work order is pending is an enumeration tunnel.
 MAX_FLS_WHILE_WINEVT_PENDING = 3
 
 # The work order names the Security event log; older plans name the EVTX
@@ -81,10 +81,21 @@ def opened_media_with_winevt_work_order(
 
 def _trace_cmd_blobs(root: Path) -> list[dict[str, str]]:
     from core.execution_log import trace_tool_calls
+    try:
+        from core.contents_index import index_on
+        from core.coverage_ledger import _entry_tool
+        pre_run_out = index_on()
+    except Exception:  # noqa: BLE001
+        pre_run_out = False
     out: list[dict[str, str]] = []
     for e in trace_tool_calls(root) or []:
         if e.get("success") is False or e.get("failure_class"):
             continue      # a refused or failed call is not a listing
+        if pre_run_out and not _entry_tool(e):
+            # The intake's own listings (the contents index lists every
+            # image before the first turn) are no analyst's enumeration and
+            # no search: no analyst tool made them.
+            continue
         blob = " ".join(
             str(e.get(k) or "")
             for k in ("cmd", "mcp_tool", "tool", "args")
@@ -154,9 +165,8 @@ def _count_fls_in_trace(root: Path) -> int:
             continue
         # Descending into one directory by inode is navigation — the way
         # winevt/Logs is reached. Only whole-tree or root listings are the
-        # "enumeration tunnels" this cap exists for. Refused calls used to
-        # count too, so every refusal tightened the cap that caused it
-        #
+        # "enumeration tunnels" this cap exists for. Refused calls do not
+        # count, or every refusal would tighten the cap that caused it.
         if re.search(r"fls\b[^|]*\s\d+\s*$", cmd) and " -r" not in cmd:
             continue
         n += 1
@@ -193,7 +203,7 @@ def refuse_deep_disk_until_winevt(
             "coverage.mark_blocked after a real attempt) before deep signature/"
             "carving tools (tsk.sigfind / indxparse)."
         )
-    # B6: allow orientation fls, then budget further FS enumeration.
+    # Allow orientation fls, then budget further FS enumeration.
     if _is_fls_tool(tool_name):
         root = _case_root(case_dir)
         if root is None:

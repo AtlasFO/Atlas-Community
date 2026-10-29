@@ -397,6 +397,8 @@ def test_review_live_writes_file_and_feeds_stall_evidence(case_dir):
 
 
 def test_review_live_healthy_trace_not_stalled(case_dir):
+    """A run the stall check does not call stalled gets the check's own
+    report: no model is asked (docs/cli.md, `atlas review --live`)."""
     trace = _write_trace(case_dir, _healthy_entries(), case_id="OK-1")
     client = StubClient("STATUS: HEALTHY\n\n## Diagnosis\nFine.\n\n"
                         "## Unstick actions\nNone needed.\n")
@@ -404,7 +406,51 @@ def test_review_live_healthy_trace_not_stalled(case_dir):
         trace_path=trace)
     assert result["stalled"] is False
     assert result["status"] == "HEALTHY"
-    assert "No stall signals fired" in client.messages[1]["content"]
+    assert client.messages is None
+    assert result["reviewer_model"] == ""
+    text = Path(result["path"]).read_text(encoding="utf-8")
+    assert "No stall signals fired" in text and "No model was asked" in text
+
+
+def test_a_healthy_live_review_builds_no_reviewer(case_dir, monkeypatch):
+    import agent.cli as cli
+    trace = _write_trace(case_dir, _healthy_entries(), case_id="OK-1")
+    args = argparse.Namespace(live=True, case=str(case_dir), trace=str(trace),
+                              question="", review_model="", json=True)
+    monkeypatch.setattr(cli, "_build_reviewer_client",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("reviewer built")))
+    cli.cmd_review(args)
+    assert (case_dir / "reports" / "OK-1_live_review.md").is_file()
+
+
+def test_a_stalled_run_asks_the_reviewer_once(case_dir, monkeypatch):
+    import agent.cli as cli
+    trace = _write_trace(case_dir, _stalled_trace_entries())
+    built = []
+    args = argparse.Namespace(live=True, case=str(case_dir), trace=str(trace),
+                              question="", review_model="", json=True)
+    monkeypatch.setattr(cli, "_build_reviewer_client",
+                        lambda *a, **k: built.append(1) or StubClient(LIVE_OUT))
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_review(args)
+    assert exc.value.code == 3 and built == [1]
+
+
+def test_a_stalled_run_with_no_usable_reviewer_still_exits_3(case_dir, monkeypatch, capsys):
+    import agent.cli as cli
+    trace = _write_trace(case_dir, _stalled_trace_entries())
+    args = argparse.Namespace(live=True, case=str(case_dir), trace=str(trace),
+                              question="", review_model="", json=True)
+
+    def _broken(*a, **k):
+        raise SystemExit("atlas: unknown model provider 'corp-review'")
+
+    monkeypatch.setattr(cli, "_build_reviewer_client", _broken)
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_review(args)
+    assert exc.value.code == 3
+    text = (case_dir / "reports" / "CASE-C_live_review.md").read_text(encoding="utf-8")
+    assert "STATUS: STALLED" in text and "COMMAND LOOP" in text
 
 
 def test_review_live_missing_trace_returns_error(case_dir):

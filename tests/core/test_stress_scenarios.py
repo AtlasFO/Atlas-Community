@@ -21,6 +21,12 @@ from core.ioc_catalog import build_catalog
 from core.report_assemble import assemble_client_report
 from dashboard.read_models import questions_projection
 
+@pytest.fixture(autouse=True)
+def _todays_answer_path(monkeypatch):
+    """This module pins the answer path before the composer: the scaffold,
+    the prose pass, the conclusion lead (ATLAS_ANSWER_COMPOSE=0)."""
+    monkeypatch.setenv("ATLAS_ANSWER_COMPOSE", "0")
+
 
 def _case(tmp_path: Path, name: str = "C") -> Path:
     case = tmp_path / name

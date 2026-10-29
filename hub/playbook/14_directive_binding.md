@@ -13,8 +13,8 @@ Directives are binding. `dair_assess` is the primary source of `priority_tools` 
 
 ### Hypothesis conclusion extraction (mandatory)
 When `reason.hypothesize` returns a conclusion that names specific search patterns, artifact types, file paths, or operations in body text — extract those as concrete tool calls and add them to the DAIR work order, **even if `directives.priority_tools` is empty**. Empty `priority_tools` from hypothesize ≠ "no follow-up needed". Parse for:
-- Named patterns ("search for X in PCAP", "grep for Y", "look for Z cookie")
-- Named artifact categories ("webmail cookies", "compose/send traffic", "recipient address")
+- Named patterns ("search for X in the capture", "grep for Y")
+- Named artifact categories ("the sessions of device D", "the recipients of a mailbox")
 - Named tools/operations ("run ngrep", "filter port 80", "follow TCP stream")
 
 Convert each to a concrete MCP call and queue. Never skip in-text recommendations because the directive block is empty.
@@ -29,11 +29,11 @@ or recording a negative finding:
    - Prefer a time window (`time_start` / `time_end` on `ez.evtxecmd`, UTC) with a narrow `event_ids` set
    - Or raise `wall_clock_budget_s` after narrowing Event IDs
    - Or convert EVTX → CSV (`ez.evtxecmd` / Hayabusa) then `table.table_query`
-3. If the original pattern was broad (e.g. a bare `sid=`), split into targeted
-   sub-queries (e.g. `Cookie: sid=`, `<provider>\.com.*Cookie`, a specific host)
+3. If the original pattern was broad, split it into targeted sub-queries
+   (a longer literal, a field it must sit in, a specific host)
 4. Only record a negative finding after a targeted retry returns empty —
    never after a broad truncated/timed-out scan alone
-5. `reason.pre_report_check` **blocks Report** while critical auth/session
-   scans (4624/4625/chainsaw) remain truncated without a successful
-   non-truncated retry on the same `.evtx`. Do not "note the timeout and move
-   on." The master timeline does **not** clear this debt.
+5. A scan cut by its deadline or a time bound (`incomplete`, a timed-out
+   call) **blocks finish** until it is resumed, replaced by another read of
+   the same input, or dispositioned through `dair_assess`. Do not "note the
+   timeout and move on." The master timeline does **not** clear this debt.

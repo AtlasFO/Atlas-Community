@@ -50,7 +50,6 @@ DAIR_API_KEY      = (os.environ.get("DAIR_API_KEY")
                      or os.environ.get("HF_TOKEN") or "")
 DAIR_MODEL        = os.environ.get("DAIR_MODEL") or ""
 
-from core import llmhub as _llmhub
 from core import providers as _providers
 
 # Auth shape — see tools/reasoning.py.
@@ -61,16 +60,11 @@ DAIR_AUTH_PREFIX = _providers.DEFAULT_AUTH_PREFIX
 # tools/ is imported while the MCP server starts.
 _BACKEND_CONFIG_ERROR = ""
 
-# llmhub backend — only when the role explicitly selected it. An unset
-# DAIR_BACKEND plus a hub API key must not silently become the hub.
-if DAIR_BACKEND == "llmhub":
-    DAIR_URL     = DAIR_URL or _llmhub.base_url()
-    DAIR_API_KEY = DAIR_API_KEY or _llmhub.api_key()
-    DAIR_MODEL   = DAIR_MODEL or _llmhub.model()
-    DAIR_BACKEND = "openai-compat"
-elif DAIR_BACKEND and DAIR_BACKEND not in ("openai-compat", "claude"):
-    # A registered provider name (ATLAS_PROVIDERS) prefills the generic vars and
-    # then continues down the openai-compat path, exactly like `llmhub`.
+# A provider name (the hub's `llmhub`, or one registered in ATLAS_PROVIDERS),
+# only when the role selected it explicitly: an unset DAIR_BACKEND plus a hub
+# API key must not silently become the hub. It prefills the generic vars and
+# then continues down the openai-compat path.
+if DAIR_BACKEND and DAIR_BACKEND not in ("openai-compat", "claude"):
     try:
         _dair_provider = _providers.resolve(DAIR_BACKEND)
         DAIR_URL         = DAIR_URL or _dair_provider.base_url
@@ -127,9 +121,9 @@ def _active_backend() -> str:
 
 # ── Candidate pivot detection ────────────────────────────────────────────────
 # DAIR records hosts/principals worth a follow-up look, but it does not mutate
-# phase transitions. Earlier versions force-pushed and drained pivot queues from
-# heuristic text extraction, and a generic token
-# ("FINDINGS") could become a synthetic Triage target. Candidate pivots are
+# phase transitions. Force-pushing and draining pivot queues from heuristic
+# text extraction would let a generic token
+# ("FINDINGS") become a synthetic Triage target. Candidate pivots are
 # therefore audit metadata only. The model/agent may choose to investigate them,
 # but code never rewrites stack_action/next_phase from these regexes.
 #
@@ -216,9 +210,11 @@ _DEFAULT_WORK_ORDERS: tuple[tuple[tuple[str, ...], list[str]], ...] = (
     ((".eml", "email", "phish", "attachment", ".msg", ".emlx"),
      ["misc.parse_email", "misc.parse_msg_ole", "misc.parse_emlx",
       "strings.strings_extract", "hash.hash_file", "deob.base64_hunt"]),
-    # VMDK / raw prefer TSK open — not loop/FUSE mounts as Triage default.
-    ((".vmdk",),
-     ["img.vmdk_chain_info", "img.vmdk_export_raw", "tsk.mmls", "tsk.fls"]),
+    # Disk containers and raw images open with TSK (a container through its
+    # raw view; the mount plan names a copy where a host has no views) —
+    # not loop/FUSE mounts as Triage default.
+    ((".vmdk", ".vhd", ".vhdx", ".qcow2", ".qcow", ".vdi"),
+     ["tsk.mmls", "tsk.fls"]),
     ((".e01", ".ex01"),
      ["ewf.mount_full_image", "tsk.mmls", "tsk.fls"]),
     ((".raw", ".dd", ".img", "disk image", "ntfs", "filesystem", "volume"),
@@ -239,7 +235,7 @@ _FALLBACK_WORK_ORDER = ["strings.file_identify_directory",
 _TRIAGE_MAX_PASSES = 3
 
 # On the Nth consecutive Collect/stay that records no knowledge-state
-# progress, force Analyze so Collect↔Analyze (or Collect forever) cannot burn
+# progress, force Analyze so Collect<->Analyze (or Collect forever) cannot burn
 # the turn budget after evidence is already in hand. Aligns with the
 # refuse-latch Analyze advance. A Collect pass that is still producing is
 # never cut by this count alone.
@@ -248,7 +244,7 @@ _COLLECT_MAX_PASSES = 4
 # After this many Triage→Collect round-trips WITH findings already recorded,
 # the "smallest phase that can gather" is no longer Collect: force Analyze.
 # The director's own prompt biases toward Collect, so without this valve an
-# investigation ping-pongs Triage↔Collect forever and Analyze is never
+# investigation ping-pongs Triage<->Collect forever and Analyze is never
 # recommended.
 _OSCILLATION_MAX_ROUNDTRIPS = 3
 _OSCILLATION_MIN_FINDINGS = 3
@@ -264,10 +260,10 @@ _PHASE_ORDER = ["Triage", "Collect", "Analyze", "Scan", "Report"]
 # a run that can never advance is otherwise permanently stuck.
 #
 # Must be eligible no later than empty_loop / productive_stall (both fire after
-# N-1=2 prior cycles with default N=3). A higher threshold here was the second
-# half of the evidence_exhausted-shadowing bug: the general valves advanced
-# the phase one cycle before this specific diagnosis could become eligible,
-# so specificity arbitration never saw it as a candidate.
+# N-1=2 prior cycles with default N=3). A higher threshold would let the
+# general valves advance the phase one cycle before this specific diagnosis
+# could become eligible, so specificity arbitration would never see it as a
+# candidate.
 _STALL_MAX_STAYS = 3
 
 # A phase whose identical work order keeps SUCCEEDING but yields zero new
@@ -298,14 +294,14 @@ _MISSING_EVIDENCE_MARKERS = (
 _PROGRESS_STALL_MAX_CYCLES = int(
     os.environ.get("ATLAS_DAIR_STALL_MAX_CYCLES") or "3")
 
-# The Analyze/Scan demotion of that valve to a soft hint (B0 / X5) is BOUNDED,
+# The Analyze/Scan demotion of that valve to a soft hint is BOUNDED,
 # not permanent. A soft hint sets note + transition_rationale only, so an
 # Analyze/Scan run that ignores it has no DAIR-side escape left for a VARIED
 # work order — empty_loop only catches an identical one — and falls through to
 # core.run_budget, whose cheapest intervention is 25 no-progress turns and whose
 # escape is 75. After this many consecutive barren cycles the hint has
 # demonstrably not moved the phase, so the advance goes hard after all: one push
-# this late cannot supply the repeating trigger the B0 / X5 Analyze<->Scan thrash
+# this late cannot supply the repeating trigger an Analyze<->Scan thrash
 # needed, because the counter resets the moment the phase changes.
 _PROGRESS_STALL_HARD_MAX_CYCLES = int(
     os.environ.get("ATLAS_DAIR_STALL_HARD_MAX_CYCLES")
@@ -360,6 +356,76 @@ def _evidence_blob() -> Optional[str]:
     return " ".join(names).lower()
 
 
+def _blocker_items() -> bool:
+    from core.deferred_intents import blocker_items_on
+    return blocker_items_on()
+
+
+# The director prompt's sentences that ask for UNRESOLVABLE statements or
+# for findings that address the case question's words, as the report-check
+# switches have them (read at call time).
+_DAIR_SYS_SWAPS_BLOCKERS = (
+    ("which blocker to state as UNRESOLVABLE in reason.synthesize", "which item failed"),
+    ("Prefer staying in Report and documenting a genuine dead-end via reason.synthesize UNRESOLVABLE",
+     "Prefer staying in Report and stating what was read and what failed"),
+    ("For true dead-ends (tool cannot parse, artifact destroyed, privilege unavailable) "
+     "state 'UNRESOLVABLE: <what> — <why>' in reason.synthesize once",
+     "For true dead-ends, state what was read and what failed: a dead end is an item that failed, not a "
+     "sentence"),
+)
+_DAIR_SYS_SWAP_CASE_QUESTION = (
+    "refuses ready_to_report unless at least one CONFIRMED or LIKELY finding directly addresses the case "
+    "question's key entities",
+    "lists questions no finding addresses as warnings; the answers say what was found")
+
+
+# The director's job under ATLAS_DIRECTOR_REVIEW: the work order, not batch
+# planning. The batch-planner framing, the Analyze detector checklist and
+# the Report checklist give way to the job; the reply carries work_items
+# and rules the order's items by id.
+_DIRECTOR_JOB = (
+    "YOUR JOB: THE WORK ORDER\n"
+    "Your job is the work order. For each open question, decide whether its items still lead to the "
+    "answer. For each event a question's claims rest on, the artefact that would date and explain it must "
+    "have been opened: the sources behind the claims' rows are already items; add any other such artefact "
+    "the claims need. Add work_items for reads that would answer a question with no item, or whose items "
+    "failed: {\"task_ids\": [...], \"tool\": \"<namespace.tool>\", \"host\": \"<case host>\", "
+    "\"source\": \"<a case file, or a path inside that host's image>\", \"pattern\": \"<for a search>\", "
+    "\"why\": \"<under 15 words>\"}. Adopt proposed items you want read, with a target; dismiss an item "
+    "only by naming the call that already read it or failed to; both in deferred_intent_dispositions by the "
+    "item's id (rulings are for due and proposed items; a failed item is closed): "
+    "{\"call_id\": <item id>, \"action\": \"promote\"|\"keep\"|\"dismiss\", \"inner_path\": "
+    "\"<target, for promote>\", \"host\": \"<case host, for promote>\", \"basis_call_id\": <for dismiss>, \"note\": \"<why>\"}. Do not prescribe "
+    "record keeping, mapping, coverage or correlation steps. A review with nothing to add moves toward "
+    "Report.\n")
+_JOB_RE = re.compile(r"YOUR ROLE AS INVESTIGATION PLANNER:.*?(?=- investigation_focus:)", re.S)
+_ANALYZE_CHECKLIST_RE = re.compile(r"ALSO run anti-forensics detectors here.*?amcacheparser\)\.", re.S)
+_REPORT_CHECKLIST_RE = re.compile(r"BEFORE reason\.synthesize, call BOTH.*?per-host slices\. ", re.S)
+_DIRECTOR_SWAPS = (
+    ("Remember: priority_tools is the investigator's complete work order for this batch. "
+     "Make it specific and executable — every entry will be run before you see results.",
+     "Return the reads as work_items; priority_tools may stay empty (it is derived from them)."),
+    ('  "deferred_intent_dispositions": []\n}', '  "deferred_intent_dispositions": [],\n  "work_items": []\n}'),
+)
+
+
+def _dair_sys() -> str:
+    from core.deferred_intents import director_review_on, report_check_no_scenario_on
+    text = _DAIR_SYS
+    if _blocker_items():
+        for old, new in _DAIR_SYS_SWAPS_BLOCKERS:
+            text = text.replace(old, new)
+    if report_check_no_scenario_on():
+        text = text.replace(*_DAIR_SYS_SWAP_CASE_QUESTION)
+    if director_review_on():
+        text = _JOB_RE.sub(lambda _m: _DIRECTOR_JOB, text, count=1)
+        text = _ANALYZE_CHECKLIST_RE.sub("", text, count=1)
+        text = _REPORT_CHECKLIST_RE.sub("", text, count=1)
+        for old, new in _DIRECTOR_SWAPS:
+            text = text.replace(old, new)
+    return text
+
+
 def _gaps_block() -> str:
     """What the director is otherwise not told: the high-value artifacts
     the case knows and never opened (with what each answers), and the
@@ -373,8 +439,17 @@ def _gaps_block() -> str:
     if not case:
         return ""
     try:
+        from core.contents_index import host_view_on
+        view_on = host_view_on()
+    except Exception:  # noqa: BLE001
+        view_on = False
+    try:
         from core.artifact_value import unexamined_high_value
-        unread = unexamined_high_value(case, limit=10)
+        unread = unexamined_high_value(case, limit=10 if not view_on else 10_000)
+        if view_on:
+            # The contents index's rows are shown by host below (or, under
+            # the work order, as the map inside its PROPOSED block).
+            unread = [u for u in unread if not str(u.get("source") or "").startswith("index:")][:10]
     except Exception:  # noqa: BLE001
         unread = []
     if unread:
@@ -385,12 +460,19 @@ def _gaps_block() -> str:
             why = str(u.get("why") or "")
             lines.append(f"- {path}" + (f" [{host}]" if host else "") + (f": {why}" if why else ""))
     try:
-        from core.investigation_tasks import actionable_tasks
-        from core.request_parts import open_parts
+        from core.deferred_intents import work_order_on as _wo_on
+        if view_on and not _wo_on():
+            from core.contents_index import host_view
+            view = host_view(case)
+            if view:
+                lines.append(view)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from core.work_order import open_question_parts
         rows = []
-        for t in actionable_tasks(case):
-            pending = open_parts(t)
-            if pending:
+        for t, pending in open_question_parts(case):
+            if pending and pending[0].get("id"):
                 rows.append(f"- {t.get('id')} {str(t.get('text') or '')[:70]}: "
                             + "; ".join(f"{p['id']} {p['text'][:40]} ({p['type']})" for p in pending[:6]))
     except Exception:  # noqa: BLE001
@@ -398,7 +480,236 @@ def _gaps_block() -> str:
     if rows:
         lines.append("OPEN REQUEST PARTS (each needs a stated value of its kind, or a limitation):")
         lines += rows[:8]
+    # The work order's own block (due, failed, proposed), so a review the
+    # loop asks for sees what it reviews and every proposal reaches the
+    # director; a priority tool naming a proposal's host and path adopts it.
+    try:
+        from core.deferred_intents import work_order_on
+        if work_order_on():
+            from core.execution_log import log as _wlog
+            from core.work_order import work_order_for_director
+            order = work_order_for_director(_wlog, str(case))
+            if order:
+                lines.append(order)
+    except Exception:  # noqa: BLE001
+        pass
     return "\n".join(lines)
+
+
+def _review_block() -> str:
+    """The director's input under ATLAS_DIRECTOR_REVIEW, replacing the gaps
+    block and the order block: every question with its items and claims,
+    the due and failed items, what each question's claims rest on, the
+    proposals with the host-first map, and the findings since the last
+    review."""
+    try:
+        case = _case_root()
+    except Exception:  # noqa: BLE001
+        case = None
+    if not case:
+        return ""
+    from core import work_order as W
+    from core.execution_log import log as _wlog
+    from core.investigation_tasks import list_tasks
+    lines: list[str] = []
+    items = _wlog.work_items()
+    tasks = list_tasks(case) or []
+    if tasks:
+        lines.append("QUESTIONS (all; status | items due/done/failed | claims linked | question):")
+        for t in tasks:
+            tid = str(t.get("id"))
+            mine = [i for i in items if tid in (i.get("task_ids") or [])]
+            n = {st: sum(1 for i in mine if i.get("status") == st) for st in ("due", "resolved", "failed")}
+            claims = list(t.get("related_claim_ids") or [])
+            for p in t.get("parts") or []:
+                if isinstance(p, dict):
+                    claims += list(p.get("claim_ids") or [])
+            lines.append(f"- {tid} {str(t.get('status') or ''):9}| {n['due']}/{n['resolved']}/{n['failed']} | "
+                         f"{len(set(claims))} | {' '.join(str(t.get('text') or '').split())[:100]}")
+    order = W.work_order_for_director(_wlog, str(case))
+    if order:
+        # The due, failed and proposed sections with the host-first map.
+        order = order.replace("PROPOSED (name a priority tool with host and path to adopt one; it then becomes due):",
+                              "PROPOSED (adopt with a target, or keep with a note):")
+        # A failed item is closed: its failure is the record, and a ruling on
+        # it is refused. A question that still needs the read gets another.
+        order = order.replace("FAILED:", "FAILED (closed, no ruling: a question that still needs the read gets "
+                                         "a different one in work_items):")
+    claim_lines = _claims_per_question(case, tasks, items)
+    if claim_lines:
+        lines.append("CLAIMS PER QUESTION (what each rests on):")
+        lines += claim_lines
+    if order:
+        lines.append(order)
+    refused = _last_refused_reads()
+    if refused:
+        lines.append("REFUSED AT THE LAST REVIEW (correct and resend, or drop): " + "; ".join(refused))
+    try:
+        from tools.tool_capabilities import readers_block
+        readers = readers_block()
+        if readers and lines:       # beside an order, never as the whole block
+            lines.append(readers)
+    except Exception:  # noqa: BLE001 - guidance, never a failed review
+        pass
+    new = _findings_since_last_review()
+    if new:
+        lines.append("NEW FINDINGS SINCE THE LAST REVIEW: " + "; ".join(new[:12])
+                     + (f"; +{len(new) - 12} more" if len(new) > 12 else ""))
+    return "\n".join(lines)
+
+
+def _apply_director_review(assessment: dict, raw_directives: dict) -> list:
+    """The director's work_items become items (validated like a plan read:
+    a host, file and reading tool of this case), its rulings on the order's
+    items are applied (promote with a target, keep, dismiss with a basis
+    call), and priority_tools is derived from the items for compatibility.
+    Returns the ids of the item rulings applied or refused."""
+    try:
+        case = _case_root()
+    except Exception:  # noqa: BLE001
+        case = None
+    if not case:
+        return []
+    from core import work_order as W
+    from core.execution_log import log as _wlog
+    from core.question_plan import check_reads, reading_tools
+    names = {t for t, _w in reading_tools()}
+    made, refused = [], []
+    for read in assessment.get("work_items") or []:
+        if not isinstance(read, dict):
+            continue
+        checked, why = check_reads(str(case), read, names)
+        if not checked:
+            refused.append(f"{read.get('tool')} {read.get('host')} {read.get('source')}"[:160] + f" ({why})")
+            continue
+        tasks = [str(t) for t in read.get("task_ids") or [] if t]
+        for v in checked:
+            item = _wlog.add_work_item("director", tasks, v["tool"], v["target"],
+                                       v["why"] or str(read.get("why") or ""), source_ref={"kind": "dair_review"})
+            made.append(item["call_id"])
+            tool = v["tool"]
+            if tool and tool not in (raw_directives.get("priority_tools") or []):
+                raw_directives.setdefault("priority_tools", []).append(tool)
+    by_id = {i["call_id"]: i for i in _wlog.work_items()}
+    ruled, results = [], []
+    for d in assessment.get("deferred_intent_dispositions") or []:
+        if not isinstance(d, dict):
+            continue
+        item_id, basis = _int_id(d.get("call_id")), _int_id(d.get("basis_call_id"))
+        if item_id not in by_id:
+            continue
+        target, why = _promote_target(str(case), by_id[item_id], d)
+        if why:
+            ruled.append(item_id)
+            results.append({"id": item_id, "action": d.get("action"), "ok": False, "error": why})
+            continue
+        r = W.dispose_work_item(_wlog, item_id, str(d.get("action") or ""),
+                                basis_call_id=basis, target=target, note=str(d.get("note") or ""))
+        d = {**d, "call_id": item_id}
+        ruled.append(d["call_id"])
+        results.append({"id": d["call_id"], "action": d.get("action"), "ok": r.get("ok"),
+                        **({"error": r["error"]} if r.get("error") else {})})
+    assessment["work_items_added"] = made
+    # A refused ruling joins the refused reads: the rulings themselves go
+    # to the analyst in the result, and the director reads only the
+    # directives of its last review, so this is how it learns a promote
+    # left no target and that keep is the ruling that stands.
+    refused += [f"ruling {r.get('action')} #{r['id']}: {r.get('error')}"[:300]
+                for r in results if not r.get("ok") and r.get("error")]
+    if refused:
+        assessment["work_items_refused"] = refused
+        # Recorded with the directives, so the next review shows them.
+        raw_directives["work_items_refused"] = refused
+    if results:
+        assessment["work_item_rulings"] = results
+    return ruled
+
+
+def _claims_per_question(case, tasks: list, items: list) -> list[str]:
+    from core.claim_graph import load_graph
+    nodes = load_graph(case).get("nodes") or {}
+    src_items = {}
+    for i in items:
+        ref = i.get("source_ref") or {}
+        if i.get("origin") == "source" and ref.get("claim_id"):
+            src_items.setdefault(ref["claim_id"], []).append(i)
+    out = []
+    for t in tasks:
+        ids = list(t.get("related_claim_ids") or [])
+        for p in t.get("parts") or []:
+            if isinstance(p, dict):
+                ids += list(p.get("claim_ids") or [])
+        bits = []
+        for cid in list(dict.fromkeys(ids))[:4]:
+            n = nodes.get(cid) or {}
+            if not n:
+                continue
+            srcs = src_items.get(cid) or []
+            if srcs:
+                s0 = srcs[0]
+                bits.append(f"{cid} rests on timeline rows only; their source "
+                            f"{(s0.get('target') or {}).get('source_hint') or s0.get('args_summary') or ''} "
+                            f"is item #{s0['call_id']} ({s0.get('status')})")
+            else:
+                calls = [int(c) for c in (n.get("analyst_call_ids") or n.get("input_call_ids") or []) if c][:3]
+                bits.append(f"{cid} rests on " + (f"call {', '.join(str(c) for c in calls)}" if calls
+                                                  else "no cited call"))
+        if bits:
+            out.append(f"- {t.get('id')}: " + "; ".join(bits))
+    return out
+
+
+def _int_id(value) -> int | None:
+    """An item or call id the model wrote as a number or a digit string."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().lstrip("#").isdigit():
+        return int(value.strip().lstrip("#"))
+    return None
+
+
+def _promote_target(case: str, item: dict, ruling: dict) -> tuple[dict | None, str]:
+    """A ruling's target: the inner path, and a host of the case, mapped to
+    the host's image when the item names no file (a host-less proposal is
+    adopted with a host). Returns the refusal instead when the host is not
+    one of the case."""
+    target: dict = {}
+    if ruling.get("inner_path"):
+        target["inner_path"] = str(ruling["inner_path"])
+    host = str(ruling.get("host") or "").strip()
+    if host:
+        from core.forensic_citation import known_case_hosts
+        from core.work_order import _host_image
+        match = next((h for h in known_case_hosts(case) if h.casefold() == host.casefold()), None)
+        if match is None:
+            return None, f"host {host} is not a host of this case"
+        target["host"] = match
+        if not (item.get("target") or {}).get("path"):
+            image = _host_image(case, match)
+            if image:
+                target["path"] = image
+    return target or None, ""
+
+
+def _last_refused_reads() -> list[str]:
+    """The work items the previous review asked for and the check refused."""
+    from core.execution_log import log as _wlog
+    last = next((e for e in reversed(list(_wlog._entries or [])) if e.get("type") == "dair_call"), None)
+    return list(((last or {}).get("directives") or {}).get("work_items_refused") or [])
+
+
+def _findings_since_last_review() -> list[str]:
+    from core.execution_log import log as _wlog
+    entries = list(_wlog._entries or [])
+    last = max((int(e.get("call_id") or 0) for e in entries if e.get("type") == "dair_call"), default=0)
+    out = []
+    for e in entries:
+        if e.get("type") == "finding" and int(e.get("call_id") or 0) > last:
+            head = " ".join(str(e.get("description") or "").split())[:100]
+            out.append(f"{e.get('claim_id') or e.get('call_id')} {head}")
+    return out
 
 
 def _gaps_digest() -> dict:
@@ -413,17 +724,36 @@ def _gaps_digest() -> dict:
         return {"unread": [], "open_parts": []}
     try:
         from core.artifact_value import unexamined_high_value
-        unread = sorted(str(u.get("key") or u.get("path") or u.get("name") or "")
-                        for u in unexamined_high_value(case, limit=10))
+        from core.contents_index import host_view_on, view_digest
+        if host_view_on():
+            # The view's own digest (hosts in view with their unread counts,
+            # the images not listed): a read landing or a claim naming a
+            # new host changes it.
+            unread = sorted(str(u.get("key") or u.get("path") or u.get("name") or "")
+                            for u in unexamined_high_value(case, limit=10_000)
+                            if not str(u.get("source") or "").startswith("index:"))[:10]
+            unread += view_digest(case)
+        else:
+            unread = sorted(str(u.get("key") or u.get("path") or u.get("name") or "")
+                            for u in unexamined_high_value(case, limit=10))
     except Exception:  # noqa: BLE001
         unread = []
     try:
-        from core.investigation_tasks import actionable_tasks
-        from core.request_parts import open_parts
-        parts = sorted(f"{t.get('id')}:{p['id']}" for t in actionable_tasks(case) for p in open_parts(t))
+        from core.work_order import open_question_parts
+        parts = sorted(f"{t.get('id')}:{p['id']}" for t, ps in open_question_parts(case) for p in ps
+                       if p.get("id"))
     except Exception:  # noqa: BLE001
         parts = []
-    return {"unread": [u for u in unread if u], "open_parts": parts}
+    items: list[str] = []
+    try:
+        from core.deferred_intents import work_order_on
+        if work_order_on():
+            from core.execution_log import log as _wlog
+            from core.work_order import order_digest
+            items = order_digest(_wlog)
+    except Exception:  # noqa: BLE001
+        items = []
+    return {"unread": [u for u in unread if u], "open_parts": parts, "work_items": items}
 
 
 def _mounted_volumes_block() -> str:
@@ -596,7 +926,7 @@ def _analyze_collect_roundtrips() -> int:
 
 
 def _report_collect_roundtrips() -> int:
-    """Count Report↔Collect pushes."""
+    """Count Report<->Collect pushes."""
     n = 0
     try:
         from core.execution_log import log as _elog
@@ -941,7 +1271,7 @@ def _deprioritize_expensive_disk(priority_tools: list) -> list:
         if prefer not in head and prefer not in tail:
             head.append(prefer)
     ordered = head + tail
-    # I3: when opened disk still has winevt on next_work_order, consume that
+    # When opened disk still has winevt on next_work_order, consume that
     # intent before deep carving (single access_workflow consumer).
     try:
         from core.access_workflow import prioritize_tools_for_access_workflow
@@ -1128,7 +1458,7 @@ def _collect_advance_candidates(
                 "transition to Collect."),
         ))
 
-    # Collect max-pass cap — stop Collect↔stay thrash once the gather phase
+    # Collect max-pass cap — stop Collect<->stay thrash once the gather phase
     # has had several cycles; Analyze is where correlation/synthesis live.
     # A pass that is still learning something (new findings, evidence,
     # hypotheses) is not thrash: the cap waits for the first barren pass, so
@@ -1147,7 +1477,7 @@ def _collect_advance_candidates(
                 "instead of re-collected."),
         ))
 
-    # Collect↔Analyze oscillation damper — mirror Triage↔Collect cap.
+    # Collect<->Analyze oscillation damper — mirror Triage<->Collect cap.
     ac_trips = _analyze_collect_roundtrips()
     if (phase in ("Collect", "Analyze")
             and ac_trips >= _OSCILLATION_MAX_ROUNDTRIPS
@@ -1179,8 +1509,8 @@ def _collect_advance_candidates(
     # reason.synthesize before Analyze) mean the agent is stuck asking for
     # synthesis work while DAIR stays in Triage/Collect. Force Analyze so
     # the refuse loop cannot burn the turn budget — synthesize is callable
-    # from Analyze onward, so jumping straight to Report (the old escape)
-    # is no longer needed and skipped the actual analysis phase.
+    # from Analyze onward, so jumping straight to Report would skip the
+    # actual analysis phase.
     try:
         from core.investigation_exit import refuse_latch_tripped
         if (phase in ("Triage", "Collect")
@@ -1204,7 +1534,7 @@ def _collect_advance_candidates(
     # Evidence exhausted — invented-path storms must NOT advance and park
     # real evidence as "absent". Only hard-advance while gathering
     # (Collect→Analyze). Analyze→Scan force from missing-file storms caused
-    # phase thrash while EVTX/HV evidence still existed (X11) — soft hint only.
+    # phase thrash while EVTX/HV evidence still existed — soft hint only.
     if (later
             and _consecutive_phase_stays(phase) >= _STALL_MAX_STAYS - 1
             and _recent_missing_evidence_failures() >= 2
@@ -1246,8 +1576,8 @@ def _collect_advance_candidates(
 
     # Productive stall — knowledge-state stall (progress_signature).
     # Hard advance only in Triage/Collect (get to Analyze). In Analyze/Scan
-    # demote to a soft hint so general stall cannot force Analyze↔Scan /
-    # Scan↔Report thrash (B0 / X5). empty_loop + refuse_latch remain hard.
+    # demote to a soft hint so general stall cannot force Analyze<->Scan /
+    # Scan<->Report thrash. empty_loop + refuse_latch remain hard.
     _in_triage_with_findings = False
     if phase == "Triage" and assessment.get("stack_action") == "stay":
         try:
@@ -1448,6 +1778,9 @@ def _report_entry_coverage_gate() -> tuple[str, list[str]]:
     degraded exit, no case dir, gate errored, or deferral budget exhausted.
     """
     global _report_gate_deferrals
+    from core.deferred_intents import coverage_honesty_on
+    if coverage_honesty_on():
+        return "", []          # coverage is disclosed in the report, never a gate (ATLAS_COVERAGE_HONESTY)
     try:
         case = _case_root()
         if not case:
@@ -1475,6 +1808,55 @@ def _report_entry_coverage_gate() -> tuple[str, list[str]]:
             "a read that failed. Do this before entering Report."
         )
         return note, ["coverage.ledger_status", *read_tools(case, limit=5)]
+    except Exception:
+        return "", []
+
+
+# The open-work gate on Report entry: in-process memory of the set named
+# at the last deferral (fresh per run; a resumed run defers once more).
+_report_open_work_named: frozenset = frozenset()
+
+
+def _report_entry_open_work_gate() -> tuple[str, list[str]]:
+    """('note', redirect_tools) when the Report push must wait for the
+    content classes with neither a read nor a reason (core.work_order
+    .open_classes). The push is deferred while their set differs from the
+    set the last deferral named; the identical set passes (the analyst
+    was told; the finish guard holds the end). Outside the
+    coverage-honesty flag, which keeps meaning that units are disclosed.
+    No count."""
+    global _report_open_work_named
+    try:
+        from core.deferred_intents import work_order_on
+        if not work_order_on():
+            return "", []
+        case = _case_root()
+        if not case:
+            return "", []
+        from core import work_order as W
+        from core.execution_log import log as _wlog
+        work = W.open_work(_wlog, case)
+        # The classes only: the other sources churn with every parse, and
+        # the finish and the close-out name them. A class key changes only
+        # through a read, a leave or a reopen, which is progress on what
+        # the gate asks for.
+        keys = W.open_class_keys(work)
+        if not keys or keys == _report_open_work_named:
+            return "", []
+        _report_open_work_named = keys
+        lines = W.class_lines(work)
+        depth = ""
+        try:
+            from core.evidence_depth import depth_by_host, depth_line
+            depth = depth_line(depth_by_host(case))
+        except Exception:  # noqa: BLE001
+            depth = ""
+        note = ("report_entry_open_work: Report deferred; content classes have neither a read nor a reason, and "
+                "the run cannot end as finished while one stands. A question being answered is never the ground"
+                + (f". Depth per host (decided/total): {depth}" if depth else "") + ":\n"
+                + "\n".join(lines[:24]))
+        readers = [r for g in work.get("classes") or [] for r in g.get("readers") or []][:6]
+        return note, ["coverage.set_evidence_disposition", "coverage.ledger_status", *readers]
     except Exception:
         return "", []
 
@@ -1514,7 +1896,7 @@ def _enforce_work_order(assessment: dict, raw_directives: dict,
         _delta = None
 
     if phase == "Report":
-        # Report↔Collect damper lives here (Report skips advance valves).
+        # Report<->Collect damper lives here (Report skips advance valves).
         # Access Stage / sudo_auth blockers that Collect cannot clear must not
         # thrash phases.
         note = ""
@@ -1530,10 +1912,14 @@ def _enforce_work_order(assessment: dict, raw_directives: dict,
                 assessment["stack_action"] = "stay"
                 assessment["transition_recommended"] = False
                 assessment["transition_rationale"] = (
-                    "Report↔Collect damper — stay in Report; document Access "
-                    "Stage / Limitations via reason.synthesize UNRESOLVABLE "
-                    "rather than re-entering Collect for the same disk-open "
-                    "blocker."
+                    ("Report↔Collect damper — stay in Report; state what was read and what "
+                     "failed (a dead end is an item that failed, not a sentence) rather than "
+                     "re-entering Collect for the same disk-open blocker.")
+                    if _blocker_items() else
+                    ("Report↔Collect damper — stay in Report; document Access "
+                     "Stage / Limitations via reason.synthesize UNRESOLVABLE "
+                     "rather than re-entering Collect for the same disk-open "
+                     "blocker.")
                 )
                 note = "report_collect_damper"
         return list(raw_directives.get("priority_tools", []) or []), note
@@ -1560,7 +1946,7 @@ def _enforce_work_order(assessment: dict, raw_directives: dict,
         note = _apply_valve(assessment, winner)
     else:
         # Soft valves (Analyze/Scan stall / false exhaustion) never force
-        # stack transitions — surface as note + rationale only (B0).
+        # stack transitions — surface as note + rationale only.
         soft = assessment.get("soft_valve_hint")
         if isinstance(soft, dict) and soft.get("note"):
             note = str(soft["note"])
@@ -1577,6 +1963,8 @@ def _enforce_work_order(assessment: dict, raw_directives: dict,
             and str(assessment.get("next_phase") or "") == "Report"
             and str(assessment.get("stack_action") or "") == "push"):
         deferral_note, redirect_tools = _report_entry_coverage_gate()
+        if not deferral_note:
+            deferral_note, redirect_tools = _report_entry_open_work_gate()
         if deferral_note:
             assessment["next_phase"] = ""
             assessment["stack_action"] = "stay"
@@ -1676,11 +2064,11 @@ def _parse_challenges(raw: str) -> list:
 
 # Keys the director's reply is read by. The prompt asks for a flat object with
 # a `directives` sub-object, but reasoning models drift from the template in
-# ways that all used to parse as the empty template: fields under a wrapper
+# ways that would all parse as the empty template: fields under a wrapper
 # object, the label missing, prose with braces after the block. Each such
-# reply cost a full model call and delivered the server fallbacks instead of
-# the model's decision, so the reply is read by key at any depth.
-_ASSESSMENT_KEYS = tuple(_EMPTY_ASSESSMENT) + ("deferred_intent_dispositions",)
+# reply would cost a full model call and deliver the server fallbacks instead
+# of the model's decision, so the reply is read by key at any depth.
+_ASSESSMENT_KEYS = tuple(_EMPTY_ASSESSMENT) + ("deferred_intent_dispositions", "work_items")
 _ASSESSMENT_SIGNATURE = frozenset(_ASSESSMENT_KEYS) | frozenset(_EMPTY_DIRECTIVES)
 
 
@@ -1731,6 +2119,17 @@ def _dair_response_schema() -> dict:
             "call_id": {"type": "integer"},
             "action": {"type": "string", "enum": ["promote", "dismiss", "keep"]},
             "note": string,
+            "inner_path": string,
+            "host": string,
+            "basis_call_id": {"type": ["integer", "null"]},
+        })},
+        "work_items": {"type": "array", "items": _strict_object({
+            "task_ids": strings,
+            "tool": string,
+            "host": string,
+            "source": string,
+            "pattern": string,
+            "why": string,
         })},
     }
     assert set(fields) == set(_ASSESSMENT_KEYS) | {"directives"}
@@ -1975,6 +2374,25 @@ _ACCOUNT_NAME_RE = re.compile(
 )
 
 
+def _entity_principals(text: str) -> set[str]:
+    """The DOMAIN\\user accounts core.entities reads in a text (the account
+    form the conclusion door and the composer use), with the same precision
+    filter as the summary extractor: a second source of unseen principals."""
+    from core.entities import _ACCOUNT_RE, _account_entity
+    from core.execution_log import as_text
+    from core.ioc_catalog import written_as_principal
+    text = as_text(text)
+    out: set[str] = set()
+    for m in _ACCOUNT_RE.finditer(text or ""):
+        if m.start() and text[m.start() - 1] in "\\/:":
+            continue                     # a path segment, not DOMAIN\\user
+        for ent in _account_entity(m):
+            user = ent.split("/", 1)[-1]
+            if user and user not in _PRINCIPAL_STOP_WORDS and written_as_principal(m.group(2), text):
+                out.add(user.upper())
+    return out
+
+
 def _extract_principal_tokens(text: str, require_cue: bool = True,
                               cue: str = "creation") -> set[str]:
     """Return new-principal tokens (uppercased account names, ``RID<n>``,
@@ -1984,7 +2402,7 @@ def _extract_principal_tokens(text: str, require_cue: bool = True,
     carries a *cue* that this is a genuine new principal, not an ordinary
     mention. ``cue`` selects which cue families gate (precision ↓ as breadth ↑):
 
-      - ``"creation"`` (default, back-compat): account-*creation* only
+      - ``"creation"`` (default): account-*creation* only
         (4720 / "account created" / "new admin account" / covert/backdoor).
       - ``"forced"``: creation OR interactive/RDP authentication (logon type
         2/10, 4778/4779, "logged in") — the Tier-A "second operator" cues that
@@ -2106,11 +2524,22 @@ def _ask_openai_compat(system: str, user: str) -> dict:
         # The reply is asked for as the assessment object itself; an endpoint
         # that rejects the schema is learned and the text parser below reads
         # the reply either way.
-        resp = client.chat(
-            _messages, role=_DAIR_ROLE, temperature=None,
+        from agent.llm import cut_at_allowance, one_answer_chat
+        resp = one_answer_chat(
+            client, _messages, role=_DAIR_ROLE, temperature=None,
             response_format=_dair_response_format(),
             compact=lambda msgs: [msgs[0], {"role": "user",
                                             "content": _compact_user_message(user)}])
+        if cut_at_allowance(resp) and (resp.content or "").strip():
+            # Cut at the one-answer allowance again one level lower: no
+            # assessment is read from half a reply.
+            return {
+                **_empty,
+                "error": "the director's reply ran past the one-answer allowance twice",
+                "input_tokens": resp.input_tokens, "output_tokens": resp.output_tokens,
+                "reasoning_tokens": resp.reasoning_tokens, "finish_reason": "length",
+                "gate": "reply_length_cut", "length_cuts": resp.length_cuts,
+            }
         raw = resp.content.strip()
         if not raw:
             # What the model was writing when nothing answered: the reply
@@ -2233,6 +2662,9 @@ Nothing outside that list will be run.
   is invalid and stalls the investigation.
 - investigation_focus: one sentence stating the question this batch answers.
 - Report phase only: priority_tools is empty; populate recommended_actions instead. \
+A question being answered is never the ground for Report while a host in scope has \
+undecided cheap evidence classes: the open-work list names them, and the report states \
+the depth per host. \
 When a REPORT GATE block is present and reads READY_TO_REPORT: false, the first \
 recommended actions MUST address each blocking issue concretely — which finding to \
 re-cite from which call, which finding to lower, which blocker to state as \
@@ -2267,8 +2699,7 @@ to leave a non-Report phase, OR when the Triage max-pass cap is about to force a
 transition, FIRST put reason.hypothesize (mode="absence") at the front of \
 priority_tools — observation = the still-unresolved part of the case question, \
 evidence = the artifact categories already examined. It returns the untouched \
-high-value categories (second-principal logon source, a different SID's profile, \
-an alternate exfil channel, setupapi.dev.log) as probe candidates. This forces \
+high-value categories as probe candidates. This forces \
 one divergent look before the funnel closes. Skip it only in Report.
 
 IMPORTANT CONSTRAINTS:
@@ -2327,12 +2758,12 @@ for Office macros. These are deterministic and citable; never rely on ad-hoc \
 python one-liners via misc.batch_run for decoding, which are fragile and \
 cannot be cited in a finding.
 
-EMAIL/PHISHING EVIDENCE: When a .eml/.msg or mail store is in scope, put \
+EMAIL EVIDENCE: When a .eml/.msg or mail store is in scope, put \
 misc.parse_email FIRST — it returns reconciled headers (From vs Return-Path vs \
 Reply-To vs Message-ID domain, plus SPF/DKIM/DMARC) and attachment hashes. The \
-visible From: may be spoofed; attribute the attacker from the full header \
-provenance. Distinguish the delivered attachment (the lure) from any file \
-dropped/downloaded during execution (the second-stage payload) — hash each \
+visible From: may be spoofed; name a sender from the full header \
+provenance. Distinguish a delivered file from any file \
+written during execution — hash each \
 stage separately. A file that fails parse_email (not RFC822) is likely a \
 native OLE .msg — retry with misc.parse_msg_ole; an Apple Mail store uses \
 misc.parse_emlx. All three return the same shape. Non-Chrome browser history \
@@ -2356,23 +2787,19 @@ and value. Produce an investigation plan via directives.priority_tools.
 tsk.*, strings.* tools. Stay until the plan is satisfied; advance to Analyze when \
 sufficient evidence is in hand. \
 EXHAUSTION RULE: for each artifact category named in the Triage plan (registry hives, \
-event log channels, HTTP session cookies, memory regions, browser profiles), collect \
+event log channels, HTTP sessions, memory regions, browser profiles), collect \
 ALL instances of that category — not just the first one that yields results. Advance \
 to Analyze only when every named category has been fully collected, not merely sampled. \
-For network evidence: before advancing from Collect, run net.ngrep_search(pattern="Cookie:") \
-and net.ngrep_search(pattern="(login|email|username|user=|gausr=|Y=|T=)") on each \
-suspect device's traffic, plus net.tcpdump_extract_http and net.tcpxtract_streams. \
-Cross-reference every found identity (email, username, screen name, cookie value) \
-against any suspect list provided in case_context before advancing.
+Cross-reference every found identity against any reference set in case_context \
+before advancing.
   Analyze  — reason about the collected artifacts: process trees, network \
 connections, persistence mechanisms, TTPs. Each suspicious artifact should be \
 examined. A genuinely ambiguous artifact may require more collection before \
 proceeding. \
 PIVOT CANDIDATES: if Analyze surfaces a reference to a host or principal other \
-than the one under investigation — remote logon (4624 type 3/10), SMB session, \
-mapped drive, inbound RDP, \\\\HOST\\share path in a command line or registry \
-value, named pipe to a remote endpoint, newly-created account, or first-seen \
-identity — treat it as a candidate pivot in your analysis. Do not assume that \
+than the one under investigation — a session from or to another host, a path or \
+connection naming another host, an account not seen before — treat it as a \
+candidate pivot in your analysis. Do not assume that \
 the phase stack must change automatically; prescribe explicit evidence-gathering \
 tools only when the candidate matters to the case question. \
 ALSO run anti-forensics detectors here when the relevant input artifacts exist: \
@@ -2408,7 +2835,7 @@ that states a real-world identity is unknown or unresolvable, verify that the Co
 phase ran ALL identity-yielding tool categories for this evidence type. If any category \
 was skipped, return stack_action "stay" and add the missing tools to priority_tools — \
 do not advance to Scan or Report with an unresolved identity when evidence remains \
-uncollected. Cross-referencing found identities against any suspect list in case_context \
+uncollected. Cross-referencing found identities against any reference set in case_context \
 is a required Analyze step, not optional enrichment.
 
 LIVE ENDPOINT CASES: When case_context names a live endpoint (the agent will \
@@ -2664,40 +3091,6 @@ def _standing_assessment(signature: dict) -> dict | None:
 
 # ── MCP tool ──────────────────────────────────────────────────────────────────
 
-def _recent_repeat_rate(window: int = 40) -> str:
-    """One line on how much recent tool output the run had already obtained.
-
-    The empty-loop valve catches an *identical* work order. A varied one that
-    keeps re-deriving answers the run already holds is invisible to it, and
-    to the call memo as well: the memo keys on the question, and these ask
-    different questions to receive the same answer. The signal is the share
-    of calls whose output hash was already seen.
-
-    Reported, never acted on — the phase decision stays the director's. Silent
-    below a floor of calls and below a rate worth mentioning, so a healthy
-    pass carries no extra text.
-    """
-    from core.execution_log import log as _elog
-    calls = [e for e in getattr(_elog, "_entries", [])
-             if e.get("type") == "tool_call" and e.get("output_hash")]
-    if len(calls) < 12:
-        return ""
-    recent = calls[-window:]
-    seen = {e.get("output_hash") for e in calls[:-len(recent)]}
-    dup = 0
-    for e in recent:
-        h = e.get("output_hash")
-        if h in seen:
-            dup += 1
-        seen.add(h)
-    if dup * 100 < len(recent) * 40:
-        return ""
-    return ("REPEATED OUTPUT: %d of the last %d tool calls returned output "
-            "this run had already obtained. Judge whether this line of "
-            "enquiry is still producing, or whether the phase should move on."
-            % (dup, len(recent)))
-
-
 def _report_gate_block(entries) -> str:
     """The latest ``reason.pre_report_check`` verdict as a block for the
     director, empty when the gate was never consulted. The gate decides
@@ -2729,41 +3122,28 @@ def dair_assess(
     """
     Assess the current DAIR phase, challenge findings, and direct the next steps.
     Call this after every parallel tool batch, and at each phase transition.
-    When nothing recorded has changed since the last assessment (no new
-    finding, evidence, hypothesis, correction, evidence class or deferred
-    probe, same phase) the standing assessment is returned again instead of
-    consulting the director; pass fresh=true to consult it regardless.
+    When nothing recorded has changed since the last assessment, the standing
+    assessment is returned again instead of consulting the director.
+    Cycle: Triage, Collect, Analyze, Scan, Report. stack_action "push" appends
+    {phase: next_phase, entry_reason, depth} to the stack, "pop" removes the
+    top entry, "stay" keeps it. A push into Triage carries
+    verification_challenges whose challenge_method tools are in
+    directives.priority_tools; a move to Report carries recommended_actions
+    (advisory: Atlas never contains or eradicates). candidate_pivots (hosts
+    or principals) are observations; they do not change the phase.
+    Returns current_phase, phase_rationale, transition_recommended,
+    next_phase, transition_rationale, stack_action, investigation_focus,
+    verification_challenges, recommended_actions, directives, _atlas_call_id.
 
     tool_results_summary: 3-5 sentence summary of what the last tool batch found.
-    phase_stack: JSON list of {phase, entry_reason, depth} objects, newest last.
-                 Pass "[]" on the first call — DAIR will start at Triage.
-    case_context: case ID, the analyst's PRIOR KNOWLEDGE statements that
-                  bear on this batch, known threat actor, confirmed IOCs so far.
-    input_call_ids: optional — the _atlas_call_id values of the calls whose
-        results you summarised. Omit it and every tool and reason call since
-        the previous assessment is taken as the lineage; never abbreviate a
-        list.
-
-    Returns: current_phase, phase_rationale, transition_recommended, next_phase,
-             transition_rationale, stack_action, investigation_focus,
-             verification_challenges (when in Triage), recommended_actions
-             (when transitioning to Report), directives, _atlas_call_id.
-
-    stack_action "push"  → append {phase: next_phase, entry_reason, depth} to stack
-    stack_action "pop"   → remove top entry; resume parent phase
-    stack_action "stay"  → no change to stack
-
-    Cycle: Triage → Collect → Analyze → Scan → Report. Candidate hosts or
-    principals may be returned in candidate_pivots, but they are advisory
-    observations and do not alter stack_action or next_phase.
-
-    When stack_action is "push" and next_phase is "Triage": check
-    verification_challenges for entries with verified=null and run the specified
-    challenge_method tools (they will be in directives.priority_tools).
-
-    When next_phase is "Report": review recommended_actions for Improve & Response
-    items to include in the report. These are advisory only — Atlas never performs
-    containment or eradication.
+    phase_stack: JSON list of {phase, entry_reason, depth} objects, newest last;
+        "[]" on the first call (DAIR starts at Triage).
+    case_context: case ID, the analyst's PRIOR KNOWLEDGE statements that bear
+        on this batch, known threat actor, confirmed IOCs so far.
+    input_call_ids: optional, the _atlas_call_id values of the calls whose
+        results you summarised; omitted, every call since the previous
+        assessment is the lineage. Never abbreviate a list.
+    fresh: true consults the director even when nothing changed.
     """
     summary = _cap_lines(tool_results_summary.strip(), 100)
     # Summary-vs-trace verification: the agent's tool_results_summary is
@@ -2819,7 +3199,8 @@ def dair_assess(
     _mounts = _mounted_volumes_block()
     if _mounts:
         user_parts.append(_mounts + "\n")
-    _gaps = _gaps_block()
+    from core.deferred_intents import director_review_on as _review_on
+    _gaps = _review_block() if _review_on() else _gaps_block()
     if _gaps:
         user_parts.append(_gaps + "\n")
     user_parts.append(f"TOOL RESULTS SUMMARY:\n{summary}")
@@ -2836,15 +3217,6 @@ def dair_assess(
         _gate = _report_gate_block(_elog._entries)
         if _gate:
             user_parts.append("\n" + _gate)
-    except Exception:  # noqa: BLE001
-        pass
-
-    # What the director cannot otherwise see: how much of its recent work is
-    # re-deriving answers the run already holds.
-    try:
-        _repeat = _recent_repeat_rate()
-        if _repeat:
-            user_parts.append("\n" + _repeat)
     except Exception:  # noqa: BLE001
         pass
 
@@ -2923,7 +3295,7 @@ def dair_assess(
         backend_result = {"success": True, "raw": "",
                           "input_tokens": 0, "output_tokens": 0}
     else:
-        backend_result = _ask(_DAIR_SYS, user)
+        backend_result = _ask(_dair_sys(), user)
 
     _empty_result = {
         **_EMPTY_ASSESSMENT,
@@ -2986,10 +3358,22 @@ def dair_assess(
         # A previously-unseen *principal* is also a follow-up candidate. The
         # cue tier is preserved for audit/debugging, not control flow.
         known_principals = _build_known_principal_set(context)
-        forced_principals = sorted(
+        from core.deferred_intents import dair_principal_unseen_on
+        if dair_principal_unseen_on():
+            unseen = (_extract_principal_tokens(summary, require_cue=False)
+                      | _entity_principals(summary)) - known_principals
+            for p in sorted(unseen):
+                candidate_pivots.append({
+                    "kind": "principal",
+                    "value": p,
+                    "source": "tool_results_summary",
+                    "phase": current,
+                    "cue": "unseen",
+                })
+        forced_principals = [] if dair_principal_unseen_on() else sorted(
             _extract_principal_tokens(summary, cue="forced") - known_principals
         )
-        appearance_principals = sorted(
+        appearance_principals = [] if dair_principal_unseen_on() else sorted(
             _extract_principal_tokens(summary, cue="appearance")
             - known_principals - set(forced_principals)
         )
@@ -3057,6 +3441,12 @@ def dair_assess(
     if enforcement_note:
         assessment["work_order_enforced"] = enforcement_note
 
+    # Under the director review its reads are work items and its rulings
+    # name the order's items by id.
+    from core.deferred_intents import director_review_on as _review_on2
+    _item_disps: list = []
+    if _review_on2():
+        _item_disps = _apply_director_review(assessment, raw_directives)
     # Apply deferred-intent dispositions from the DAIR model; promote tools
     # into the work order. Remaining backlog above hysteresis is auto-relieved
     # so a full latch can never deadlock the run.
@@ -3065,6 +3455,8 @@ def dair_assess(
         dispositions = assessment.get("deferred_intent_dispositions")
         if not isinstance(dispositions, list):
             dispositions = []
+        dispositions = [d for d in dispositions
+                        if not (isinstance(d, dict) and _int_id(d.get("call_id")) in _item_disps)]
         disp_result = _elog.apply_deferred_dispositions(dispositions, dair_cid=0)
         for pt in disp_result.get("promoted_tools") or []:
             if pt and pt not in raw_directives["priority_tools"]:
@@ -3086,7 +3478,11 @@ def dair_assess(
 
     # Findings nudge: if the investigation has run many tools but recorded few
     # findings, tell the agent to formalise confirmed observations now. Not applicable in Report.
-    if assessment.get("current_phase") != "Report" and _findings_lagging():
+    # With the work order on the ritual orders are not inserted: the order
+    # carries the reads, and record keeping is the analyst's own.
+    from core.deferred_intents import work_order_on as _wo_on
+    _ritual = not _wo_on()
+    if _ritual and assessment.get("current_phase") != "Report" and _findings_lagging():
         actions = list(raw_directives.get("required_actions") or [])
         if _FINDINGS_NUDGE not in actions:
             actions.insert(0, _FINDINGS_NUDGE)
@@ -3099,7 +3495,7 @@ def dair_assess(
     # run that has opened its images and is slow to record; while a disk
     # image is still unseen it would keep the primary evidence out of the
     # work order and leave the run on one tabular source for many turns.
-    if (assessment.get("current_phase") != "Report"
+    if (_ritual and assessment.get("current_phase") != "Report"
             and _task_disposition_lagging()
             and not _disk_units_unseen()):
         actions = list(raw_directives.get("required_actions") or [])
@@ -3113,7 +3509,7 @@ def dair_assess(
     # TTP nudge: put ATT&CK mapping INSIDE the Analyze loop instead of at the
     # report boundary. priority_tools is the work order the analyst actually
     # executes, so mitre_map/coverage_report ride along with the batch.
-    if (assessment.get("current_phase") != "Report"
+    if (_ritual and assessment.get("current_phase") != "Report"
             and _ttp_mapping_lagging(
                 assessment.get("current_phase") or "",
                 assessment.get("next_phase") or "")):

@@ -92,7 +92,7 @@ def test_usn_gaps_is_deprecated():
     assert "suggested_finding" not in r
 
 
-# ── file-first CSV parsing (Increment 1) ─────────────────────────────────────
+# ── file-first CSV parsing ───────────────────────────────────────────────────
 
 def _write_csv(path, fieldnames, rows):
     with open(path, "w", newline="") as f:
@@ -209,7 +209,7 @@ def test_discover_csv_from_trace_parses_flags(log, tmp_path):
     assert found[0][1] == cid
 
 
-# ── Increment 5 (T2-2): new anti-forensics detectors ─────────────────────────
+# ── anti-forensics detectors ─────────────────────────────────────────────────
 
 def test_usn_journal_deleted_flags_missing_usnjrnl(tmp_path):
     from tools.antiforensics import af_usn_journal_deleted
@@ -316,6 +316,37 @@ class TestZoneIdentifierRead:
         r = af_zone_identifier_read(str(tmp_path / "missing"))
         assert r["success"] is False
 
+    def test_a_percent_in_a_signed_url_is_a_value_not_a_template(self, tmp_path):
+        """A download URL's query carries "%" (percent-encoding, a signed
+        blob); the INI parser's interpolation read it as a template and
+        raised on get(), outside the error handling, so the tool crashed."""
+        from tools.antiforensics import af_zone_identifier_read
+        url = "https://cdn.example.com/dl/report.pdf?sig=a%2Fb%20c&exp=2031"
+        stream = tmp_path / "report.pdf_Zone.Identifier"
+        stream.write_text(f"[ZoneTransfer]\r\nZoneId=3\r\nHostUrl={url}\r\n")
+        r = af_zone_identifier_read(str(stream))
+        assert r["success"] is True and r["host_url"] == url
+
+    def test_a_byte_order_mark_and_a_repeated_key_still_parse(self, tmp_path):
+        from tools.antiforensics import af_zone_identifier_read
+        stream = tmp_path / "setup.exe_Zone.Identifier"
+        stream.write_bytes(b"\xef\xbb\xbf[ZoneTransfer]\r\nZoneId=3\r\n"
+                           b"HostUrl=https://one.example.com/a\r\nHostUrl=https://two.example.com/b\r\n")
+        r = af_zone_identifier_read(str(stream))
+        assert r["success"] is True and r["zone_id"] == "3"
+        assert r["host_url"] == "https://two.example.com/b"
+
+    def test_a_parse_error_cuts_the_quoted_line(self, tmp_path):
+        """The parser quotes the line it choked on; a long line of
+        evidence (a URL query) reaches the model cut, never whole."""
+        from tools.antiforensics import af_zone_identifier_read
+        blob = "x" * 600
+        stream = tmp_path / "odd_Zone.Identifier"
+        stream.write_text(f"[ZoneTransfer]\nZoneId=3\n{blob}\n")
+        r = af_zone_identifier_read(str(stream))
+        assert r["success"] is False and "ParsingError" in r["error"]
+        assert blob not in r["error"] and len(r["error"]) < 220
+
 
 def test_linux_history_tampering_symlink_and_rc(tmp_path):
     from tools.antiforensics import af_linux_history_tampering
@@ -399,7 +430,7 @@ def test_sysmon_evasion_reads_valid_recmd_csv(tmp_path):
 
 
 def test_sysmon_evasion_rejects_regripper_text(tmp_path):
-    # The reported bug: RegRipper .txt output (not a CSV) fed to system_hive_csv.
+    # RegRipper .txt output (not a CSV) fed to system_hive_csv.
     # It must return a clean, actionable error — never a crash, never a silent
     # zero-indicator false negative.
     from tools.antiforensics import af_sysmon_evasion
@@ -445,8 +476,8 @@ def test_mft_detectors_reject_non_mft_text(tmp_path):
 
 
 def test_ads_enumeration_filters_kaspersky_checked_stream(tmp_path):
-    # Regression for the benign-list typo 'kavicheckedstream...' which could
-    # never match; the real stream name must now be filtered out.
+    # The benign list must match the real stream name (a misspelt entry
+    # never matches), so that stream is filtered out.
     from tools.antiforensics import af_ads_enumeration
     csv_path = tmp_path / "mft.csv"
     _write_csv(csv_path, ["FileName", "ParentPath", "IsAds", "FileSize"], [

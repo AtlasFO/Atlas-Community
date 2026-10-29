@@ -195,8 +195,8 @@ def snapshot_warning(vmdk_path: str) -> str:
         "time — all later writes (and any later attacker activity) exist "
         "ONLY in the delta chain. Run img_vmdk_chain_info on the VM "
         "directory and analyze the ACTIVE chain-top descriptor instead "
-        "(chain-aware openers: img_vmdk_export_raw / qemu-nbd / pyvmdk — "
-        "TSK and xmount can NOT open VMDK snapshot chains directly); never "
+        "(tsk.* reads it with the chain applied, through its raw view or, "
+        "on a host without views, a copy from img_vmdk_export_raw); never "
         "conclude 'no activity after <date>' from the base extent."
     )
 
@@ -312,9 +312,9 @@ def analyze_vm_dir(directory: str) -> dict:
                 f"of the base (snapshots: {snap_dates}). The base/-flat "
                 f"extent is FROZEN at the oldest snapshot's creation time; "
                 f"activity after that exists ONLY in the deltas. Analyze "
-                f"via the chain-top descriptor '{top}' with a chain-aware "
-                f"opener (img_vmdk_export_raw / qemu-nbd / pyvmdk; TSK and "
-                f"xmount cannot open VMDK chains directly) — a finding "
+                f"via the chain-top descriptor '{top}' (tsk.* reads it with "
+                f"the chain applied, through its raw view or, on a host "
+                f"without views, a copy from img_vmdk_export_raw) — a finding "
                 f"of 'no activity after <date>' from the base extent alone "
                 f"is an ANALYSIS ARTIFACT, not evidence.")
     for b in broken:

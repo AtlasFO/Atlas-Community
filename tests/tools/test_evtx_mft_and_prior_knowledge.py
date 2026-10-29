@@ -89,6 +89,27 @@ class TestMftTools:
                              str(case / "analysis" / "m.csv"))
         assert r["success"] is False and r.get("gate") == "program_missing"
 
+    def test_analyzemft_refuses_a_file_that_is_no_mft(self, case, monkeypatch):
+        # analyzeMFT writes rows for any bytes; the input's own first record
+        # decides, never its name.
+        monkeypatch.setattr("tools.misc.tool_program", lambda n, *a: "/usr/bin/analyzemft")
+        ran = []
+        monkeypatch.setattr("tools.misc.run", lambda *a, **k: ran.append(a) or {"success": True})
+        from tools.misc import analyzemft_parse
+        fat = case / "evidence" / "MFT"
+        fat.write_bytes(b"\xeb\x3c\x90EXAMPLE " + b"\x00" * 500)
+        r = analyzemft_parse(str(fat), str(case / "analysis" / "m.csv"))
+        assert r["success"] is False and r["failure_class"] == "wrong_input_kind" and not ran
+        mft = case / "evidence" / "renamed.bin"
+        mft.write_bytes(b"FILE0" + b"\x00" * 1019)
+        analyzemft_parse(str(mft), str(case / "analysis" / "m.csv"))
+        assert len(ran) == 1
+        # Record 0 wiped: a later record at the 1 KiB stride still shows an MFT.
+        wiped = case / "evidence" / "wiped.bin"
+        wiped.write_bytes(b"\x00" * 1024 + (b"FILE0" + b"\x00" * 1019) * 15)
+        analyzemft_parse(str(wiped), str(case / "analysis" / "m.csv"))
+        assert len(ran) == 2
+
     def _mft_rules(self, tmp_path):
         rules = tmp_path / "mft_rules"
         rules.mkdir()

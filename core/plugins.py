@@ -12,7 +12,7 @@ Disable all addons via ``ATLAS_PLUGINS=0``.
 An addon may ship an ``addon.yaml`` next to its ``plugin.py`` (name, version,
 description, author, min_atlas_version) — entirely optional, read by
 ``read_manifest()``/``list_addons()`` for ``atlas addon list``. Nothing here
-enforces it; a manifest-less addon works exactly as before.
+enforces it; a manifest-less addon works.
 """
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ from typing import Protocol, runtime_checkable
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _PLUGINS_PKG = "plugins"
-ATLAS_VERSION = "1.0.1"
+ATLAS_VERSION = "1.0.2"
 
 # Matches agent/cli.py's cmd_addon_create — an addon name is a Python
 # package name (plugins/<name>/ becomes `import plugins.<name>`).
@@ -371,7 +371,7 @@ def install_from_zip(name: str, zip_bytes: bytes) -> dict:
         if dest != target and dest not in target.parents:
             raise PluginError(f"zip member escapes plugins/{name}/: {info.filename}")
 
-    # docs/addons.md's checklist step 1 — __init__.py at the addon root is
+    # docs/addons.md's checklist — __init__.py at the addon root is
     # what makes plugins.<name> importable at all. Without it the zip would
     # extract "successfully" into an addon discover_plugin_modules() can
     # never see: invisible in list_addons(), never registered, no error

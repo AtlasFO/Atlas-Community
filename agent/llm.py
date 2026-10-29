@@ -24,8 +24,10 @@ from typing import Any
 import httpx
 
 from core import llmhub, providers
+from core.messages_api import CONTEXT_FULL
 
-RETRYABLE_STATUS = {408, 409, 500, 502, 503, 504}
+# 529 is the overloaded status (Anthropic's overloaded_error): as transient as a 503.
+RETRYABLE_STATUS = {408, 409, 500, 502, 503, 504, 529}
 MAX_RETRIES = 4
 # 429s (rate limits) are budgeted by total wait time rather than attempts:
 # the hub's TPM window needs up to a minute to drain, so a handful of short
@@ -93,6 +95,16 @@ _MAX_ADAPT_ROUNDS = 4
 _THINKING_FIELD_RE = re.compile(r"(?i)\bthinking\b|budget_tokens")
 _REFUSAL_PHRASES = ("not supported", "unsupported", "no longer supported", "not permitted")
 _CAP_RELATION_PHRASES = ("must be", "greater", "less than")
+# A completion limit above the endpoint's maximum, with the maximum named:
+# "max_tokens: 65536 > 64000, which is the maximum allowed ..." (Anthropic),
+# "... supports at most 16384 completion tokens ..." (OpenAI). A text that
+# speaks of the context, the input, the prompt or the window states what fits
+# one request ("5000 + 65536 > 32768", "at most 8000 tokens of room left in
+# the context window"), never the model's maximum.
+_LIMIT_MAX_RE = re.compile(r"(?i)\b\d+\s*>\s*(\d+)\b(?!\s*[-+])|\bat most\s+(\d+)\b")
+_LIMIT_KEYS = ("max_tokens", "max_completion_tokens", "max_output_tokens")
+_LIMIT_MAX_WORDS = ("maximum", "allowed", "at most", "supports")
+_CONTEXT_WORDS = ("context", "input", "prompt", "window")
 
 # How an endpoint takes a thinking level. Every vendor's OpenAI-compatible
 # endpoint spells it one of these ways; the preset says which, a 400 can
@@ -102,10 +114,10 @@ THINKING_REASONING_EFFORT = "reasoning_effort"   # OpenAI, hubs, Gemini, xAI, Mi
 THINKING_REASONING_OBJECT = "reasoning_object"   # OpenRouter: reasoning: {effort}
 THINKING_TYPE = "thinking_type"                  # Z.ai, DeepSeek: thinking: {type}
 THINKING_ENABLE = "enable_thinking"              # DashScope: enable_thinking
-THINKING_BUDGET = "thinking_budget"              # Anthropic compat: thinking: {budget_tokens}
+THINKING_OUTPUT_CONFIG = "output_config"         # Anthropic Messages: output_config: {effort}
 THINKING_NONE = "none"                           # the model has no such control
 THINKING_CONTROLS = (THINKING_REASONING_EFFORT, THINKING_REASONING_OBJECT,
-                     THINKING_TYPE, THINKING_ENABLE, THINKING_BUDGET, THINKING_NONE)
+                     THINKING_TYPE, THINKING_ENABLE, THINKING_OUTPUT_CONFIG, THINKING_NONE)
 
 # Levels the starvation ladder steps through, most thinking first, so a
 # climb settles at the most thinking that still answers. "medium" is
@@ -118,11 +130,6 @@ LADDER_LEVELS = ("high", "low", "minimal")
 # one: its own default cut a reply short, or it refuses a request whose cap
 # sits below its thinking budget. A ceiling, not a target.
 EXPLICIT_CAP = 65536
-
-# Anthropic-style budgets for a level, when the control is a budget.
-_BUDGET_BY_LEVEL = {"minimal": 1024, "low": 2048, "medium": 8192,
-                    "high": 16384, "xhigh": 32768, "max": 32768}
-
 
 @dataclass
 class ApiCompatProfile:
@@ -159,7 +166,25 @@ class ApiCompatProfile:
     # How many tool schemas this model answered with a function call after
     # a larger list came back without one. None means never seen to fail.
     max_tools: int | None = None
+    # tool_choice values this endpoint refused for this model ("required"
+    # while "none" is taken): the builder sends "auto" in their place. A
+    # property of the value at the endpoint, not of the parameter.
+    tool_choice_rejected: tuple[str, ...] = ()
+    # The largest completion limit the endpoint takes for this model, named
+    # by a 400 that refused a larger one: no request asks for more.
+    output_cap: int | None = None
     source: str = "default"  # default | soft | learned | env
+    # Atlas level -> the value the endpoint takes for it, from the provider
+    # profile (empty: sent as written). A fact of the profile, never learned
+    # or stored.
+    level_map: dict = field(default_factory=dict)
+    # The provider profile's seed (provider_profiles.Profile.seed) this shape
+    # was learned under; a shape learned under another seed is not reused.
+    seed: str = ""
+    # Whether Atlas's own input pacing counts cache reads, as the provider's
+    # rate limit does (the profile's rate_limit_counts_cache_reads). A fact of
+    # the profile, never learned or stored.
+    pace_cache_reads: bool = True
 
     def to_dict(self) -> dict:
         data = {
@@ -184,6 +209,12 @@ class ApiCompatProfile:
             data["level_by_role"] = dict(self.level_by_role)
         if self.max_tools:
             data["max_tools"] = int(self.max_tools)
+        if self.tool_choice_rejected:
+            data["tool_choice_rejected"] = list(self.tool_choice_rejected)
+        if self.output_cap:
+            data["output_cap"] = int(self.output_cap)
+        if self.seed:
+            data["seed"] = self.seed
         return data
 
     @classmethod
@@ -214,6 +245,8 @@ class ApiCompatProfile:
         max_tools = data.get("max_tools")
         max_tools = (int(max_tools)
                      if isinstance(max_tools, int) and max_tools > 0 else None)
+        output_cap = data.get("output_cap")
+        output_cap = output_cap if isinstance(output_cap, int) and output_cap > 0 else None
         return cls(
             completion_limit=limit,
             send_temperature=bool(data.get("send_temperature", True)),
@@ -226,7 +259,10 @@ class ApiCompatProfile:
             reasoning_observed=bool(data.get("reasoning_observed", False)),
             level_by_role=by_role,
             max_tools=max_tools,
+            tool_choice_rejected=_strings("tool_choice_rejected"),
+            output_cap=output_cap,
             source=str(data.get("source") or "learned"),
+            seed=str(data.get("seed") or ""),
         )
 
 
@@ -315,13 +351,40 @@ def remember_api_compat(
     """Store a working profile for provider+model (process + optional disk)."""
     _load_compat_cache()
     key = _compat_key(provider, model)
+    bound = _bound_profile(provider)
     stored = replace(profile, drop_params=tuple(profile.drop_params),
                      level_by_role=dict(profile.level_by_role),
-                     source="learned")
+                     source="learned", level_map={},
+                     seed=bound.seed(model) if bound is not None else "")
     _compat_mem[key] = stored
     _compat_dirty.add(key)
     if persist:
         _save_compat_cache()
+
+
+def forget_api_compat(provider: str) -> int:
+    """Drop what was learned for ``provider``, every model, in this process
+    and on disk: a provider removed and added again under its name may be
+    another vendor ("Other"). Returns how many entries were dropped."""
+    _load_compat_cache()
+    prefix = f"{(provider or 'default').strip().lower()}|"
+    dropped = {k for k in list(_compat_mem) if k.startswith(prefix)}
+    for k in dropped:
+        _compat_mem.pop(k, None)
+        _compat_dirty.discard(k)
+    path = _compat_cache_path()
+    if path.is_file():
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        models = dict((raw or {}).get("models") or {})
+        gone = {k for k in models if isinstance(k, str) and k.startswith(prefix)}
+        if gone:
+            payload = {"schema_version": _COMPAT_SCHEMA,
+                       "models": {k: models[k] for k in sorted(models) if k not in gone}}
+            tmp = path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            os.replace(tmp, path)
+            dropped |= gone
+    return len(dropped)
 
 
 def clear_api_compat_cache(*, memory_only: bool = False) -> None:
@@ -395,22 +458,36 @@ def _soft_bootstrap_profile(
             ),
             source="soft",
         )
-    # Default provider llmhub with unknown id → classic (hub dialect).
-    prov = (provider or "").strip().lower()
-    if prov in ("", "llmhub", "default", "t-systems", "tsystems"):
-        return None
     return None
 
 
 def resolve_api_compat(
     provider: str,
     model: str,
+    preset: str = "",
 ) -> ApiCompatProfile:
     """Resolve how to talk to this provider+model.
 
     Priority: env override → learned cache (per provider|model) → soft
-    bootstrap → classic default (the LLM hub dialect).
+    bootstrap → the provider's profile (``preset`` names one for a provider
+    tested before it is saved) → classic default. Whatever is chosen
+    carries the profile's facts that are never learned: how its levels map
+    to the values sent, and the explicit cap a Messages request always has.
     """
+    bound = _bound_profile(provider, preset)
+    shape = _resolve_shape(provider, model, bound)
+    if bound is None:
+        return shape
+    level_map = bound.level_map(model)
+    explicit = bound.dialect == providers.MESSAGES_API
+    reads = bound.for_model(model).rate_limit_counts_cache_reads
+    if not level_map and not explicit and reads:
+        return shape
+    return replace(shape, level_map=level_map, needs_explicit_cap=shape.needs_explicit_cap or explicit,
+                   pace_cache_reads=reads)
+
+
+def _resolve_shape(provider: str, model: str, bound) -> ApiCompatProfile:
     forced = _env_forced_profile()
     if forced is not None:
         # Env may only force one dimension; merge with learned when partial.
@@ -441,31 +518,53 @@ def resolve_api_compat(
     _load_compat_cache()
     key = _compat_key(provider, model)
     if key in _compat_mem:
-        return _compat_mem[key]
+        learned = _compat_mem[key]
+        # A shape learned before profiles recorded their seed counts as
+        # learned under its provider's profile, unless that profile now
+        # speaks a dialect it could not have been learned on.
+        if (bound is None or learned.seed == bound.seed(model)
+                or (not learned.seed and bound.dialect != providers.MESSAGES_API)):
+            return learned
+        # Learned under another profile (an edited file, a new dialect): the
+        # shape starts again from the profile; what was observed stays.
+        base = _seeded(bound, model) or ApiCompatProfile(source="default")
+        kept = {role: lvl for role, lvl in learned.level_by_role.items()
+                if not bound.levels or lvl in bound.for_model(model).levels}
+        return replace(base, max_tools=learned.max_tools, reasoning_observed=learned.reasoning_observed,
+                       level_by_role=kept, output_cap=learned.output_cap, source="learned")
 
     soft = _soft_bootstrap_profile(model, provider=provider)
     if soft is not None:
         return soft
-    preset = _preset_profile(provider)
-    if preset is not None:
-        return preset
+    seeded = _seeded(bound, model) if bound is not None else None
+    if seeded is not None:
+        return seeded
     return ApiCompatProfile(source="default")
 
 
-def _preset_profile(provider: str) -> ApiCompatProfile | None:
-    """The request shape a provider's preset declares, when it declares one.
-
-    A provider registered from a vendor preset records the preset id in
-    ``ATLAS_PROVIDER_<NAME>_PRESET``; a provider named after a preset
-    ("openrouter", "deepseek") counts as that preset. Nothing learned yet
-    starts from here instead of from the classic default.
-    """
+def _bound_profile(provider: str, preset: str = ""):
+    """The provider profile a request is shaped by: the one ``preset`` names
+    (a provider tested before it is saved), else the one the provider binds
+    to (provider_profiles.bind: its ATLAS_PROVIDER_<NAME>_PRESET, else its own
+    name); None for a provider with neither, or one whose profile cannot be
+    used (resolve() refuses that provider with the reason)."""
+    from core import provider_profiles
     name = (provider or "").strip()
-    if not name:
+    try:
+        if preset:
+            return provider_profiles.get(preset)
+        if not name:
+            return None
+        return provider_profiles.implicit(name) or provider_profiles.bind(
+            name, (os.environ.get(providers.var(name, "BASE_URL")) or "").strip())[0]
+    except provider_profiles.ProfileError:
         return None
-    from core import llm_setup
-    preset_id = (os.environ.get(providers.var(name, "PRESET")) or "").strip() or name
-    fields = llm_setup.preset_profile(preset_id)
+
+
+def _seeded(bound, model: str) -> ApiCompatProfile | None:
+    """The request shape a profile declares for ``model``, when it declares
+    one: nothing learned yet starts from here instead of from the default."""
+    fields = bound.request_shape(model)
     if not fields:
         return None
     return ApiCompatProfile(source="preset", **fields)
@@ -560,13 +659,18 @@ def profile_from_payload(
     )
 
 
-def apply_thinking_level(payload: dict, control: str, level: str | None) -> None:
-    """Put ``level`` on ``payload`` the way ``control`` spells it. Empty and
-    "default" send nothing: the endpoint's own level, chosen on purpose."""
+def apply_thinking_level(payload: dict, control: str, level: str | None,
+                         level_map: dict | None = None) -> None:
+    """Put ``level`` on ``payload`` the way ``control`` spells it, as the
+    value ``level_map`` gives it. Empty and "default" send nothing: the
+    endpoint's own level, chosen on purpose. The Messages control rides the
+    chat request's ``reasoning_effort``; core.messages_api writes it as
+    ``output_config.effort``."""
     value = str(level or "").strip().lower()
     if not value or value == "default":
         return
-    if control == THINKING_REASONING_EFFORT:
+    value = str((level_map or {}).get(value, value))
+    if control in (THINKING_REASONING_EFFORT, THINKING_OUTPUT_CONFIG):
         payload["reasoning_effort"] = value
     elif control == THINKING_REASONING_OBJECT:
         payload["reasoning"] = {"effort": value}
@@ -578,12 +682,6 @@ def apply_thinking_level(payload: dict, control: str, level: str | None) -> None
             payload["reasoning_effort"] = value
     elif control == THINKING_ENABLE:
         payload["enable_thinking"] = value != "none"
-    elif control == THINKING_BUDGET:
-        if value == "none":
-            payload["thinking"] = {"type": "disabled"}
-        else:
-            payload["thinking"] = {"type": "enabled",
-                                   "budget_tokens": _BUDGET_BY_LEVEL.get(value, 8192)}
 
 
 def build_chat_payload(
@@ -598,12 +696,15 @@ def build_chat_payload(
     thinking_level: str | None = None,
     response_format: dict | None = None,
     tool_choice: str | None = None,
+    cache_marks: bool = True,
 ) -> dict:
     """Build a chat-completions body using the resolved API compat profile.
+    ``cache_marks`` False leaves the cache breakpoints to a dialect that
+    places its own (core.messages_api).
 
     No completion limit is sent unless ``max_tokens`` is given: a thinking
-    model pays its thinking out of that limit, and every fixed cap Atlas
-    used to send starved one on the hub. ``thinking_level`` is spelled the
+    model pays its thinking out of that limit, so a fixed cap starves it.
+    ``thinking_level`` is spelled the
     way the profile's control says; a profile that pins ``reasoning_effort``
     to "none" for function tools keeps that pin on tool turns, because the
     endpoint required it.
@@ -624,14 +725,18 @@ def build_chat_payload(
         payload["response_format"] = response_format
     if tools:
         payload["tools"] = tools
-        payload["tool_choice"] = tool_choice or "auto"
+        choice = tool_choice or "auto"
+        if choice in prof.tool_choice_rejected and tool_choice_value_memory_on():
+            choice = "auto"     # the endpoint refused this value for this model
+        payload["tool_choice"] = choice
     if tools and prof.reasoning_effort:
         payload["reasoning_effort"] = prof.reasoning_effort
     else:
-        apply_thinking_level(payload, prof.thinking_control, thinking_level)
+        apply_thinking_level(payload, prof.thinking_control, thinking_level, prof.level_map)
     for name in prof.drop_params:
         payload.pop(name, None)
-    mark_cache_breakpoints(payload, model, provider)
+    if cache_marks:
+        mark_cache_breakpoints(payload, model, provider)
     return payload
 
 
@@ -640,28 +745,37 @@ def mark_cache_breakpoints(payload: dict, model: str, provider: str = "") -> dic
     frame (playbook and tool schemas, the largest stable block) and the
     case brief get ``cache_control`` breakpoints. Providers with implicit
     prefix caching (OpenAI, OpenRouter's Z.AI/DeepSeek routes) need nothing
-    but a stable prefix, so the payload is left as it is."""
+    but a stable prefix, so the payload is left as it is.
+
+    The marks go on copies of the list and of the messages they change: the
+    list is the caller's history, which must reach a saved session and a
+    later provider without them."""
     m = (model or "").lower()
-    if not (m.startswith("anthropic/") or m.startswith("claude") or provider == "anthropic"):
+    if not (m.startswith("anthropic/") or m.startswith("claude")):
         return payload
+    messages = list(payload.get("messages") or [])
     marked = 0
-    for msg in payload.get("messages") or []:
+    for i, msg in enumerate(messages):
         if marked >= 2:
             break
         if msg.get("role") not in ("system", "user"):
             continue
         content = msg.get("content")
         if isinstance(content, str) and content.strip():
-            msg["content"] = [{"type": "text", "text": content,
-                               "cache_control": {"type": "ephemeral"}}]
+            messages[i] = {**msg, "content": [{"type": "text", "text": content,
+                                               "cache_control": {"type": "ephemeral"}}]}
             marked += 1
         elif isinstance(content, list) and content and isinstance(content[-1], dict):
-            content[-1].setdefault("cache_control", {"type": "ephemeral"})
+            last = dict(content[-1])
+            last.setdefault("cache_control", {"type": "ephemeral"})
+            messages[i] = {**msg, "content": [*content[:-1], last]}
             marked += 1
+    if marked:
+        payload["messages"] = messages
     return payload
 
 
-# Back-compat helpers used by older tests / callers
+# Whether the model takes max_completion_tokens instead of max_tokens.
 def uses_max_completion_tokens(model: str, provider: str = "") -> bool:
     return resolve_api_compat(provider, model).completion_limit == (
         "max_completion_tokens"
@@ -738,6 +852,17 @@ def adapt_payload_for_400(
         if key in out and key not in handled and key in text_l and any(
                 s in text_l for s in ("not supported", "unsupported",
                                       "invalid", "unknown", "unrecognized")):
+            value = out.get(key)
+            if (key == "tool_choice" and isinstance(value, str) and value != "auto"
+                    and tool_choice_value_memory_on()):
+                # The value was refused, not the parameter: remember the
+                # value and go on as a plain call ("none" may still be taken
+                # where "required" is not).
+                out[key] = "auto"
+                changed = True
+                if value not in base.tool_choice_rejected:
+                    base = replace(base, tool_choice_rejected=(*base.tool_choice_rejected, value))
+                continue
             out.pop(key, None)
             changed = True
             if key not in dropped:
@@ -770,6 +895,20 @@ def adapt_payload_for_400(
         if int(out.get(limit_key) or 0) < EXPLICIT_CAP:
             out[limit_key] = EXPLICIT_CAP
             base = replace(base, needs_explicit_cap=True)
+            changed = True
+
+    # A limit above the endpoint's maximum for this model, the maximum named
+    # beside the limit's own field: send that and remember it.
+    limit_key = next((k for k in _LIMIT_KEYS if k in out), None)
+    named = (_LIMIT_MAX_RE.search(text)
+             if limit_key and any(k in text_l for k in _LIMIT_KEYS)
+             and any(w in text_l for w in _LIMIT_MAX_WORDS)
+             and not any(w in text_l for w in _CONTEXT_WORDS) else None)
+    if named:
+        ceiling = int(named.group(1) or named.group(2))
+        if 0 < ceiling < int(out.get(limit_key) or 0):
+            out[limit_key] = ceiling
+            base = replace(base, output_cap=ceiling)
             changed = True
 
     # Explicit rename hints (OpenAI GPT-5 style).
@@ -879,7 +1018,7 @@ def adapt_payload_for_400(
     return out, learned
 
 
-# Alias kept for older call sites / tests
+# Returns only the adapted payload (None when nothing adapts).
 def _adapt_payload_for_400(payload: dict, body_text: str) -> dict | None:
     result = adapt_payload_for_400(payload, body_text)
     return None if result is None else result[0]
@@ -916,7 +1055,64 @@ class LLMTransportError(LLMError):
     attempt one request makes (connection errors, a reply cut off mid-body,
     retryable statuses). A later request may well succeed, so the agent loop
     asks the turn again after a pause; a 4xx, an auth or a WAF refusal is not
-    this error and repeats identically."""
+    this error and repeats identically.
+
+    ``kind`` names the last failure ("cut", "connect" for a provider that
+    could not be reached, "read" for a reply that failed before its stream
+    began, "status", "rate_limit"); ``runaway`` says a cut came after the stream ran longer
+    than the role's replies do (RUNAWAY_RECORD_FACTOR); ``long`` that an
+    attempt ran at or past RUNAWAY_RECORD_FLOOR_SECONDS; ``attempts`` the
+    request's failed attempts as recorded in ``transport_events``."""
+
+    def __init__(self, message: str = "", *, kind: str = "", runaway: bool = False,
+                 long: bool = False, attempts: list | None = None):
+        super().__init__(message)
+        self.kind = kind
+        self.runaway = runaway
+        self.long = long
+        self.attempts = list(attempts or [])
+
+
+class LLMStatusError(LLMError):
+    """An HTTP status of 400 or more the request could not be adapted to;
+    ``status`` carries it so a caller can tell a refused request shape from
+    any other error."""
+
+    def __init__(self, message: str = "", *, status: int = 0):
+        super().__init__(message)
+        self.status = status
+
+
+class StreamCut(httpx.RemoteProtocolError):
+    """A streamed reply that failed while its event stream was read: the
+    early end, a provider error event, a read timeout. Carries how long the
+    stream ran, how many characters and keepalive comments arrived, and the
+    provider's message when it sent one. An httpx error, so every caller
+    that catches those still catches it."""
+
+    def __init__(self, message: str, *, elapsed: float = 0.0, chars: int = 0,
+                 keepalives: int = 0, provider_error: str = ""):
+        super().__init__(message)
+        self.elapsed = elapsed
+        self.chars = chars
+        self.keepalives = keepalives
+        self.provider_error = provider_error
+
+
+def model_call_escape_on() -> bool:
+    """ATLAS_MODEL_CALL_ESCAPE (default on): provider error events are
+    failures, a failed stream read is a StreamCut, a long cut goes to the
+    caller after one attempt, a runaway cut steps the level down once, and
+    the analyst loop's escape answers a lost turn. Off: the plain transport."""
+    from core.envfile import env_flag
+    return env_flag("ATLAS_MODEL_CALL_ESCAPE")
+
+
+def tool_choice_value_memory_on() -> bool:
+    """ATLAS_TOOL_CHOICE_VALUE_MEMORY (default on): a 400 refusing a
+    tool_choice value remembers the value, not the parameter."""
+    from core.envfile import env_flag
+    return env_flag("ATLAS_TOOL_CHOICE_VALUE_MEMORY")
 
 
 class WAFBlockedError(LLMError):
@@ -936,6 +1132,34 @@ class ToolCall:
     id: str
     name: str
     arguments: dict
+
+
+# A picture sent as a data URL costs the model about this many tokens (a
+# 1.31-megapixel picture at 32 x 32 pixels per token, plus its frame): what
+# the pacing counts for it when the provider reports no usage, never the
+# length of its base64 text (a 1 MB picture would read as 250,000 tokens).
+IMAGE_PART_TOKENS = 1_600
+
+
+def _payload_tokens_estimate(payload: dict) -> int:
+    """The request's input tokens when the provider reported none: a quarter
+    of the text's length, a data-URL image part counted as IMAGE_PART_TOKENS."""
+    images = 0
+    stripped: list = []
+    for msg in payload.get("messages") or []:
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if isinstance(content, list):
+            kept = []
+            for part in content:
+                url = ((part.get("image_url") or {}).get("url") if isinstance(part, dict) else None) or ""
+                if isinstance(part, dict) and part.get("type") == "image_url" and str(url).startswith("data:"):
+                    images += 1
+                else:
+                    kept.append(part)
+            stripped.append({**msg, "content": kept})
+        else:
+            stripped.append(msg)
+    return len(json.dumps({**payload, "messages": stripped})) // 4 + images * IMAGE_PART_TOKENS
 
 
 @dataclass
@@ -959,6 +1183,9 @@ class ChatResponse:
     # usage.prompt_tokens_details.cached_tokens, Anthropic-style ones as
     # usage.cache_read_input_tokens.
     cached_tokens: int = 0
+    # Input tokens written to the provider's prompt cache by this request
+    # (inside input_tokens, as the reads are).
+    cache_write_tokens: int = 0
     reasoning: str = ""
     reasoning_tokens: int = 0
     # False when the body carried no usage block: a reply the client cut
@@ -970,6 +1197,12 @@ class ChatResponse:
     # Raw names of function calls the loop could not name a tool from
     # (empty, or no tool name at all) and dropped before the history.
     malformed_calls: list = field(default_factory=list)
+    # The calls that arrived with no arguments: name, the raw arguments as
+    # sent, and, from a stream, the type of each arguments delta (diagnostics).
+    empty_calls: list = field(default_factory=list)
+    # Replies of this call that one_answer_chat saw cut at the one-answer
+    # allowance (0, 1 or 2); a caller records it with its outcome.
+    length_cuts: int = 0
     # Why a streamed reply reads as cut: "stream_end" when the connection
     # ended before the reply finished, "thinking_bound" when the client
     # closed it for thinking that ran past the role's own record,
@@ -977,6 +1210,10 @@ class ChatResponse:
     # "degenerate" when its text repeated with a short period (that text
     # is dropped). Empty for a reply the provider finished itself.
     cut_reason: str = ""
+    # The provider declined the request (finish_reason "refusal": a safety
+    # classifier, a content filter): {"category", "explanation"}, either may
+    # be None. Any partial output is dropped, as the providers ask.
+    refusal: dict | None = None
 
     @property
     def thinking_observed(self) -> bool:
@@ -990,7 +1227,7 @@ class ChatResponse:
         """No answer and no tool call although the model spent its budget on
         thinking: cut off at the completion limit, or the reasoning count
         accounts for the whole completion."""
-        if self.content or self.tool_calls:
+        if self.content or self.tool_calls or self.finish_reason in ("refusal", CONTEXT_FULL):
             return False
         if self.finish_reason == "length":
             return True
@@ -1016,6 +1253,33 @@ class ChatResponse:
 # (ATLAS_EFFORT_AGENT), so the analyst can be tuned without moving the
 # roles that reason on its behalf.
 _AGENT_ROLE = "agent"
+
+# What the client's own cuts showed for a helper role in this run: this
+# process, keyed by the case it works on. Never persisted and never the
+# learned level_by_role: a cut the client made says nothing lasting about the
+# level a role needs, and a slow hour of a shared backend would write it for
+# good. The analyst is not a helper and is left out.
+_RUN_LEVEL: dict[tuple, str] = {}       # the lower level that answered after a cut
+_RUN_NO_RUNG: set[tuple] = set()        # the lower level was cut as well
+
+
+def reset_run_memory() -> None:
+    """Forget what the client's cuts showed in an earlier run of this
+    process (a dashboard that runs a case again): called at run start."""
+    _RUN_LEVEL.clear()
+    _RUN_NO_RUNG.clear()
+
+
+def _run_key(provider: str, model: str, role: str | None) -> tuple | None:
+    """The run-scoped key of a helper role, None for the analyst."""
+    if not role or role in (_AGENT_ROLE, "analyst"):
+        return None
+    try:
+        from core.paths import active_case_dir
+        case = active_case_dir() or ""
+    except Exception:  # noqa: BLE001
+        case = ""
+    return (case, provider or "", model or "", role)
 
 # The shapes a Chat Completions reply arrives in differ by serving stack, not
 # by vendor: one gateway can answer in a different shape for each model behind
@@ -1105,6 +1369,7 @@ def _parse_tool_calls(raw: Any) -> list[ToolCall]:
         fn = tc.get("function") if isinstance(tc.get("function"), dict) else tc
         args = fn.get("arguments")
         if isinstance(args, str):
+            raw_args = args
             try:
                 args = json.loads(args) if args.strip() else {}
             except json.JSONDecodeError:
@@ -1114,6 +1379,18 @@ def _parse_tool_calls(raw: Any) -> list[ToolCall]:
                 # made, and one that ran to hundreds of kilobytes made every
                 # later request carry it.
                 args = malformed_arguments(args)
+            if args is None or args == "" or args == []:
+                args = {}                          # JSON null or empty: a call with no arguments
+            elif isinstance(args, str):
+                # Encoded twice: the inner string, when it is an object, is
+                # the arguments; anything else is told, never an empty call.
+                try:
+                    inner = json.loads(args)
+                except json.JSONDecodeError:
+                    inner = None
+                args = inner if isinstance(inner, dict) else not_an_object(raw_args, "str")
+            elif not isinstance(args, dict):
+                args = not_an_object(raw_args, type(args).__name__)
         if not isinstance(args, dict):
             args = {}
         calls.append(ToolCall(
@@ -1168,7 +1445,7 @@ class _FoldedReply:
 
 
 def assemble_stream(lines, *, reasoning_limit: int = 0,
-                    deadline: float | None = None) -> dict:
+                    deadline: float | None = None, stats: dict | None = None) -> dict:
     """Fold a Chat Completions event stream into the body one reply carries.
 
     ``reasoning_limit`` is the most thinking, in characters, the reply may
@@ -1191,12 +1468,27 @@ def assemble_stream(lines, *, reasoning_limit: int = 0,
     off, by the gateway or the network, and what arrived is not the reply:
     it raises as a transport error so the request is made again, instead
     of an empty or half-written reply reaching the loop.
+
+    With ATLAS_MODEL_CALL_ESCAPE on, a chunk carrying an ``error`` object or
+    a choice finishing with "error" ends the stream as a failure: the
+    provider declared the reply failed, so whatever text arrived is dropped.
+    ``stats``, when given, counts the characters that arrived (content,
+    thinking, call arguments) and the keepalive comment lines, and holds
+    the provider's error message; the caller reads it when the stream
+    fails.
     """
+    escape = model_call_escape_on()
+    if stats is not None:
+        stats.setdefault("chars", 0)
+        stats.setdefault("keepalives", 0)
+        stats.setdefault("provider_error", "")
     message: dict = {"role": "assistant", "content": "", "reasoning_content": ""}
     calls: dict[int, dict] = {}
+    arg_kinds: dict[int, list[str]] = {}   # per call slot, the type of each arguments delta
     finish = ""
     usage: dict = {}
     meta: dict = {}
+    refusal: dict | None = None
     done = False
     runaway = False
     cut = ""
@@ -1207,6 +1499,8 @@ def assemble_stream(lines, *, reasoning_limit: int = 0,
         line = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
         line = line.strip()
         if not line.startswith("data:"):
+            if stats is not None and line.startswith(":"):
+                stats["keepalives"] += 1
             continue
         data = line[5:].strip()
         if data == "[DONE]":
@@ -1218,20 +1512,35 @@ def assemble_stream(lines, *, reasoning_limit: int = 0,
             continue
         if not isinstance(chunk, dict):
             continue
+        if escape and (chunk.get("error") or any(
+                isinstance(c, dict) and c.get("finish_reason") == "error"
+                for c in chunk.get("choices") or [])):
+            err = chunk.get("error")
+            text = (err.get("message") if isinstance(err, dict) else err) or "finish_reason error"
+            if stats is not None:
+                stats["provider_error"] = str(text)[:500]
+            raise httpx.RemoteProtocolError(
+                f"the provider ended the reply with an error: {str(text)[:300]}")
         for key in ("id", "model"):
             if chunk.get(key):
                 meta[key] = chunk[key]
         if isinstance(chunk.get("usage"), dict) and chunk["usage"]:
             usage = chunk["usage"]
+        if isinstance(chunk.get("atlas_refusal"), dict):
+            refusal = chunk["atlas_refusal"]
         for choice in chunk.get("choices") or []:
             if not isinstance(choice, dict):
                 continue
             delta = choice.get("delta") or {}
             if isinstance(delta.get("content"), str):
                 message["content"] += delta["content"]
+                if stats is not None:
+                    stats["chars"] += len(delta["content"])
             for key in ("reasoning_content", "reasoning"):
                 if isinstance(delta.get(key), str):
                     message["reasoning_content"] += delta[key]
+                    if stats is not None:
+                        stats["chars"] += len(delta[key])
             for tc in delta.get("tool_calls") or []:
                 if not isinstance(tc, dict):
                     continue
@@ -1244,11 +1553,24 @@ def assemble_stream(lines, *, reasoning_limit: int = 0,
                     "function": {"name": "", "arguments": ""}})
                 if tc.get("id"):
                     slot["id"] = str(tc["id"])
-                fn = tc.get("function") or {}
+                # The function's name and arguments, or the same keys on the
+                # call itself (what _parse_tool_calls also accepts), and the
+                # arguments under "parameters" where a stack names them so.
+                fn = tc.get("function") if isinstance(tc.get("function"), dict) else tc
                 if fn.get("name"):
                     slot["function"]["name"] = str(fn["name"])
-                if isinstance(fn.get("arguments"), str):
-                    slot["function"]["arguments"] += fn["arguments"]
+                args = fn.get("arguments", fn.get("parameters"))
+                arg_kinds.setdefault(index, []).append(type(args).__name__)
+                if isinstance(args, str):
+                    slot["function"]["arguments"] += args
+                    if stats is not None:
+                        stats["chars"] += len(args)
+                elif isinstance(args, dict) and not _json_object(slot["function"]["arguments"]):
+                    # An object delta is the whole arguments: it replaces what
+                    # is not yet a JSON object, and never follows one that is
+                    # (a stack that streams the text and then repeats it as an
+                    # object would otherwise make two objects of it).
+                    slot["function"]["arguments"] = json.dumps(args)
             if choice.get("finish_reason"):
                 finish = str(choice["finish_reason"])
         if (reasoning_limit and not calls and not message["content"]
@@ -1292,7 +1614,22 @@ def assemble_stream(lines, *, reasoning_limit: int = 0,
             "usage": usage}
     if cut:
         body["atlas_cut"] = cut
+    if refusal is not None:
+        body["atlas_refusal"] = refusal
+    # A call that arrived with no arguments: what its argument deltas were,
+    # so a run can tell a model that sent none from a stream that lost them.
+    empty = {str(pos): arg_kinds.get(i, []) for pos, i in enumerate(sorted(calls))
+             if not calls[i]["function"]["arguments"].strip()}
+    if empty:
+        body["atlas_empty_call_deltas"] = empty
     return body
+
+
+def _json_object(text: str) -> bool:
+    try:
+        return isinstance(json.loads(text), dict)
+    except (TypeError, ValueError):
+        return False
 
 
 # How much of a tool call's unparseable argument string is kept. The head
@@ -1347,6 +1684,14 @@ def longest_argument(raw: str) -> tuple[str, int]:
     return best
 
 
+def not_an_object(raw: str, kind: str) -> dict:
+    """Arguments that are valid JSON but no object (a string, a list with
+    items, a number): told as such, with the head kept like malformed ones."""
+    args = malformed_arguments(raw)
+    args["_not_object"] = kind
+    return args
+
+
 def malformed_arguments(raw: str) -> dict:
     """The arguments of a call whose arguments were not JSON. Only the head
     is kept: the arguments go back into the history as the call the model
@@ -1397,6 +1742,23 @@ REPEAT_MAX_PERIOD = 32
 # What a reply cut at its deadline keeps of its content: the head. The rest
 # is, by the cut, what did not converge, and the history must not carry it.
 CUT_CONTENT_KEEP = 4000
+# A cut that comes after the stream ran longer than this many times the
+# longest reply the role completed with this provider and model in this
+# process is a reply that ran away, not a provider failure: it is never sent
+# again unchanged. The factor leaves the record a margin for queueing and
+# the time to the first token, which a completed reply's wall time includes.
+RUNAWAY_RECORD_FACTOR = 2
+# ... and nothing counts as a runaway until that record is this long, and a
+# cut shorter than this is retried in place: provider cuts arrive within
+# seconds; a completed reply takes minutes; measure before moving it.
+RUNAWAY_RECORD_FLOOR_SECONDS = 60.0
+# (provider, model, role) -> the longest reply completed in this process, in
+# seconds; (provider, model) pairs that streamed thinking text on an answered
+# reply. Module-level: the director, reason, report and answer roles build a
+# new client per call.
+_REPLY_RECORD: dict[tuple[str, str, str], float] = {}
+_STREAMED_THINKING: set[tuple[str, str]] = set()
+
 # The cuts the client itself makes, as opposed to a connection that ended.
 CLIENT_CUTS = frozenset({"thinking_bound", "deadline", "degenerate"})
 
@@ -1449,18 +1811,38 @@ def parse_response(body: dict) -> ChatResponse:
         reasoning = message["thinking"].strip()
 
     usage = body.get("usage") or {}
+    finish = choice.get("finish_reason") or ""
+    refusal = None
+    if finish in ("refusal", "content_filter"):
+        # A declined request: what arrived before the decline is not the
+        # answer (the providers ask to discard it).
+        finish, content, raw_calls = "refusal", "", None
+        refusal = body.get("atlas_refusal") or {"category": None, "explanation": None}
+    else:
+        raw_calls = message.get("tool_calls")
+    calls = _parse_tool_calls(raw_calls)
+    deltas = body.get("atlas_empty_call_deltas") or {}
+    empty_calls = []
+    for pos, (tc, call) in enumerate(zip([t for t in raw_calls or [] if isinstance(t, dict)], calls)):
+        if call.arguments == {}:
+            fn = tc.get("function") if isinstance(tc.get("function"), dict) else tc
+            empty_calls.append({"name": call.name, "raw": repr(fn.get("arguments"))[:200],
+                                "deltas": deltas.get(str(pos), [])})
     return ChatResponse(
         content=content,
-        tool_calls=_parse_tool_calls(message.get("tool_calls")),
-        finish_reason=choice.get("finish_reason") or "",
+        tool_calls=calls,
+        empty_calls=empty_calls,
+        finish_reason=finish,
         input_tokens=int(usage.get("prompt_tokens") or 0),
         output_tokens=int(usage.get("completion_tokens") or 0),
         cached_tokens=cached_input_tokens(usage),
+        cache_write_tokens=cache_write_tokens(usage),
         reasoning=reasoning,
         reasoning_tokens=reasoning_tokens_from_usage(usage),
         usage_reported=bool(usage),
         raw_message=message,
         cut_reason=str(body.get("atlas_cut") or ""),
+        refusal=refusal,
     )
 
 
@@ -1493,6 +1875,22 @@ def cached_input_tokens(usage: dict) -> int:
     details = usage.get("prompt_tokens_details") or {}
     for v in (details.get("cached_tokens") if isinstance(details, dict) else None,
               usage.get("cache_read_input_tokens"), usage.get("cached_tokens")):
+        try:
+            if v:
+                return int(v)
+        except (TypeError, ValueError):
+            continue
+    return 0
+
+
+def cache_write_tokens(usage: dict) -> int:
+    """Prompt-cache writes in a usage block: Anthropic's count, or the one
+    OpenRouter adds under prompt_tokens_details."""
+    if not isinstance(usage, dict):
+        return 0
+    details = usage.get("prompt_tokens_details") or {}
+    for v in (usage.get("cache_creation_input_tokens"),
+              details.get("cache_write_tokens") if isinstance(details, dict) else None):
         try:
             if v:
                 return int(v)
@@ -1539,7 +1937,8 @@ class LLMHubClient:
     def __init__(self, base_url: str = "", api_key: str = "", model: str = "",
                  timeout: float = 600.0, provider: str = "",
                  auth_header: str = "", auth_prefix: str | None = None,
-                 usage_provider: str = "", turn_time_budget: float | None = None):
+                 usage_provider: str = "", turn_time_budget: float | None = None,
+                 profile: str = ""):
         # Overrides are stored; unset values resolve from the environment at
         # request time, because the GNOME Keyring loader (core.secrets) may
         # only populate os.environ after this client is constructed.
@@ -1557,6 +1956,10 @@ class LLMHubClient:
         # DAIR_* variables) can name the auth header it needs.
         self._auth_header = auth_header
         self._auth_prefix = auth_prefix
+        # The provider profile of an endpoint with no registered provider
+        # (Test connection before a save): its request shape, auth header and
+        # headers. A registered provider brings its own.
+        self._profile_id = profile
         self.timeout = timeout
         # A chat completion is streamed by default: the read timeout then
         # guards silence between chunks rather than the length of a reply,
@@ -1573,12 +1976,21 @@ class LLMHubClient:
         # What the starvation ladder did on the last chat() call, for the
         # caller's trace: one entry per rung climbed.
         self.ladder_events: list[dict] = []
+        # The failed attempts of the last chat() call's requests (each with
+        # its seconds, kind, status, characters and keepalives), for the
+        # caller's trace; reset per call like ladder_events.
+        self.transport_events: list[dict] = []
+        self._last_reply_seconds = 0.0
         # A caller whose call runs under its own deadline (a reasoning tool
         # under its watchdog) passes that deadline, so the reply cut and the
         # lower rungs of the ladder fit inside it.
         self.turn_time_budget = float(
             turn_time_budget if turn_time_budget
             else os.environ.get("ATLAS_AGENT_TURN_TIME_BUDGET") or TURN_TIME_BUDGET_DEFAULT)
+        # An absolute end (time.monotonic) for every request this client
+        # still sends, ladder re-asks included: a short check that must end
+        # as a whole, not per request. None: the turn budget alone bounds.
+        self.stop_at: float | None = None
         self.total_input_tokens = 0
         self.total_output_tokens = 0
         self.total_cached_tokens = 0
@@ -1586,6 +1998,8 @@ class LLMHubClient:
             os.environ.get("ATLAS_AGENT_INPUT_TPM") or _INPUT_TPM_DEFAULT)
         # (timestamp, input_tokens) of requests in the trailing minute
         self._spend: deque[tuple[float, int]] = deque()
+        # Tokens the latest reply read from the provider's prompt cache.
+        self._last_cache_reads = 0
 
     @property
     def provider(self) -> providers.Provider:
@@ -1611,14 +2025,29 @@ class LLMHubClient:
             raise
 
     @property
+    def key_missing(self) -> bool:
+        """No key where the provider's profile needs one
+        (core.providers.Provider.key_missing). A key passed in, or an
+        explicit endpoint with no registered provider (a local server),
+        misses nothing."""
+        if (self._api_key or "").strip():
+            return False
+        try:
+            return self.provider.key_missing
+        except providers.UnknownProvider:
+            if self._base_url:
+                return False
+            raise
+
+    @property
     def model(self) -> str:
         if self._model:
             return self._model
         provider = self.provider
         if provider.model:
             return provider.model
-        # Only reachable for a named provider: the default one always yields
-        # llmhub.DEFAULT_MODEL. Refusing here beats inheriting the hub's model
+        # Only reachable for a named provider: an implicit one falls back to
+        # its profile's default model. Refusing here beats inheriting the hub's model
         # id and sending it to a catalogue that never had it.
         raise LLMError(
             f"no model configured for provider {provider.name!r}: set "
@@ -1647,6 +2076,11 @@ class LLMHubClient:
         if self.input_tpm_budget > 0 and input_tokens:
             self._spend.append((time.monotonic(), input_tokens))
 
+    def _paced(self, tokens: int, cache_reads: int, profile: ApiCompatProfile) -> int:
+        """The input tokens the provider's rate limit counts: all of them,
+        or (pace_cache_reads off) all but the ones read from its cache."""
+        return tokens if profile.pace_cache_reads else max(0, int(tokens) - int(cache_reads or 0))
+
     def _provider_name_safe(self) -> str:
         try:
             return self.provider.name
@@ -1656,7 +2090,7 @@ class LLMHubClient:
     @property
     def profile(self) -> ApiCompatProfile:
         """How to shape a request for this provider+model right now."""
-        return resolve_api_compat(self._provider_name_safe(), self.model)
+        return resolve_api_compat(self._provider_name_safe(), self.model, self._profile_id)
 
     @property
     def echo_fields(self) -> tuple[str, ...]:
@@ -1689,28 +2123,52 @@ class LLMHubClient:
         remember_api_compat(provider_name, model,
                             replace(profile, max_tools=count))
 
+    def _dialect(self) -> str:
+        """The wire format: the registered provider's; for an endpoint with
+        none, the profile this client was given (a provider tested before it
+        is saved); else Chat Completions."""
+        try:
+            return self.provider.api or providers.CHAT_API
+        except Exception:  # noqa: BLE001 - nothing registered under this name
+            pass
+        if self._profile_id:
+            from core import provider_profiles
+            try:
+                return providers.parse_llm_api(provider_profiles.get(self._profile_id).dialect)
+            except provider_profiles.ProfileError:
+                pass
+        return providers.CHAT_API
+
     def _headers(self) -> dict:
         headers = {"Content-Type": "application/json"}
+        # The registered provider's auth and its profile's headers; for an
+        # endpoint with none, the profile this client was given. A client
+        # built from explicit base_url/api_key with neither (tests, ad-hoc
+        # scripts) falls back to the generic default instead of refusing to
+        # send a request that already has a real key.
+        try:
+            provider = self.provider
+            header = getattr(provider, "auth_header", "") or providers.DEFAULT_AUTH_HEADER
+            prefix = getattr(provider, "auth_prefix", None)
+            extra = tuple(getattr(provider, "headers_extra", ()) or ())
+        except Exception:  # noqa: BLE001 - nothing registered under this name
+            header, prefix, extra = providers.DEFAULT_AUTH_HEADER, None, ()
+            if self._profile_id:
+                from core import provider_profiles
+                try:
+                    profile = provider_profiles.get(self._profile_id)
+                    header = profile.auth_header or header
+                    prefix, extra = profile.auth_prefix, tuple(profile.headers.items())
+                except provider_profiles.ProfileError:
+                    pass
         key = self.api_key
         if key:
-            # Bearer for the hub and every OpenAI-compatible endpoint; a
-            # gateway wanting another scheme configures it per provider. A
-            # client built from explicit base_url/api_key with no provider
-            # name (tests, ad-hoc scripts) has nothing registered to
-            # resolve — fall back to the generic default instead of
-            # refusing to send a request that already has a real key.
-            header, prefix = self._auth_header, self._auth_prefix
-            if not header:
-                try:
-                    provider = self.provider
-                    header = getattr(provider, "auth_header", "") or providers.DEFAULT_AUTH_HEADER
-                    prefix = getattr(provider, "auth_prefix", None)
-                except Exception:  # noqa: BLE001
-                    header = providers.DEFAULT_AUTH_HEADER
-                    prefix = None
+            if self._auth_header:
+                header, prefix = self._auth_header, self._auth_prefix
             if prefix is None:
                 prefix = providers.resolve_auth_prefix(header, None)
             headers[header] = f"{prefix}{key}"
+        headers.update(extra)
         return headers
 
     def thinking_level_for(self, role: str, profile: ApiCompatProfile) -> str | None:
@@ -1725,6 +2183,9 @@ class LLMHubClient:
         pinned = providers.thinking_level(name) if name else ""
         if pinned:
             return pinned
+        ran = _RUN_LEVEL.get(_run_key(name, self.model, role))
+        if ran:
+            return ran
         return profile.level_by_role.get(role or "") or None
 
     @staticmethod
@@ -1740,22 +2201,30 @@ class LLMHubClient:
         return EXPLICIT_CAP if profile.needs_explicit_cap else None
 
     def chat(self, messages: list[dict], tools: list[dict] | None = None,
-             *, role: str = _AGENT_ROLE, max_tokens: int | None = None,
+             *, role: str | None = None, max_tokens: int | None = None,
              temperature: float | None = 0.2,
              response_format: dict | None = None,
              compact: Any = None, level: str | None = None,
-             tool_choice: str | None = None) -> ChatResponse:
+             tool_choice: str | None = None, learn: bool = True) -> ChatResponse:
         """One model call for any role, over the one transport.
 
         ``role`` names the caller (analyst, dair, reason_synthesize, report,
-        …) and decides which thinking level applies. ``max_tokens`` is left
+        …) and decides which thinking level applies; a call without one
+        runs at the analyst's level and teaches the ladder nothing, so no
+        helper can write the analyst's learned level. ``max_tokens`` is left
         off the request unless given: a thinking model pays its thinking out
         of that limit and every fixed cap starved one. ``compact`` is an
         optional callable ``messages -> messages`` the ladder may use as its
         last rung when the input itself makes the thinking too long.
         ``level`` forces a thinking level for this call (the capability probe
         uses it); otherwise the role's, the provider's or the learned level
-        applies.
+        applies. ``learn=False`` (the analyst's escape) teaches the compat
+        cache nothing from this call: no learned level, no explicit cap.
+
+        With ATLAS_MODEL_CALL_ESCAPE on, a runaway cut (LLMTransportError
+        with ``runaway``) is re-asked once one level lower, sharing the one
+        cut-driven re-ask a call has; a second cut in the same call returns
+        the cut reply (a client cut) or raises (a provider cut).
 
         When the model spends its whole budget thinking and answers nothing,
         the reply is retried up the starvation ladder — an explicit cap where
@@ -1768,46 +2237,84 @@ class LLMHubClient:
         """
         provider_name = self._provider_name_safe()
         model = self.model
-        if not self.api_key and not self._base_url:
-            # A registered provider without a key is a configuration error.
-            # An explicit endpoint without one is a local server, which
-            # takes requests with no auth header at all.
+        if not self._base_url and self.key_missing:
+            # A registered provider without the key its profile needs is a
+            # configuration error. A keyless profile (a local server) and an
+            # explicit endpoint take requests with no auth header at all.
             raise LLMError(
                 f"no API key for provider {provider_name or 'unconfigured'!r}; "
                 f"refusing to send an unauthenticated chat request"
             )
-        api = providers.CHAT_API
-        try:
-            api = self.provider.api or providers.CHAT_API
-        except Exception:  # noqa: BLE001
-            api = providers.CHAT_API
-        url = (llmhub.build_responses_url(self.base_url)
-               if api == providers.RESPONSES_API
-               else llmhub.build_chat_url(self.base_url))
+        api = self._dialect()
+        url = {providers.RESPONSES_API: llmhub.build_responses_url,
+               providers.MESSAGES_API: llmhub.build_messages_url}.get(
+                   api, llmhub.build_chat_url)(self.base_url)
 
-        profile = resolve_api_compat(provider_name, model)
+        profile = resolve_api_compat(provider_name, model, self._profile_id)
+        if api == providers.MESSAGES_API and not profile.needs_explicit_cap:
+            # Messages always carries max_tokens (an _API=messages override on
+            # a chat profile too): the cap the ladder knows is the cap sent.
+            profile = replace(profile, needs_explicit_cap=True)
+        learn_role = role or ""
+        role = _AGENT_ROLE if role is None else role   # "" is a role: the probe's
         configured = level or self.thinking_level_for(role, profile)
         level = configured
         cap = self._cap_for(max_tokens, profile)
         self.ladder_events = []
+        self.transport_events = []
         self._reasoning_role = role
         capped_by_ladder = False
         compacted = False
+        escape = model_call_escape_on()
         # False once a level rung was driven by a cut the client or the
-        # connection made rather than by the endpoint's own starvation.
-        teaches = True
+        # connection made rather than by the endpoint's own starvation, and
+        # from the start for a call that must teach nothing.
+        teaches = bool(learn)
         # Cuts the client made in this call: the first is re-asked once at
         # a lower level, the second returns the reply as it is. Each rung
         # has its own time budget, so this is what bounds the call.
         client_cuts = 0
+        first_cut: LLMTransportError | None = None
         parsed: ChatResponse | None = None
+        # A helper role's rung after a cut, for the rest of this run only:
+        # the lower level that answered opens the role's next calls, and a
+        # role whose lower level was cut too is not re-asked again.
+        run_key = _run_key(provider_name, model, role)
+        cut_rung = False
         for _ in range(2 + len(LADDER_LEVELS) + 1):
+            if cap and profile.output_cap and cap > profile.output_cap:
+                cap = profile.output_cap          # the endpoint's maximum, named by a 400
             payload = self._build_payload(
                 api, model, messages, tools, cap, temperature,
                 response_format, profile, level, provider_name,
                 tool_choice=tool_choice)
-            parsed, profile = self._send(url, payload, api, provider_name,
-                                         model, profile)
+            try:
+                parsed, profile = self._send(url, payload, api, provider_name,
+                                             model, profile)
+            except LLMTransportError as e:
+                if first_cut is not None:
+                    # The re-ask below failed too: the caller still learns
+                    # that this call's first attempt was a long cut.
+                    e.long = bool(e.long or first_cut.long)
+                if not (escape and e.runaway):
+                    raise
+                # A reply that ran away is never sent again unchanged: one
+                # re-ask one level lower, the call's one cut-driven re-ask.
+                if run_key in _RUN_NO_RUNG:
+                    raise
+                lower = self._lower_level(level, profile, cut=True) if client_cuts == 0 else None
+                if lower is None:
+                    if client_cuts and run_key:
+                        _RUN_NO_RUNG.add(run_key)
+                    raise
+                first_cut = e
+                client_cuts = 1
+                teaches = False
+                cut_rung = True
+                level = lower
+                self.ladder_events.append({"rung": "lower_level", "cut": "provider", "role": role,
+                                           "level": level, "cap": cap})
+                continue
             self.total_input_tokens += parsed.input_tokens
             self.total_output_tokens += parsed.output_tokens
             self.total_cached_tokens += parsed.cached_tokens or 0
@@ -1819,23 +2326,35 @@ class LLMHubClient:
                 model=model, input_tokens=parsed.input_tokens,
                 output_tokens=parsed.output_tokens,
                 cached_tokens=parsed.cached_tokens or 0,
+                cache_write_tokens=parsed.cache_write_tokens or 0,
                 reasoning_tokens=parsed.reasoning_tokens or 0,
                 usage_reported=parsed.usage_reported,
-                status=("cut" if parsed.cut_reason
+                status=("refused" if parsed.refusal is not None
+                        else "cut" if parsed.cut_reason
                         else "starved" if parsed.starved else "ok"))
-            self._record_spend(parsed.input_tokens
-                               or len(json.dumps(payload)) // 4)
+            self._record_spend(self._paced(parsed.input_tokens or _payload_tokens_estimate(payload),
+                                           parsed.cached_tokens, profile))
+            self._last_cache_reads = int(parsed.cached_tokens or 0)
             if not parsed.starved:
                 if not parsed.cut_reason:
                     self._note_reasoning(role, parsed)
-                self._learn_from_reply(
-                    provider_name, model, profile, parsed, role=role,
-                    level=(level if teaches and not compacted
-                           and level != configured else None))
+                    key = (provider_name, model, role)
+                    _REPLY_RECORD[key] = max(_REPLY_RECORD.get(key, 0.0), self._last_reply_seconds)
+                    if parsed.reasoning:
+                        _STREAMED_THINKING.add((provider_name, model))
+                if learn:
+                    self._learn_from_reply(
+                        provider_name, model, profile, parsed, role=learn_role,
+                        level=(level if teaches and not compacted
+                               and level != configured else None))
+                if cut_rung and run_key and not parsed.cut_reason:
+                    _RUN_LEVEL[run_key] = level
                 return parsed
             if parsed.cut_reason in CLIENT_CUTS:
                 client_cuts += 1
-                if client_cuts >= 2:
+                if client_cuts >= 2 or run_key in _RUN_NO_RUNG:
+                    if client_cuts >= 2 and run_key:
+                        _RUN_NO_RUNG.add(run_key)
                     self._ladder_event("cut_returned", parsed, role, level, cap)
                     return parsed
             # ── starvation ladder ──────────────────────────────────────
@@ -1848,27 +2367,20 @@ class LLMHubClient:
                 cap = EXPLICIT_CAP
                 capped_by_ladder = True
                 profile = replace(profile, needs_explicit_cap=True)
-                remember_api_compat(provider_name, model, profile)
+                if learn:
+                    remember_api_compat(provider_name, model, profile)
                 self._ladder_event("explicit_cap", parsed, role, level, cap)
                 continue
-            # Only the rungs below the level this reply was asked at: a
-            # climb never asks for more thinking than what just starved.
-            below = (LADDER_LEVELS[LADDER_LEVELS.index(level) + 1:]
-                     if level in LADDER_LEVELS else LADDER_LEVELS)
-            if parsed.cut_reason:
-                # From an unset level the first rung below is "high", which
-                # is more thinking than most endpoints' default: a cut
-                # reply is re-asked with less thinking, never more.
-                below = tuple(v for v in below if v != "high")
-            # A model that takes no thinking control would get the same
-            # request again: a level rung changes nothing there.
-            next_level = None if profile.thinking_control == THINKING_NONE else next(
-                (v for v in below
-                 if not profile.effort_values or v in profile.effort_values),
-                None)
+            if max_tokens is not None and parsed.finish_reason == "length" and not parsed.cut_reason:
+                # Starved at the caller's own allowance (a one-answer limit
+                # met by a runaway): that says nothing about the level the
+                # role needs, so no level is remembered from this call.
+                teaches = False
+            next_level = self._lower_level(level, profile, cut=bool(parsed.cut_reason))
             if next_level:
                 if parsed.cut_reason:
                     teaches = False
+                    cut_rung = True
                 level = next_level
                 self._ladder_event("lower_level", parsed, role, level, cap)
                 continue
@@ -1880,6 +2392,35 @@ class LLMHubClient:
             break
         assert parsed is not None
         return parsed
+
+    @staticmethod
+    def _lower_level(level: str | None, profile: ApiCompatProfile, *, cut: bool) -> str | None:
+        """The next thinking level below ``level`` the endpoint takes: only
+        the rungs below it (a climb never asks for more thinking than what
+        just starved); after a cut never "high", which from an unset level is
+        more thinking than most endpoints' default; nothing below "minimal"
+        or "none", nothing for a model without a thinking control, and only
+        values the endpoint listed when it listed any."""
+        if profile.thinking_control == THINKING_NONE or level in ("minimal", "none"):
+            return None
+        below = (LADDER_LEVELS[LADDER_LEVELS.index(level) + 1:]
+                 if level in LADDER_LEVELS else LADDER_LEVELS)
+        if cut:
+            below = tuple(v for v in below if v != "high")
+        # Checked on the value the endpoint receives: a level its profile
+        # maps to the value already sent is no step.
+        sent = profile.level_map.get(level or "", level)
+        return next((v for v in below
+                     if profile.level_map.get(v, v) != sent
+                     and (not profile.effort_values or profile.level_map.get(v, v) in profile.effort_values)),
+                    None)
+
+    def next_lower_level(self, role: str, level: str | None = None) -> str | None:
+        """The next level below ``level`` (default: the role's current level)
+        the endpoint takes, by the ladder's own rule for a cut reply."""
+        profile = resolve_api_compat(self._provider_name_safe(), self.model, self._profile_id)
+        current = level if level is not None else self.thinking_level_for(role, profile)
+        return self._lower_level(current, profile, cut=True)
 
     def _build_payload(self, api: str, model: str, messages: list[dict],
                        tools: list[dict] | None, cap: int | None,
@@ -1897,7 +2438,8 @@ class LLMHubClient:
             model=model, messages=messages, max_tokens=cap,
             temperature=temperature, tools=tools, provider=provider_name,
             profile=profile, thinking_level=level,
-            response_format=response_format, tool_choice=tool_choice)
+            response_format=response_format, tool_choice=tool_choice,
+            cache_marks=api != providers.MESSAGES_API)
         if self.stream and "stream" not in profile.drop_params:
             payload["stream"] = True
             if "stream_options" not in profile.drop_params:
@@ -1916,13 +2458,20 @@ class LLMHubClient:
         return REASONING_RUNAWAY_FACTOR * seen
 
     def _request(self, url: str, payload: dict, timeout: float,
-                 deadline: float | None = None):
+                 deadline: float | None = None, api: str = ""):
         """One request on the wire. A streamed chat completion is folded
         back into the body a single reply carries, so everything after
         this reads one shape; a gateway that answers a stream request with
-        a plain body, or with an error, is read as such."""
+        a plain body, or with an error, is read as such. A Messages request
+        is translated here, after every decision about it was made on the
+        chat shape, and its events are read as chat chunks."""
+        messages_api = None
+        if api == providers.MESSAGES_API:
+            from core import messages_api
+            payload = messages_api.to_wire(payload, EXPLICIT_CAP)
         headers = self._headers()
         dump = _wire_dump(payload)
+        sent = time.monotonic()
         if not payload.get("stream"):
             resp = httpx.post(url, json=payload, headers=headers, timeout=timeout)
             if dump:
@@ -1945,10 +2494,50 @@ class LLMHubClient:
             lines = resp.iter_lines()
             if dump:
                 lines = _tee_lines(lines, dump.with_suffix(".stream.txt"))
-            return _FoldedReply(status, resp.headers,
-                                assemble_stream(lines,
-                                                reasoning_limit=self._reasoning_limit(),
-                                                deadline=deadline))
+            if messages_api is not None:
+                lines = messages_api.chunks(lines)
+            if not model_call_escape_on():
+                return _FoldedReply(status, resp.headers,
+                                    assemble_stream(lines,
+                                                    reasoning_limit=self._reasoning_limit(),
+                                                    deadline=deadline))
+            # A failure while the event stream is read is a StreamCut that
+            # carries how long the stream ran and what arrived; errors
+            # before the response headers stay as they are.
+            stats: dict = {}
+            try:
+                body = assemble_stream(lines, reasoning_limit=self._reasoning_limit(),
+                                       deadline=deadline, stats=stats)
+            except httpx.HTTPError as e:
+                raise StreamCut(str(e) or type(e).__name__, elapsed=time.monotonic() - sent,
+                                chars=int(stats.get("chars") or 0),
+                                keepalives=int(stats.get("keepalives") or 0),
+                                provider_error=str(stats.get("provider_error") or "")) from e
+            return _FoldedReply(status, resp.headers, body)
+
+    def _runaway(self, provider_name: str, model: str, seconds: float, chars: int) -> bool:
+        """A cut that ran past RUNAWAY_RECORD_FACTOR times the longest reply
+        this role completed with this provider and model, once that record
+        reaches the floor. A cut with no characters is never a runaway when
+        this provider and model have streamed thinking text: nothing was
+        generated."""
+        record = _REPLY_RECORD.get((provider_name, model, self._reasoning_role), 0.0)
+        if record < RUNAWAY_RECORD_FLOOR_SECONDS or seconds <= RUNAWAY_RECORD_FACTOR * record:
+            return False
+        return not (chars == 0 and (provider_name, model) in _STREAMED_THINKING)
+
+    def _record_lost(self, url: str, provider_name: str, model: str) -> None:
+        """One usage-ledger row for a cut attempt: status lost, no tokens,
+        the role of the call in flight."""
+        try:
+            from core import usage_ledger
+            usage_ledger.record(
+                role=self._reasoning_role,
+                provider=(provider_name or self._usage_provider
+                          or url.split("//", 1)[-1].split("/", 1)[0]),
+                model=model, input_tokens=0, output_tokens=0, usage_reported=False, status="lost")
+        except Exception:  # noqa: BLE001 - the ledger never costs a request
+            pass
 
     def _ladder_event(self, rung: str, parsed: ChatResponse, role: str,
                       level: str | None, cap: int | None) -> None:
@@ -1983,7 +2572,10 @@ class LLMHubClient:
         400-adaptation. Returns the parsed reply and the profile after any
         adaptation this request taught."""
         # ~4 chars/token is close enough to pace the request before sending.
-        estimated_tokens = len(json.dumps(payload)) // 4
+        # Where the rate limit leaves cache reads out, the prefix the last
+        # reply read from the cache stands in for this request's reads.
+        estimated_tokens = self._paced(len(json.dumps(payload)) // 4,
+                                       self._last_cache_reads, profile)
         # Carries a 400-round's learned drop_params to the success-path
         # remember_api_compat() below — that call rebuilds a profile from
         # `payload`'s own shape via profile_from_payload(), which can't
@@ -1997,6 +2589,8 @@ class LLMHubClient:
         # the run.
         deadline = (time.monotonic() + self.turn_time_budget
                     if self.turn_time_budget > 0 else None)
+        if self.stop_at is not None:
+            deadline = self.stop_at if deadline is None else min(deadline, self.stop_at)
 
         def _remaining() -> float | None:
             return None if deadline is None else deadline - time.monotonic()
@@ -2006,8 +2600,14 @@ class LLMHubClient:
             time.sleep(seconds if rem is None else max(0.0, min(seconds, rem)))
 
         last_error: Exception | None = None
+        escape = model_call_escape_on()
+        started = time.monotonic()
+        last_kind = ""
         attempt = 0
         rate_wait = 0.0
+        # 429s do not consume `attempt`, so their backoff needs its own
+        # counter; keyed on `attempt` it stays at the first step forever.
+        rate_hits = 0
         adapt_rounds = 0
         while attempt < MAX_RETRIES:
             rem = _remaining()
@@ -2024,26 +2624,59 @@ class LLMHubClient:
                 reply_deadline = time.monotonic() + self.turn_time_budget * REPLY_SHARE
                 if deadline is not None:
                     reply_deadline = min(reply_deadline, deadline)
+            sent_at = time.monotonic()
             try:
                 resp = self._request(url, payload,
                                      (self.timeout if rem is None
                                       else max(1.0, min(self.timeout, rem))),
-                                     deadline=reply_deadline)
+                                     deadline=reply_deadline, api=api)
             except httpx.HTTPError as e:
                 last_error = e
                 attempt += 1
-                _sleep(min(2 ** attempt * 2, 30))
+                if not escape:
+                    _sleep(min(2 ** attempt * 2, 30))
+                    continue
+                cut = isinstance(e, StreamCut)
+                seconds = getattr(e, "elapsed", None) or (time.monotonic() - sent_at)
+                # "connect": the provider could not be reached (a refused
+                # connection, a failed name lookup, a connect timeout);
+                # "read": it was reached and the reply failed before a
+                # stream began (a header read timeout, a protocol error).
+                last_kind = ("cut" if cut
+                             else "connect" if isinstance(e, (httpx.ConnectError, httpx.ConnectTimeout))
+                             else "read")
+                self.transport_events.append({
+                    "seconds": round(seconds, 1), "elapsed_in_request": round(time.monotonic() - started, 1),
+                    "kind": last_kind, "status": None, "chars": getattr(e, "chars", 0),
+                    "keepalives": getattr(e, "keepalives", 0),
+                    "error": (getattr(e, "provider_error", "") or str(e))[:300]})
+                if cut:
+                    self._record_lost(url, provider_name, model)
+                    if seconds >= RUNAWAY_RECORD_FLOOR_SECONDS:
+                        # A minute or more of a dead or dying stream is not a
+                        # blip: the caller decides (the analyst's escape, the
+                        # other roles' fallbacks), after this one attempt.
+                        raise LLMTransportError(
+                            f"provider {provider_name!r} stream cut after {seconds:.0f}s: {e}",
+                            kind="cut", long=True, attempts=self.transport_events,
+                            runaway=self._runaway(provider_name, model, seconds, getattr(e, "chars", 0)))
+                if attempt < MAX_RETRIES:   # no sleep after the last attempt
+                    _sleep(min(2 ** attempt * 2, 30))
                 continue
             # Test doubles and thin gateways do not always carry a numeric
             # status; anything that is not one is read as success and left
             # to the parser.
             status = resp.status_code if isinstance(resp.status_code, int) else 200
             if status == 429:
-                delay = rate_limit_delay(resp.text, resp.headers, attempt)
+                delay = rate_limit_delay(resp.text, resp.headers, rate_hits)
+                rate_hits += 1
                 if rate_wait + delay > RATE_LIMIT_WAIT_BUDGET:
-                    raise LLMError(
-                        f"Rate-limited for over {RATE_LIMIT_WAIT_BUDGET:.0f}s "
-                        f"(ATLAS_AGENT_RATE_LIMIT_WAIT): {resp.text[:300]}")
+                    message = (f"Rate-limited for over {RATE_LIMIT_WAIT_BUDGET:.0f}s "
+                               f"(ATLAS_AGENT_RATE_LIMIT_WAIT): {resp.text[:300]}")
+                    if escape:
+                        raise LLMTransportError(message, kind="rate_limit",
+                                                attempts=self.transport_events)
+                    raise LLMError(message)
                 rate_wait += delay
                 _sleep(delay)
                 continue  # rate limits don't consume regular attempts
@@ -2051,6 +2684,15 @@ class LLMHubClient:
                 last_error = LLMError(
                     f"HTTP {status} from {url}: {resp.text[:300]}")
                 attempt += 1
+                if escape:
+                    last_kind = "status"
+                    self.transport_events.append({
+                        "seconds": round(time.monotonic() - sent_at, 1),
+                        "elapsed_in_request": round(time.monotonic() - started, 1),
+                        "kind": "status", "status": status, "chars": 0, "keepalives": 0,
+                        "error": str(resp.text or "")[:300]})
+                    if attempt >= MAX_RETRIES:
+                        continue        # no sleep after the last attempt
                 _sleep(rate_limit_delay(resp.text, resp.headers, attempt))
                 continue
             if status == 418 or (status == 403
@@ -2060,38 +2702,123 @@ class LLMHubClient:
                     f"web application firewall (likely attack-like "
                     f"strings in forensic content)")
             if status == 400 and adapt_rounds < _MAX_ADAPT_ROUNDS:
+                error_text = resp.text
+                if api == providers.MESSAGES_API:
+                    from core.messages_api import canonical_error
+                    error_text = canonical_error(error_text)
                 adapted = adapt_payload_for_400(
-                    payload, resp.text, prior_drop_params=profile.drop_params,
+                    payload, error_text, prior_drop_params=profile.drop_params,
                     profile=profile)
                 if adapted is not None:
                     payload, profile = adapted
                     current_drop_params = profile.drop_params
                     adapt_rounds += 1
                     remember_api_compat(provider_name, model, profile)
-                    estimated_tokens = len(json.dumps(payload)) // 4
+                    estimated_tokens = self._paced(len(json.dumps(payload)) // 4,
+                                                   self._last_cache_reads, profile)
                     continue
             if status >= 400:
-                raise LLMError(
-                    f"HTTP {status} from {url}: {resp.text[:1000]}")
+                raise LLMStatusError(
+                    f"HTTP {status} from {url}: {resp.text[:1000]}", status=status)
             # Success — persist learned shape after adaptation, or promote a
             # soft first-guess that actually worked (so model switches stick).
             if adapt_rounds or profile.source == "soft":
                 profile = profile_from_payload(
                     payload, drop_params=current_drop_params, base=profile)
                 remember_api_compat(provider_name, model, profile)
-            parsed = (
-                parse_responses(resp.json())
-                if api == providers.RESPONSES_API
-                else parse_response(resp.json())
-            )
+            if api == providers.RESPONSES_API:
+                parsed = parse_responses(resp.json())
+            elif api == providers.MESSAGES_API:
+                from core.messages_api import to_chat_body
+                parsed = parse_response(to_chat_body(resp.json()))
+            else:
+                parsed = parse_response(resp.json())
+            self._last_reply_seconds = time.monotonic() - sent_at
             return parsed, profile
         raise LLMTransportError(f"provider {provider_name!r} request failed after "
-                                f"{MAX_RETRIES} attempts: {last_error}")
+                                f"{MAX_RETRIES} attempts: {last_error}",
+                                kind=last_kind, attempts=self.transport_events)
 
     def list_models(self) -> list[str]:
-        url = llmhub.build_models_url(self.base_url)
-        resp = httpx.get(url, headers=self._headers(), timeout=60.0)
+        resp, entries = llmhub.get_models(self.base_url, self._headers(), paging=self._models_paging(),
+                                          timeout=60.0)
         if resp.status_code >= 400:
-            raise LLMError(f"HTTP {resp.status_code} from {url}: {resp.text[:500]}")
-        data = resp.json().get("data") or []
-        return sorted(m.get("id", "") for m in data if m.get("id"))
+            raise LLMError(f"HTTP {resp.status_code} from {llmhub.build_models_url(self.base_url)}: "
+                           f"{resp.text[:500]}")
+        return sorted(m.get("id", "") for m in entries or [] if m.get("id"))
+
+    def _models_paging(self) -> str:
+        """How the model list pages: the registered provider's profile's, or
+        the profile given to a provider not yet saved."""
+        try:
+            return self.provider.models_paging
+        except Exception:  # noqa: BLE001 - nothing registered under this name
+            pass
+        if self._profile_id:
+            from core import provider_profiles
+            try:
+                return provider_profiles.get(self._profile_id).models_paging
+            except provider_profiles.ProfileError:
+                pass
+        return "none"
+
+
+# ── one answer per call ──────────────────────────────────────────────────
+#
+# The composer, the planner, the director, the reason tools, the reviewers
+# and the other single-reply helpers each ask for one answer. A reply that
+# runs on far past the largest such answer is a runaway (a model repeating
+# itself until the endpoint stops it), not an answer. The allowance sits
+# above the largest single replies these roles were measured to produce,
+# reasoning included: report sections and syntheses on the standard cell
+# model, and the director and syntheses on a faster thinking model whose
+# answers ran past 32,000 tokens; 64,000 leaves headroom over both. A
+# behaviour guard for one call, never a run cap: a reply cut there is asked
+# again once one thinking level lower, and a second cut goes to the
+# caller's own fallback; neither teaches the role a lower level. The
+# analyst's turns use the model-call escape (ATLAS_MODEL_CALL_ESCAPE) instead.
+ONE_ANSWER_MAX_TOKENS = 64_000
+
+
+def one_answer_chat(client: Any, messages: list[dict], *, role: str | None = None, **kw: Any) -> "ChatResponse":
+    """One answer under the one-answer allowance: a reply cut at it
+    (finish_reason "length") is asked again once at the next lower
+    thinking level when there is one. The reply returned carries
+    ``length_cuts``; a caller treats a reply still cut as a failed call.
+    ATLAS_ONE_ANSWER_ALLOWANCE off sends the call with no limit."""
+    from core.envfile import env_flag
+    if not env_flag("ATLAS_ONE_ANSWER_ALLOWANCE"):
+        return client.chat(messages, role=role, **kw)
+    allowance = int(os.environ.get("ATLAS_ONE_ANSWER_MAX_TOKENS") or ONE_ANSWER_MAX_TOKENS)
+    # The operator's own ceiling (ATLAS_LLM_MAX_OUTPUT_TOKENS) stands when it is lower.
+    ceiling = (os.environ.get("ATLAS_LLM_MAX_OUTPUT_TOKENS") or "").strip()
+    if ceiling.isdigit() and 0 < int(ceiling) < allowance:
+        allowance = int(ceiling)
+    resp = client.chat(messages, role=role, max_tokens=allowance, **kw)
+    if str(getattr(resp, "finish_reason", "") or "") != "length":
+        return resp
+    cuts = 1
+    lower = None
+    nxt = getattr(client, "next_lower_level", None)
+    try:
+        lower = nxt(role if role is not None else _AGENT_ROLE, kw.get("level")) if callable(nxt) else None
+    except Exception:  # noqa: BLE001
+        lower = None
+    if lower:
+        # The re-ask teaches nothing: one runaway does not lower the role's
+        # level for the rest of the run.
+        resp = client.chat(messages, role=role, max_tokens=allowance, **{**kw, "level": lower, "learn": False})
+        if str(getattr(resp, "finish_reason", "") or "") == "length":
+            cuts = 2
+        else:
+            cuts = 1
+    try:
+        resp.length_cuts = cuts
+    except Exception:  # noqa: BLE001
+        pass
+    return resp
+
+
+def cut_at_allowance(resp: Any) -> bool:
+    """Whether a one-answer reply is still cut after its re-ask."""
+    return str(getattr(resp, "finish_reason", "") or "") == "length"

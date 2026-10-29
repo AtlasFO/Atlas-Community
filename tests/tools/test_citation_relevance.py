@@ -16,20 +16,20 @@ class _Log:
 
 def test_advisory_points_at_the_call_that_holds_the_identifier():
     log = _Log(
-        (65, "strings -a usb_unallocated.bin", "SORRY SORRY SORRY"),
-        (30, "strings -a rhino.log", "the account came from 137.30.122.253 on 2004-04-26"),
+        (65, "strings -a usb_unallocated.bin", "filler filler filler"),
+        (30, "strings -a capture.log", "the account came from 198.51.100.53 on 2031-04-21"),
     )
     out = misc._citation_relevance_advisory(
-        "Activity from 137.30.122.253 on 2004-04-26 is in the log", [65], 65, log)
+        "Activity from 198.51.100.53 on 2031-04-21 is in the log", [65], 65, log)
     assert out is not None
     assert out["suggested_call_ids"] == [30]
-    assert "137.30.122.253" in out["advisory"] or "2004-04-26" in out["advisory"]
+    assert "198.51.100.53" in out["advisory"] or "2031-04-21" in out["advisory"]
 
 
 def test_no_advisory_when_the_cited_call_carries_the_identifier():
-    log = _Log((30, "strings rhino.log", "connection from 137.30.122.253 seen"))
+    log = _Log((30, "strings capture.log", "connection from 198.51.100.53 seen"))
     assert misc._citation_relevance_advisory(
-        "traffic from 137.30.122.253", [30], 30, log) is None
+        "traffic from 198.51.100.53", [30], 30, log) is None
 
 
 def test_no_advisory_without_identifiers_in_the_claim():

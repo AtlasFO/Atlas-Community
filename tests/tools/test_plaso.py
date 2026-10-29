@@ -59,9 +59,9 @@ class TestPlasoExport:
     def test_filter_incident_window(self, mock_run, tmp_path):
         from tools.plaso import plaso_filter_incident_window
         out = str(tmp_path / "incident.csv")
-        plaso_filter_incident_window("timeline.plaso", out, "2018-09-06T17:00:00", "2018-09-06T20:00:00")
+        plaso_filter_incident_window("timeline.plaso", out, "2031-09-06T17:00:00", "2031-09-06T20:00:00")
         cmd = mock_run.call_args[0][0]
-        assert "2018-09-06" in " ".join(cmd)
+        assert "2031-09-06" in " ".join(cmd)
 
 
 class TestPlasoInfo:

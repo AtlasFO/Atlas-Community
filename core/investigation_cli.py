@@ -211,52 +211,108 @@ def format_explain(result: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _master_timeline_path(root: Path) -> Optional[Path]:
+    """The case's master_timeline.tsv: where the Timeline Builder writes it
+    (reports/, or the newest rerun snapshot), else analysis/ (cases from
+    versions that wrote it there)."""
+    from core.report_snapshots import report_files
+    for f in report_files(root):
+        if f["name"] == "master_timeline.tsv":
+            return Path(f["abs_path"])
+    legacy = root / "analysis" / "master_timeline.tsv"
+    return legacy if legacy.is_file() else None
+
+
+# Header names a master timeline may use for its columns, by role (the
+# Timeline Builder's own: Timestamp, Machine, User, Event, Source,
+# Description; plaso-style: datetime, message). Matched case-insensitively.
+_TS_COLUMNS = ("timestamp", "datetime", "date", "time")
+_TEXT_COLUMNS = ("description", "message", "event", "summary")
+_HOST_COLUMNS = ("machine", "host", "computer")
+_USER_COLUMNS = ("user", "account")
+
+
+def _read_master_timeline(tsv: Path, limit: Optional[int]) -> tuple[list[dict[str, Any]], int]:
+    """Stream the TSV: keep the first ``limit`` rows (every row when None)
+    and count them all, so a file of millions of rows costs no more memory
+    than the rows shown."""
+    events: list[dict[str, Any]] = []
+    total = 0
+    with tsv.open(encoding="utf-8", errors="replace", newline="") as fh:
+        # The Timeline Builder writes tab-joined lines without quoting, and a
+        # Windows command line starts with a quote: a quote is text here.
+        reader = csv.reader(fh, delimiter="\t", quoting=csv.QUOTE_NONE)
+        first = next(reader, None)
+        if first is None:
+            return events, 0
+        names = [c.strip().lower() for c in first]
+        has_header = any(n in _TS_COLUMNS + _TEXT_COLUMNS for n in names)
+
+        def col(roles):
+            return next((names.index(r) for r in roles if r in names), None)
+
+        ts_i, text_i = col(_TS_COLUMNS), col(_TEXT_COLUMNS)
+        host_i, user_i = col(_HOST_COLUMNS), col(_USER_COLUMNS)
+
+        def event(row: list[str]) -> dict[str, Any]:
+            def at(i):
+                return row[i] if i is not None and i < len(row) else ""
+            if has_header:
+                ts, text = at(ts_i), at(text_i)
+            else:           # a headerless file: first column, last column
+                ts, text = (row[0] if row else ""), (row[-1] if len(row) > 1 else "")
+            e = {"ts": ts, "kind": "master_timeline", "summary": text[:240],
+                 "source": "master_timeline.tsv"}
+            if at(host_i):
+                e["host"] = at(host_i)
+            if at(user_i):
+                e["user"] = at(user_i)
+            return e
+
+        rows = reader if has_header else _chain_first(first, reader)
+        for row in rows:
+            if not any(cell.strip() for cell in row):
+                continue
+            total += 1
+            if limit is None or len(events) < limit:
+                events.append(event(row))
+    return events, total
+
+
+def _chain_first(first: list[str], rest):
+    yield first
+    yield from rest
+
+
 def build_timeline(
     case_dir: str | os.PathLike,
     *,
     source: str = "claims",
+    limit: Optional[int] = None,
 ) -> dict[str, Any]:
-    """Case-level timeline from claims/journal or master_timeline.tsv."""
+    """Case-level timeline from claims/journal or master_timeline.tsv.
+
+    For the master timeline ``limit`` bounds the events kept (None keeps
+    every row); ``count`` is always the number of rows in the file and
+    ``shown`` the number kept."""
     root = Path(case_dir).resolve()
     if source == "master":
-        tsv = root / "analysis" / "master_timeline.tsv"
-        if not tsv.is_file():
+        tsv = _master_timeline_path(root)
+        if tsv is None:
             return {
                 "success": False,
-                "error": f"missing {tsv} — run Timeline Builder or use --from-claims",
+                "error": (f"no master_timeline.tsv under {root / 'reports'} (or its newest "
+                          f"snapshot, or analysis/) — run the Timeline Builder or use --from-claims"),
                 "source": "master",
             }
-        events = []
-        with tsv.open(encoding="utf-8", errors="replace", newline="") as fh:
-            # Detect header
-            sample = fh.read(4096)
-            fh.seek(0)
-            dialect = csv.Sniffer().sniff(sample, delimiters="\t,")
-            reader = csv.DictReader(fh, dialect=dialect)
-            for i, row in enumerate(reader):
-                if i > 5000:
-                    break
-                ts = (row.get("datetime") or row.get("timestamp")
-                      or row.get("date") or row.get("time") or "")
-                desc = (row.get("message") or row.get("description")
-                        or row.get("event") or row.get("summary") or "")
-                if not ts and not desc:
-                    # positional fallback for headerless TSV
-                    vals = list(row.values())
-                    ts = vals[0] if vals else ""
-                    desc = vals[-1] if len(vals) > 1 else ""
-                events.append({
-                    "ts": ts,
-                    "kind": "master_timeline",
-                    "summary": (desc or "")[:240],
-                    "source": "master_timeline.tsv",
-                })
+        events, total = _read_master_timeline(tsv, limit)
         return {
             "success": True,
             "source": "master",
             "path": str(tsv),
             "events": events,
-            "count": len(events),
+            "count": total,
+            "shown": len(events),
         }
 
     # default: claims + journal milestones
@@ -322,14 +378,18 @@ def format_timeline(result: dict[str, Any], *, limit: int = 200) -> str:
         f"Timeline ({result.get('source')}) — {result.get('count')} event(s)",
         "",
     ]
-    for e in events[:limit]:
+    shown = events if not limit else events[:limit]
+    for e in shown:
         ts = e.get("ts") or "—"
         kind = e.get("kind") or "?"
         ident = e.get("id") or e.get("run_id") or e.get("milestone_kind") or ""
         prefix = f"[{ident}] " if ident else ""
-        lines.append(f"{ts}  {kind:12}  {prefix}{e.get('summary') or ''}")
-    if len(events) > limit:
-        lines.append(f"… {len(events) - limit} more (use --json for full)")
+        where = e.get("host") or ""
+        where = f"{where}  " if where else ""
+        lines.append(f"{ts}  {kind:12}  {prefix}{where}{e.get('summary') or ''}")
+    count = int(result.get("count") or len(events))
+    if count > len(shown):
+        lines.append(f"showing {len(shown)} of {count} (--limit N for more, --limit 0 for all)")
     return "\n".join(lines)
 
 

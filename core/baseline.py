@@ -642,6 +642,8 @@ def run_baseline(case_dir: str | os.PathLike) -> dict[str, Any]:
             try:
                 prior = json.loads(json_path.read_text(encoding="utf-8"))
                 if prior.get("hive_stamp") == stamp:
+                    # Marks what an older run registered unmarked (atlas_read).
+                    _register_units(root, out_root / stem, [json_path, out_root / f"{stem}.csv"])
                     summary["skipped"].append({"installation": inst["stem"], "why": "already profiled", "path": str(json_path)})
                     continue
             except (OSError, ValueError):
@@ -678,7 +680,8 @@ def _register_units(root: Path, out_dir: Path, files: list[Path]) -> None:
         register_derived_outputs(root, tool_name="baseline",
                                  arguments={"output_dir": str(out_dir)},
                                  result_text=json.dumps({"success": True, "output_dir": str(out_dir),
-                                                         "files": [str(f) for f in files]}))
+                                                         "files": [str(f) for f in files]}),
+                                 atlas_read=True)
     except Exception:  # noqa: BLE001
         pass
 

@@ -551,9 +551,8 @@ def detect_case_id(case_dir: str | os.PathLike) -> str:
     the mirror's own basename (`run-1`) is useless.
 
     Parsing lives in parse_case_id_from_text, which dashboard/serve.py and
-    tools/atlas_reset.py now call as well — they used to carry hand-copied
-    regexes, and that divergence is what let the `**Case ID:** X` blind spot
-    survive in three committed demo briefs."""
+    tools/atlas_reset.py call as well; hand-copied regexes in each would
+    diverge and let a form like `**Case ID:** X` go unrecognised."""
     case_dir = str(case_dir)
     brief_seen = False
     for name in ("CASE.md", "CLAUDE.md"):
@@ -572,8 +571,8 @@ def detect_case_id(case_dir: str | os.PathLike) -> str:
     fallback = os.path.basename(os.path.abspath(case_dir))
     if brief_seen:
         # Only a brief that EXISTS and still yields no id is a defect signal —
-        # that is the failure this warning was added for, and it used to be
-        # silent. No brief at all is a documented path (see above), and warning
+        # that is the failure this warning is for. No brief at all is a
+        # documented path (see above), and warning
         # there would bury the real case in noise.
         import logging
         logging.getLogger(__name__).warning(
@@ -708,9 +707,9 @@ def reclaim_output_ownership(path: str) -> bool:
 def ensure_mount_point(path: str) -> dict | None:
     """Create a mount-point directory, escalating to sudo for system paths.
 
-    Mount tools previously called os.makedirs as the unprivileged server
-    user, so a system mount point like /mnt/ewf_pc raised PermissionError
-    as a raw traceback instead of a tool result.
+    os.makedirs as the unprivileged server user would raise PermissionError
+    for a system mount point like /mnt/ewf_pc, as a raw traceback instead of
+    a tool result.
     Returns None on success, or a run()-shaped error dict for the caller
     to return as the tool result.
     """
@@ -752,13 +751,35 @@ def ensure_mount_point(path: str) -> dict | None:
 _OUTPUT_PARAM_NAMES = (
     "output_path",
     "output_dir",
-    "output_file",
     "output_pcap",
     "output_csv",
     "output_json",
     "output_manifest",
     "storage_file",
 )
+
+# A file *name* a tool writes inside its output_dir (the EZ parsers' --csvf):
+# no case path of its own. The written file is output_dir/<name>
+# (output_paths); resolving it against the case root named a file the tool
+# never wrote.
+OUTPUT_NAME_PARAM_NAMES = ("output_file",)
+
+
+def output_paths(args: dict) -> list[str]:
+    """The output paths a call's arguments name: each output parameter's
+    value, and a file name parameter joined under the call's output_dir."""
+    out: list[str] = []
+    for name in _OUTPUT_PARAM_NAMES:
+        v = args.get(name)
+        if isinstance(v, str) and v:
+            out.append(v)
+    base = args.get("output_dir")
+    for name in OUTPUT_NAME_PARAM_NAMES:
+        v = args.get(name)
+        if isinstance(v, str) and v:
+            out.append(os.path.join(base, v) if isinstance(base, str) and base else v)
+    return out
+
 
 # Mount-point parameter names across the mount tools (ewf.*, img.*).
 MOUNT_PARAM_NAMES = (
@@ -806,6 +827,18 @@ INPUT_PATH_PARAM_NAMES = (
 )
 
 
+# The suffixes of a tool's path parameter (mft_path, recycle_bin_path,
+# pcap_file, hive): such a parameter's value is one path, spaces and all.
+PATH_PARAM_SUFFIXES = ("_path", "_paths", "_file", "_files", "_dir", "path", "file", "hive", "image")
+
+
+def is_path_param(name: str) -> bool:
+    """Whether a tool parameter takes a path (INPUT_PATH_PARAM_NAMES or a
+    path-shaped name)."""
+    n = str(name or "").lower()
+    return n in INPUT_PATH_PARAM_NAMES or n.endswith(PATH_PARAM_SUFFIXES)
+
+
 def output_safe(func):
     """Decorator that validates any output_* / storage_file kwarg against the
     evidence read-only policy before calling the wrapped function.
@@ -817,7 +850,7 @@ def output_safe(func):
         def my_tool(image: str, output_dir: str) -> dict: ...
     """
     sig = inspect.signature(func)
-    relevant = tuple(n for n in _OUTPUT_PARAM_NAMES if n in sig.parameters)
+    relevant = tuple(n for n in _OUTPUT_PARAM_NAMES + OUTPUT_NAME_PARAM_NAMES if n in sig.parameters)
     if not relevant:
         return func
 
@@ -828,10 +861,10 @@ def output_safe(func):
         except TypeError:
             # Signature mismatch — let the wrapped function raise its own error.
             return func(*args, **kwargs)
-        for name in relevant:
-            value = bound.arguments.get(name)
-            if value:
-                assert_output_safe(value)
+        # A file name is checked where it is written, under output_dir, so a
+        # name that climbs out of the case is refused.
+        for value in output_paths(bound.arguments):
+            assert_output_safe(value)
         return func(*args, **kwargs)
 
     return wrapper
@@ -924,7 +957,7 @@ def ensure_venv_on_path() -> str:
 
 
 # ── one way to find a forensic program ───────────────────────────────────────
-# Wrappers used to spell this three different ways: `shutil.which(name)`, a
+# A wrapper can spell this three different ways: `shutil.which(name)`, a
 # hardcoded "/usr/local/bin/<name>", or `which() or "/usr/local/bin/<name>"`.
 # The hardcoded form ignores PATH entirely, so a program installed anywhere
 # else is invisible to the wrapper while `missing_binaries()` — which asks
@@ -1023,6 +1056,45 @@ def missing_program_result(tool: str, name: str, install_hint: str = "") -> dict
         "hint": hint + " — every other tool remains available.",
         "gate": "program_missing",
         "program": name,
+        "stdout": "",
+        "stderr": "",
+        "exit_code": 127,
+    }
+
+
+# The fatal line of a Python traceback whose import could not be satisfied.
+_DIED_ON_IMPORT_RE = re.compile(r"ModuleNotFoundError: No module named '([A-Za-z0-9_.]+)'")
+
+
+def missing_module_result(tool: str, program: str, result: dict, install_hint: str = "") -> "dict | None":
+    """The refusal for a Python program that started and died on an import.
+
+    A console script whose own library is absent exits with a traceback that
+    reads like a broken call the model should retry. That is the fact
+    missing_program_result states, so it has the same shape and the same
+    gate: a search that never ran establishes no absence
+    (tools/_gates/negative_completeness.py reads the gate and the words
+    "is not installed"). Returns None unless the failed run's last stderr line
+    is the ModuleNotFoundError, so a traceback logged and survived, or any
+    other failure, passes through unchanged.
+    """
+    if result.get("success"):
+        return None
+    # ponytail: the executor keeps the first 4096 chars of stderr, so a
+    # traceback longer than that loses its last line and passes through raw.
+    lines = [ln.strip() for ln in str(result.get("stderr") or "").splitlines() if ln.strip()]
+    found = _DIED_ON_IMPORT_RE.fullmatch(lines[-1]) if lines else None
+    if not found:
+        return None
+    module = found.group(1)
+    hint = install_hint or f"install the Python module {module} into the environment {program} runs in"
+    return {
+        "success": False,
+        "error": f"{tool}: {program} cannot run: its Python module {module} is not installed on this system",
+        "hint": hint + " — every other tool remains available.",
+        "gate": "program_missing",
+        "program": program,
+        "missing_module": module,
         "stdout": "",
         "stderr": "",
         "exit_code": 127,

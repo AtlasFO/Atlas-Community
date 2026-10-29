@@ -17,7 +17,7 @@ def _ctx(description, entries, cited, supporting=""):
         input_call_ids=cited, supporting_evidence=supporting)
 
 
-CUT_MFT = {"type": "tool_call", "cmd": "<py>:table_query",
+CUT_MFT = {"type": "tool_call", "cmd": "<py>:table_table_query",
            "args": '{"path": "analysis/mft.csv"}', "view_truncated": True,
            "view_omitted_chars": 4200, "stdout_file": "/case/analysis/tool-output/q.stdout"}
 FULL_SYNC = {"type": "tool_call", "cmd": "<py>:strings_read_text",
@@ -48,7 +48,9 @@ def test_the_refusal_names_what_was_not_shown():
     err = r["error"]
     assert "4200 characters" in err
     assert "the tool itself returned everything" in err
-    assert "/case/analysis/tool-output/q.stdout" in err
+    # A table tool's result is narrowed, never searched through its spilled
+    # JSON (the wrong input kind for a text grep).
+    assert "q.stdout" not in err and "where=" in err and "pattern=<term>" not in err and "wrong input kind" in err
     assert "cut short" not in err
 
 
@@ -129,7 +131,8 @@ def test_a_negative_sentence_is_judged_on_the_artifacts_it_names():
     assert r is not None and r["incomplete_call_id"] == 1
 
 
-def test_a_negative_with_no_narrower_wording_names_its_words_instead():
+def test_a_negative_with_no_narrower_wording_names_its_words_instead(monkeypatch):
+    monkeypatch.setenv("ATLAS_UNIVERSAL_GATE_V2", "0")  # the plain path, kept behind the switch
     desc = "Extraction of the stream from capture.pcap was not successful."
     cut_pcap = {**CUT_MFT, "args": '{"path": "analysis/capture.pcap"}'}
     r = g.check(_ctx(desc, {2: cut_pcap}, [2]))
@@ -137,14 +140,16 @@ def test_a_negative_with_no_narrower_wording_names_its_words_instead():
     assert "'was not'" in r["error"] and desc[:40] in r["error"]
 
 
-def test_a_rewrite_that_differs_only_in_punctuation_is_no_rewrite():
+def test_a_rewrite_that_differs_only_in_punctuation_is_no_rewrite(monkeypatch):
+    monkeypatch.setenv("ATLAS_UNIVERSAL_GATE_V2", "0")  # the plain path, kept behind the switch
     desc = "Extraction of the stream from capture.pcap was not successful,  "
     cut_pcap = {**CUT_MFT, "args": '{"path": "analysis/capture.pcap"}'}
     r = g.check(_ctx(desc, {2: cut_pcap}, [2]))
     assert r is not None and "suggested_rewrite" not in r
 
 
-def test_a_universal_that_can_be_narrowed_keeps_its_suggestion():
+def test_a_universal_that_can_be_narrowed_keeps_its_suggestion(monkeypatch):
+    monkeypatch.setenv("ATLAS_UNIVERSAL_GATE_V2", "0")  # the plain path, kept behind the switch
     r = g.check(_ctx("mft.csv lists all files in the sync folder", {2: CUT_MFT}, [2]))
     assert r["suggested_rewrite"] == "mft.csv lists the observed files in the sync folder"
 
@@ -186,3 +191,168 @@ def test_a_bounded_table_scan_is_not_a_complete_view():
     assert incomplete_reason({"result_meta": {"scan_capped": False, "scanned_rows": 9}}) == ""
     assert incomplete_reason({"result_meta": {"hit_count": 50, "max_hits": 50}}) == \
         "it stopped at the 50-hit cap"
+
+
+def test_a_view_entry_says_how_many_rows_were_shown_and_a_complete_view_withholds_nothing():
+    from tools._gates.universal_from_truncated import incomplete_reason, rest_of_result_hint
+    shown = {"cmd": "<py>:table_table_grep", "view_rows_returned": 50, "view_rows_shown": 12,
+             "view_truncated": True, "view_omitted_rows": 38, "result_meta": {"hit_count": 50, "max_hits": 50}}
+    assert incomplete_reason(shown) == "the analyst was shown 12 of the 50 rows the tool returned"
+    complete = {"cmd": "<py>:table_table_grep", "view_rows_returned": 29, "view_rows_shown": 29,
+                "view_complete": True, "result_meta": {"hit_count": 29, "max_hits": 50}}
+    assert incomplete_reason(complete) == ""
+    old = {"cmd": "<py>:table_table_grep", "view_truncated": True, "view_omitted_chars": 900}
+    assert "900 characters" in incomplete_reason(old)
+    # The hint for a table result narrows the call; it never sends a text
+    # grep over the spilled JSON.
+    hint = rest_of_result_hint(shown, "analysis/tool-output/table_table_grep-7.json", 7)
+    assert "pattern=<term>" in hint and "table.table_grep" not in hint.split("wrong input kind")[0].replace(
+        "table.table_pivot", "")
+    executor = rest_of_result_hint({"cmd": "strings -a evidence/mem.raw"}, "analysis/tool-output/strings-8.txt", 8)
+    assert "strings-8.txt" in executor and "strings.strings_grep" in executor
+    # Only parameters and result fields the tool has: table_grep has no
+    # matched_rows or where=, and time_start= only with the time arguments; the strings
+    # and search views their own. Paging and a file of every row are never
+    # the way to the rest.
+    assert "matched_rows" not in hint and "where=" not in hint
+    assert "time_start=" in hint and "offset=" not in hint and "output_csv" not in hint
+    import os
+    os.environ["ATLAS_TABLE_TIME_ARGS"] = "0"
+    try:
+        off = rest_of_result_hint(shown, "", 7)
+        assert "pattern=<term>" in off and "time_start=" not in off
+    finally:
+        del os.environ["ATLAS_TABLE_TIME_ARGS"]
+    query = rest_of_result_hint({"cmd": "<py>:table_table_query"}, "", 9)
+    assert "matched_rows" in query and "where=" in query and "table.table_pivot" in query
+    assert "time_start=" in query and "offset=" not in query and "output_csv" not in query
+    strings_view = rest_of_result_hint({"cmd": "<py>:strings_strings_grep", "view_rows_shown": 5}, "", 10)
+    assert "pattern=<p>" in strings_view and "where=" not in strings_view and "offset=" not in strings_view
+    search_view = rest_of_result_hint({"cmd": "<py>:search_search_evidence", "view_rows_shown": 5}, "", 11)
+    assert "query=<term>" in search_view and "tool=<name>" in search_view and "where=" not in search_view
+
+
+# ── ATLAS_UNIVERSAL_GATE_V2: no rewrite, the sentence named, the count first ──
+
+import pytest  # noqa: E402
+
+
+def test_v2_names_the_sentence_and_asks_for_the_count_without_a_rewrite():
+    desc = "mft.csv lists all files in the sync folder. The folder holds desktop.ini."
+    r = g.check(_ctx(desc, {2: CUT_MFT}, [2]))
+    assert r is not None and "suggested_rewrite" not in r
+    err = r["error"]
+    assert "The sentence 'mft.csv lists all files in the sync folder.' states something about every row" in err
+    assert "call 2 (<py>:table_table_query) is not a complete view" in err
+    assert "Count first: narrow the call so every matching row is returned" in err
+    assert "Then record what the count shows" in err and "leave call 2 out" in err
+    assert "the observed" not in err
+
+
+def test_v2_names_every_universal_sentence_and_the_absence():
+    desc = "mft.csv lists only desktop.ini. No other files were found in mft.csv."
+    r = g.check(_ctx(desc, {2: CUT_MFT}, [2]))
+    err = r["error"]
+    assert err.startswith("The sentences 'mft.csv lists only desktop.ini.' states something about every row; "
+                          "'No other files were found in mft.csv.' states an absence")
+
+
+def test_v2_routes_a_prescription_to_the_recommendations():
+    desc = "Reset every account in mft.csv."
+    r = g.check(_ctx(desc, {2: CUT_MFT}, [2]))
+    err = r["error"]
+    assert "is a recommendation, not a statement about the evidence" in err
+    assert "claim.add_recommendation(action=..., basis_ids=" in err
+    assert "Count first" not in err
+
+
+def test_v2_a_mixed_finding_gets_both_remedies():
+    desc = "mft.csv lists all files in the sync folder. Every file in mft.csv should be quarantined."
+    err = g.check(_ctx(desc, {2: CUT_MFT}, [2]))["error"]
+    assert "Count first" in err and "claim.add_recommendation" in err
+
+
+def test_v2_a_complete_view_refuses_nothing():
+    full = {**CUT_MFT, "view_truncated": False, "view_omitted_chars": 0, "view_complete": True}
+    assert g.check(_ctx("Reset every account in mft.csv.", {2: full}, [2])) is None
+
+
+@pytest.mark.parametrize("sentence", [
+    "Reset every account.",
+    "Every domain password should be rotated.",
+    "CORP must reset every domain password, not only affected accounts.",
+    "Block every address in the indicator list at the perimeter.",
+    "The team should isolate all three workstations.",
+    "Alle Konten sollten zurückgesetzt werden.",
+])
+def test_is_prescription_accepts_recommendations(sentence):
+    assert g.is_prescription(sentence)
+
+
+@pytest.mark.parametrize("sentence", [
+    "All accounts were compromised and must be reset.",
+    # a modal frame launders no fact
+    "It should be noted that every workstation beaconed to 203.0.113.9.",
+    "Responders must assume all hosts were accessed by the operator.",
+    "We recommend treating CORP-WS01 as the only host the attacker reached.",
+    "No account shows a logon.",
+    "All logons were interactive; no network logons were detected.",
+    # (e): a comma and a complementiser end the prescription's clause
+    "Reset every account, as every host was compromised.",
+    # (e): a modal followed by a state or epistemic verb states, it does not prescribe
+    "The logs should show every logon.",
+    "Every host should be considered the origin.",
+    "Not all hosts were reached.",
+])
+def test_is_prescription_refuses_statements(sentence):
+    assert not g.is_prescription(sentence)
+
+
+# The analyst's own claim (analysts_words): a reported condition and the
+# run's own progress are no statement about rows; an absence about the
+# evidence stays judged, also with a reading verb. Invented wording.
+CUT_LISTING = {"type": "tool_call", "cmd": "<py>:tsk_tsk_index_find",
+               "args": '{"pattern": "README"}', "view_truncated": True, "view_omitted_chars": 5000,
+               "stdout_excerpt": "Users/jane.doe/Desktop/README_RESTORE.txt"}
+FULL_TEXT = {"type": "tool_call", "cmd": "<py>:strings_read_text",
+             "args": '{"file_path": "analysis/extracted/README_RESTORE.txt"}',
+             "stdout_excerpt": "your files are copied and locked"}
+
+
+def test_a_note_finding_with_a_condition_and_a_progress_sentence_is_not_refused():
+    desc = ("The memo README_RESTORE.txt on CORP-WS01 says the share was archived and will be purged if no "
+            "owner replies, and names a ticket. The archive claim is the memo's own statement; no copy "
+            "record has been examined so far.")
+    assert g.check(_ctx(desc, {1: CUT_LISTING, 2: FULL_TEXT}, [1, 2])) is None
+
+
+@pytest.mark.parametrize("sentence", [
+    "The mail README_RESTORE.txt was not read by the user.",
+    "No README_RESTORE.txt was opened.",
+    "No README_RESTORE.txt was recovered.",
+    "No README_RESTORE.txt file is on the Desktop.",
+])
+def test_an_absence_about_the_evidence_with_a_reading_verb_stays_judged(sentence):
+    assert g.check(_ctx(sentence, {1: CUT_LISTING}, [1])) is not None
+
+
+@pytest.mark.parametrize("sentence", [
+    # a leading condition with no comma keeps its main clause and the absence in it
+    "If the share had been copied out the proxy log would show it and it shows no such upload.",
+    # a reading verb as an adjective or a postposed participle, with an evidence predicate
+    "No upload was found yet in the examined proxy logs.",
+    "No outbound transfer appears in the proxy logs reviewed so far.",
+    # an evidence predicate beside a reading verb with its auxiliary: still a claim about the logs
+    "No upload was seen in the proxy logs that were reviewed so far.",
+])
+def test_an_absence_over_examined_evidence_is_no_progress_statement(sentence):
+    assert g.is_universal_or_negative(sentence)
+
+
+def test_an_active_clause_with_a_marker_is_the_evidence_not_the_runs_progress():
+    """A marker rescues a passive predicate only ("has not been read yet"); an
+    active clause names its own subject, and "yet" makes it no progress
+    statement of the analyst."""
+    kept = g.analysts_words("The user has not opened the attachment yet.")
+    assert "opened" in kept and "user" in kept
+    assert "examined" not in g.analysts_words("No copy record has been examined so far.")

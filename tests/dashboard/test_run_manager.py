@@ -5,6 +5,7 @@ actual investigation) — and for RunManager.start()'s external-run guard,
 which also avoids spawning a subprocess when it correctly blocks."""
 from __future__ import annotations
 
+import os
 import sys
 
 import pytest
@@ -175,6 +176,65 @@ class TestRunOwner:
             assert mgr.stop("CASE-C", actor="john.roe", actor_role="analyst")["success"] is True
         finally:
             sess.proc.kill(); sess.proc.wait(timeout=5)
+
+
+class TestStopIsRecorded:
+    """A Stop pressed in the dashboard is part of the session's status, so
+    the run strip can say "stopped" also when the child ended before it
+    could record why; a status file an earlier run left is not this run's."""
+
+    def _started(self, tmp_path, monkeypatch, code="import time; time.sleep(30)"):
+        (tmp_path / "CASE-C" / ".atlas").mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(read_models, "run_process_alive", lambda case_dir: False)
+        monkeypatch.setattr(run_manager, "build_cmd", lambda case_dir, mode, extra: [sys.executable, "-c", code])
+        mgr = run_manager.RunManager(repo_root=str(tmp_path))
+        return mgr, mgr.start(str(tmp_path), "CASE-C", started_by="jane.doe")
+
+    def test_the_stop_names_who_pressed_it(self, tmp_path, monkeypatch):
+        mgr, sess = self._started(tmp_path, monkeypatch)
+        try:
+            assert "stop_requested_at" not in sess.status()
+            mgr.stop("CASE-C", actor="jane.doe", actor_role="analyst")
+            sess.proc.wait(timeout=10)
+            st = sess.status()
+            assert st["stop_requested_by"] == "jane.doe" and st["stop_requested_at"].endswith("Z")
+            assert st["running"] is False
+        finally:
+            if sess.proc.poll() is None:
+                sess.proc.kill(); sess.proc.wait(timeout=5)
+
+    @pytest.mark.parametrize("record,finished", [
+        ({"stopped_reason": "stop_requested", "finish_status": "interrupted"}, False),
+        ({"stopped_reason": "crashed", "finish_status": "error"}, False),
+        ({"stopped_reason": "finished", "finish_status": "complete"}, True),
+        ({"stopped_reason": "closed_out", "finish_status": "incomplete_coverage"}, True),
+        ({"stopped_reason": "quiet", "finish_status": "exited_degraded_incomplete"}, True),
+        ({"stopped_reason": "running", "finish_status": ""}, False),
+        # The loop's own ending word with classes left undecided: a stop.
+        ({"stopped_reason": "finished", "finish_status": "stopped_undecided"}, False),
+        ({"stopped_reason": "closed_out", "finish_status": "stopped_undecided"}, False),
+    ])
+    def test_finished_itself_is_a_completion_never_any_finish_status(self, tmp_path, monkeypatch,
+                                                                     record, finished):
+        import json
+        mgr, sess = self._started(tmp_path, monkeypatch, code="pass")
+        sess.proc.wait(timeout=10)
+        (tmp_path / "CASE-C" / ".atlas" / "run_status.json").write_text(json.dumps(record))
+        st = sess.status()
+        assert st["finished_itself"] is finished
+        assert st["undecided_end"] is (record["finish_status"] == "stopped_undecided")
+
+    def test_a_status_file_from_an_earlier_run_is_not_this_runs_end(self, tmp_path, monkeypatch):
+        import json
+        status = tmp_path / "CASE-C" / ".atlas" / "run_status.json"
+        (tmp_path / "CASE-C" / ".atlas").mkdir(parents=True)
+        status.write_text(json.dumps({"stopped_reason": "finished", "finish_status": "complete"}))
+        os.utime(status, (1, 1))     # written long before this run
+        mgr, sess = self._started(tmp_path, monkeypatch, code="pass")
+        sess.proc.wait(timeout=10)
+        assert "stopped_reason" not in sess.status()
+        status.write_text(json.dumps({"stopped_reason": "llm_error"}))   # this run's own
+        assert sess.status()["stopped_reason"] == "llm_error"
 
 
 def test_a_run_the_dashboard_started_is_listed_before_its_first_status(tmp_path, monkeypatch):

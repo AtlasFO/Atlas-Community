@@ -15,7 +15,7 @@ def _write_proc(tmp_path, mountpoints):
 
 class TestFindMountsUnder:
     def test_finds_mount_at_and_under_path(self, tmp_path):
-        base = os.path.realpath(str(tmp_path / "cases" / "szechuan"))
+        base = os.path.realpath(str(tmp_path / "cases" / "case-a"))
         proc = _write_proc(tmp_path, [
             f"{base}/mnt/ewf_dc01",
             f"{base}/mnt/dc01",

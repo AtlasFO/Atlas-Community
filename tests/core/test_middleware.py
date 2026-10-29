@@ -83,6 +83,7 @@ class TestDairGateMiddleware:
             )
         assert call_next.await_count == 1
 
+    @pytest.mark.usefixtures("todays_dair")
     def test_non_allowlisted_tool_blocked_after_dair_drops_out(self, tmp_path):
         """Once DAIR has been engaged, falling out of the window blocks tools."""
         from core.middleware import NarrationMiddleware
@@ -250,6 +251,32 @@ class TestValidationErrorEnvelope:
         assert entry["failure_class"] == "analyst_error"
         assert "linked_call_id" in entry["stderr"]
         assert "Traceback" not in entry["stderr"]
+
+    def test_a_call_with_no_arguments_names_what_it_needs(self, tmp_path):
+        from pydantic import BaseModel, ValidationError
+        class M(BaseModel):
+            path: str
+            pattern: str
+        try:
+            M.model_validate({})
+        except ValidationError as e:
+            err = e
+        msg, entry = self._run_with_error(tmp_path, "MW-VAL4", err)
+        assert "was called with no arguments" in msg and "It needs: path, pattern" in msg
+        assert "Correct the listed fields" not in msg
+        assert entry["failure_class"] == "analyst_error"
+
+    def test_a_partial_call_keeps_the_listing(self, tmp_path):
+        from pydantic import BaseModel, ValidationError
+        class M(BaseModel):
+            path: str
+            pattern: str
+        try:
+            M.model_validate({"path": "evidence/a.log"})
+        except ValidationError as e:
+            err = e
+        msg, _ = self._run_with_error(tmp_path, "MW-VAL5", err)
+        assert "invalid arguments" in msg and "pattern" in msg and "no arguments" not in msg
 
     def test_fastmcp_validation_error_also_wrapped(self, tmp_path):
         from fastmcp.exceptions import ValidationError as FMValidationError
@@ -541,3 +568,21 @@ class TestCasePathResolution:
                 asyncio.run(self._call(NarrationMiddleware(), ctx))
         abandoned = [e for e in l._entries if e.get("type") == "call_abandoned"]
         assert abandoned and "case-path gate" in abandoned[-1]["reason"]
+
+
+class TestWatchdogTimeoutIsNoFailedRead:
+    """A Python tool cut by its watchdog (core.timeout.with_tool_timeout)
+    returns a payload marked timed_out; the middleware records that mark on
+    the trace entry, so the coverage rules read a host fault, not a failed
+    read of the file. A plain failure stays a failed read."""
+
+    def _entry(self, tmp_path, ret):
+        return TestAppLevelFailureBaseline()._run(tmp_path, "CASE-A", ret)[1]
+
+    def test_a_watchdog_payload_marks_the_entry_and_a_plain_failure_does_not(self, tmp_path):
+        from core.coverage_ledger import failed_read_attempt
+        cut = self._entry(tmp_path, {"success": False, "error": "Tool exceeded 900s budget - abandoned",
+                                     "timed_out": True, "killed_after_seconds": 900, "tool": "x"})
+        assert cut["success"] is False and cut.get("timed_out") is True and not failed_read_attempt(cut)
+        plain = self._entry(tmp_path, {"success": False, "error": "cannot parse the header"})
+        assert plain.get("timed_out") in (None, False) and failed_read_attempt(plain)

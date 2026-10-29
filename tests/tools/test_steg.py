@@ -203,9 +203,49 @@ def test_a_negative_says_what_it_does_not_cover(image, tmp_path):
         with patch.object(steg, "run", _runner(set(), [])):
             single = steg.steg_extract(image, str(tmp_path / "a"), passphrase="pw")
             grid = steg.steg_extract([image, image], str(tmp_path / "b"), passphrase=["pw", "px"])
-    assert "JPHS for Windows 0.5x" in single["next_step"]
-    assert "JPHS for Windows 0.5x" in grid["next_step"]
-    assert "definitive" not in grid["next_step"]
+            bmp = tmp_path / "carrier.bmp"
+            bmp.write_bytes(b"BM not really a bitmap")
+            bmp_only = steg.steg_extract(str(bmp), str(tmp_path / "c"), passphrase="pw")
+            bmp_grid = steg.steg_extract([str(bmp)], str(tmp_path / "d"), passphrase=["pw", "px"])
+    # jpseek ran on a JPEG: the format limit and the manual route, in the
+    # reviewer's words, in both forms; never a program Atlas does not run,
+    # never a claim that nothing is hidden or that the carrier is 0.5x.
+    for text in (single["next_step"], grid["next_step"]):
+        assert "jpseek here reads the Linux 0.3 format only" in text
+        assert "(jpseek.exe) on a Windows host, with the same passphrases" in text
+        assert "JPHS for Windows 0.5x" in text and "stegbreak" not in text and "definitive" not in text
+        assert text.count("nothing is hidden") == text.count("does not show that nothing is hidden") == 1
+        assert "is written by" not in text and "carriers are" not in text
+    # A BMP carrier: jpseek ran on it too, but no JPEG-format text belongs here.
+    for text in (bmp_only["next_step"], bmp_grid["next_step"]):
+        assert "0.5x" not in text and "jpseek.exe" not in text and "Windows host" not in text
+        assert "does not show that nothing is hidden" in text and "stegbreak" not in text
+
+
+def test_noise_from_jpseek_names_both_causes_and_noise_from_outguess_names_the_passphrase(image, tmp_path):
+    def noisy(programs):
+        def run(cmd, **kw):
+            program = os.path.basename(cmd[0])
+            out = cmd[-1] if program != "steghide" else cmd[cmd.index("-xf") + 1]
+            if program in programs:
+                with open(out, "wb") as f:
+                    f.write(bytes(range(256)) * 8)
+                return {"success": True, "exit_code": 0, "stdout": "", "stderr": ""}
+            return {"success": False, "exit_code": 1, "stdout": "", "stderr": "no"}
+        return run
+    both = "a wrong passphrase, or a carrier jpseek 0.3 does not read (JPHS for Windows 0.5x)"
+    with patch.object(steg, "tool_program", _installed("outguess", "jpseek")):
+        with patch.object(steg, "run", noisy({"jpseek"})):
+            single = steg.steg_extract(image, str(tmp_path / "a"), passphrase="pw")
+            grid = steg.steg_extract([image, image], str(tmp_path / "b"), passphrase=["pw", "px"])
+        with patch.object(steg, "run", noisy({"outguess"})):
+            og = steg.steg_extract(image, str(tmp_path / "c"), passphrase="pw")
+            og_grid = steg.steg_extract([image, image], str(tmp_path / "d"), passphrase=["pw", "px"])
+    assert both in single["next_step"] and "which is what a wrong passphrase yields" not in single["next_step"]
+    assert f"2 cell(s) wrote bytes with no recognizable structure: {both}" in grid["next_step"]
+    assert "what a wrong passphrase yields" in og["next_step"] and "does not read" not in og["next_step"]
+    assert "2 cell(s) wrote bytes" in og_grid["next_step"] and "does not read" not in og_grid["next_step"]
+    assert grid["noise"] == {"jpseek": 2} and og_grid["noise"] == {"outguess": 2}   # one carrier (dedup) x two passphrases
 
 class TestCandidateGrid:
     """Several carriers and several passphrases are one call: the search
@@ -291,3 +331,42 @@ class TestCandidateGrid:
                                        str(tmp_path / "out"))
         assert result["success"] is False and "gone.jpg" in result["error"]
         assert seen == []
+
+
+def test_a_cell_that_ran_to_its_exit_is_an_expected_nonzero_exit_not_a_tool_error(image, tmp_path):
+    """A wrong passphrase or an unread carrier format makes an extractor
+    exit nonzero: the cell answered, but did not show the carrier read, so
+    it stays unsuccessful and is classed expected_nonzero (no failure for
+    the review, no attempt for coverage). A cell cut by a timeout or a
+    signal stays a tool error."""
+    from core.execution_log import ExecutionLog
+    trace = ExecutionLog()
+    trace.configure("CASE-A", str(tmp_path / "trace.json"))
+
+    def run(cmd, **kw):
+        program = os.path.basename(cmd[0])
+        res = {"steghide": {"success": False, "exit_code": 1,
+                            "stderr": "could not extract any data with that passphrase!"},
+               "outguess": {"success": False, "exit_code": -1, "timed_out": True, "stderr": "timeout"},
+               "jpseek": {"success": False, "exit_code": -11, "stderr": ""}}[program]
+        cid = trace.record_tool_call(" ".join(cmd), False, False, 0, res["exit_code"],
+                                     failure_class="tool_error")
+        return {**res, "stdout": "", "_atlas_call_id": cid}
+
+    with patch.object(steg, "tool_program", _installed("steghide", "outguess", "jpseek")), \
+            patch.object(steg, "run", run), patch("core.execution_log.log", trace):
+        result = steg.steg_extract(image, str(tmp_path / "out"), passphrase=["alpha", "bravo"])
+    assert result["success"] is True and result["cells_tried"] == 2
+    by_program = {}
+    for e in trace._entries:
+        by_program.setdefault(os.path.basename(e["cmd"].split()[0]), []).append(e)
+    assert all(e["success"] is False and e["failure_class"] == "expected_nonzero" and "no_match" not in e
+               for e in by_program["steghide"])
+    from agent.review import detect_stall
+    from core.coverage_ledger import _failed_attempt
+    # The review counts only the cut cells (outguess, jpseek: 2 per passphrase).
+    assert detect_stall(trace._entries)["signals"]["high_failure_rate"]["failures"] == 4
+    assert not any(_failed_attempt(e) for e in by_program["steghide"])
+    assert all(_failed_attempt(e) for e in by_program["outguess"] + by_program["jpseek"])
+    assert all(e["success"] is False and e["failure_class"] == "tool_error"
+               for e in by_program["outguess"] + by_program["jpseek"])

@@ -367,6 +367,65 @@ class TestConfigurableSessionLimits:
                 (token,)).fetchone()
         assert row["expires_at"] < auth._expires_iso(hours=1)
 
+    def _ago(self, **delta):
+        return (auth.datetime.now(auth.timezone.utc) - auth.timedelta(**delta)).isoformat()
+
+    def _session(self, name):
+        user = auth.create_user(name, f"{name}@example.com", "password123", "viewer")
+        return auth.create_session(user.id)
+
+    def _set(self, token, **cols):
+        assignments = ", ".join(f"{k} = ?" for k in cols)
+        with auth._write_lock, auth._connect() as conn:
+            conn.execute(f"UPDATE sessions SET {assignments} WHERE token = ?",
+                         (*cols.values(), token))
+            conn.commit()
+
+    def test_a_shortened_absolute_limit_refuses_the_very_next_request(self, monkeypatch):
+        monkeypatch.setenv("ATLAS_SESSION_IDLE_HOURS", "0.25")
+        monkeypatch.setenv("ATLAS_SESSION_MAX_HOURS", "0.5")
+        token = self._session("capped")
+        # Signed in an hour ago, active a minute ago; the stored deadline,
+        # written under the old limits, still lies ahead.
+        self._set(token, created_at=self._ago(hours=1), last_seen_at=self._ago(minutes=1),
+                  expires_at=auth._expires_iso(hours=10))
+        assert auth.get_session_user(token) is None
+
+    def test_a_shortened_idle_limit_refuses_an_idle_session_at_once(self, monkeypatch):
+        monkeypatch.setenv("ATLAS_SESSION_IDLE_HOURS", "0.25")
+        token = self._session("idle30")
+        self._set(token, last_seen_at=self._ago(minutes=30), expires_at=auth._expires_iso(hours=10))
+        assert auth.get_session_user(token) is None
+
+    def test_a_session_inside_both_limits_is_served_and_slides(self, monkeypatch):
+        monkeypatch.setenv("ATLAS_SESSION_IDLE_HOURS", "1")
+        monkeypatch.setenv("ATLAS_SESSION_MAX_HOURS", "8")
+        token = self._session("inside")
+        self._set(token, created_at=self._ago(hours=2), last_seen_at=self._ago(minutes=10),
+                  expires_at=auth._expires_iso(minutes=50))
+        assert auth.get_session_user(token) is not None
+        with auth._connect() as conn:
+            exp = conn.execute("SELECT expires_at FROM sessions WHERE token = ?", (token,)).fetchone()[0]
+        assert exp > auth._expires_iso(minutes=55)
+
+    def test_a_longer_limit_never_revives_an_ended_session(self, monkeypatch):
+        monkeypatch.setenv("ATLAS_SESSION_IDLE_HOURS", "0.25")
+        token = self._session("ended")
+        self._set(token, last_seen_at=self._ago(minutes=30), expires_at=self._ago(minutes=15))
+        monkeypatch.setenv("ATLAS_SESSION_IDLE_HOURS", "12")
+        assert auth.get_session_user(token) is None
+
+    def test_idle_equal_to_the_cap_and_a_missing_last_seen(self, monkeypatch):
+        monkeypatch.setenv("ATLAS_SESSION_IDLE_HOURS", "2")
+        monkeypatch.setenv("ATLAS_SESSION_MAX_HOURS", "2")
+        token = self._session("equal")
+        # An older row without a last-seen time counts from sign-in.
+        self._set(token, created_at=self._ago(hours=1), last_seen_at="", expires_at=auth._expires_iso(hours=1))
+        assert auth.get_session_user(token) is not None
+        self._set(token, created_at=self._ago(hours=2, minutes=1), last_seen_at="",
+                  expires_at=auth._expires_iso(hours=1))
+        assert auth.get_session_user(token) is None
+
     @pytest.mark.parametrize("idle,cap,message", [
         (0, 24, "idle limit"),
         (12, 100000, "absolute limit"),

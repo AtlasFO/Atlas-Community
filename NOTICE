@@ -145,3 +145,16 @@ https://data.iana.org/TLD/tlds-alpha-by-domain.txt (the version line at
 the top of the file records the fetched version). The list is factual
 registry data used to tell a domain name from a dotted file name or a
 newsgroup, and is refreshed from that source.
+
+── Published shared infrastructure (edge ranges and vendor service names) ──
+
+share/.common/shared_infrastructure.json is built by
+devtools/build_shared_infrastructure.py from published sources, recorded
+per source in the file with its URL, fetch time, licence note and entry
+count: the address ranges Cloudflare, Fastly, Amazon CloudFront, GitHub,
+Google and Microsoft 365 publish for their edges and front ends (factual
+network configuration data, no licence stated by the publishers), and the
+Microsoft, Microsoft 365, Google and Apple service host names of the MISP
+warninglists (https://github.com/MISP/misp-warninglists, CC0 1.0). The
+lists mark an address or a name as shared infrastructure, so it is hunted
+rather than blocked; they are refreshed from those sources at each release.

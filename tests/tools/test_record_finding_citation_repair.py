@@ -26,6 +26,15 @@ QUOTED = "Security log query of the window: RemoteHost 203.0.113.9"
 
 
 @pytest.fixture(autouse=True)
+def _repair_is_the_switch_off_remedy(monkeypatch):
+    """With lineage by wiring on, a statement whose rows a call of the trace
+    shows is located at record time, flagged by the absence grammar or not,
+    and needs no re-record; the repair below is the remedy of the switch-off
+    path (and of a statement no row can show)."""
+    monkeypatch.setenv("ATLAS_LINEAGE_WIRING", "0")
+
+
+@pytest.fixture(autouse=True)
 def _no_side_helpers():
     with patch("tools.misc.tool_program",
                side_effect=lambda name, *rest: f"/usr/local/bin/{name}"):
@@ -58,7 +67,7 @@ def _calls(log):
         "<py>:table_table_query", True, False, 0, 0,
         stdout_excerpt=('{"success": true, "path": "analysis/dc_security_4720_4648_4663.csv", '
                         '"matched_rows": 11, "returned_rows": 11, "rows": [{"TimeCreated": '
-                        '"2020-09-19 03:21:48", "EventId": "4648", "RemoteHost": "203.0.113.9"}]}'))
+                        '"2031-03-01 03:21:48", "EventId": "4648", "RemoteHost": "203.0.113.9"}]}'))
     return wrong, right
 
 
@@ -195,3 +204,21 @@ def test_a_value_left_uncited_is_cited_to_the_call_that_holds_it(log, case, monk
     assert first["success"] and "citation_advisory" not in first
     entry = next(e for e in log._entries if e.get("call_id") == first["_atlas_call_id"])
     assert right in entry["input_call_ids"]
+
+
+def test_with_wiring_on_the_mixed_statement_is_shown_by_rows_and_needs_no_repair(log, case, monkeypatch):
+    """Rows first: the statement is flagged by the absence grammar but names
+    an address a row shows, so the call holding it joins the citation at
+    record time, no re-record is advised, and the same words citing that
+    call are a duplicate."""
+    monkeypatch.setenv("ATLAS_LINEAGE_WIRING", "1")
+    monkeypatch.setenv("ATLAS_FINDING_AUTO_EVALUATE", "0")
+    wrong, right = _calls(log)
+    first = _record(log, case, description=ABSENCE, confidence="LIKELY", source="evtx",
+                    linked_call_id=wrong, input_call_ids=[wrong], host="DC01")
+    assert first["success"] and "citation_advisory" not in first
+    finding = [e for e in log._entries if e.get("type") == "finding"][-1]
+    assert right in finding["input_call_ids"] and finding["citation_status"] == "cited"
+    again = _record(log, case, description=ABSENCE, confidence="LIKELY", source="evtx",
+                    linked_call_id=right, input_call_ids=[right], host="DC01")
+    assert again.get("duplicate") is True

@@ -119,8 +119,32 @@ class TestReadOnlyCommandsRun:
 
     def test_guide_setup_describes_todays_setup(self, capsys):
         _, text = _run(capsys, ["guide", "setup"])
-        assert "provider setup" in text and "five model roles" in text
+        assert "provider setup" in text and "five text roles" in text
+        assert "optional vision role" in text
         assert "Claude/Opus" not in text
+
+    def test_skin_listing_names_the_default_a_run_falls_back_to(
+            self, capsys, monkeypatch, tmp_path):
+        """`atlas skin` says which skin a run takes without --skin: the
+        built-in one until a choice is saved, the saved one after."""
+        from agent import tui
+        monkeypatch.delenv("ATLAS_LIVE_SKIN", raising=False)
+        monkeypatch.setattr(tui, "ui_prefs_path", lambda: tmp_path / "ui.json")
+        code, text = _run(capsys, ["skin"])
+        assert code == 0 and "built-in default: atlas" in text
+        code, _ = _run(capsys, ["skin", "radar"])
+        assert code == 0
+        code, text = _run(capsys, ["skin"])
+        assert code == 0
+        assert "active: radar; saved default: radar" in text
+        assert "built-in default" not in text
+        # The environment outranks the saved choice: the listing shows both,
+        # and a save under a differing variable says the save changes no run.
+        monkeypatch.setenv("ATLAS_LIVE_SKIN", "wave")
+        code, text = _run(capsys, ["skin"])
+        assert code == 0 and "active: wave; saved default: radar" in text
+        code, text = _run(capsys, ["skin", "matrix"])
+        assert code == 0 and "ATLAS_LIVE_SKIN=wave" in text
 
 
 class TestVerifyTrace:

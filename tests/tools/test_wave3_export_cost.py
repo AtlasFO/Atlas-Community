@@ -1,4 +1,4 @@
-"""Wave 3: refuse re-export when raw already satisfied; mount_plan lookup."""
+"""Refuse re-export when raw already satisfied; mount_plan lookup."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -103,13 +103,14 @@ def test_the_space_guard_budgets_the_sources_data_where_holes_are_kept(tmp_path:
         "elapsed_seconds": 0.1, "truncated": False, "cmd": "qemu-img",
         "retries": 0, "progress_lines": [],
     }
-    chain = [{"virtual-size": 150 * gib, "actual-size": 60 * gib},
-             {"virtual-size": 150 * gib, "actual-size": 6 * gib}]
+    # The sizes come from the checked chain (core.raw_views.probe): the top
+    # and its base, 66 GB allocated between them.
+    container = {"format": "vmdk", "refused": "", "unsupported": "", "chain": [
+        {"path": desc, "format": "vmdk", "virtual_size": 150 * gib, "actual_size": 60 * gib},
+        {"path": desc, "format": "vmdk", "virtual_size": 150 * gib, "actual_size": 6 * gib}]}
 
     def _run(cmd, **kwargs):
-        if "info" in cmd:
-            assert "--backing-chain" in cmd
-            return {**ok, "stdout": __import__("json").dumps(chain)}
+        assert "info" not in cmd and "--backing-chain" not in cmd
         return dict(ok)
 
     elog = MagicMock()
@@ -119,12 +120,14 @@ def test_the_space_guard_budgets_the_sources_data_where_holes_are_kept(tmp_path:
               patch("core.execution_log.log", elog),
               patch("tools.imaging.run", side_effect=_run),
               patch("tools.imaging.shutil.disk_usage",
-                    return_value=MagicMock(free=100 * gib))]
-    with common[0], common[1], common[2], common[3], \
+                    return_value=MagicMock(free=100 * gib)),
+              patch("core.raw_views.probe", return_value=container),
+              patch("core.diskguard.check", return_value={"required_bytes": 2 * gib})]
+    with common[0], common[1], common[2], common[3], common[4], common[5], \
          patch.object(imaging, "_sparse_files_supported", return_value=True):
         r = fn(desc, str(out))
-    assert r.get("success") is True          # 66 GB allocated + margin < 100 GB
-    with common[0], common[1], common[2], common[3], \
+    assert r.get("success") is True          # 66 GB allocated + margin + 2 GB floor < 100 GB
+    with common[0], common[1], common[2], common[3], common[4], common[5], \
          patch.object(imaging, "_sparse_files_supported", return_value=False):
         r = fn(desc, str(out))
     assert r.get("success") is False and "150.0 GB virtual" in r["error"]

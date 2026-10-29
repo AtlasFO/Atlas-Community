@@ -38,14 +38,11 @@ MANAGED_KEYS = (
     "URLSCAN_API_KEY",
     "MISP_URL",
     "MISP_API_KEY",
-    "LLMHUB_API_KEY",
-    "TSYSTEMS_API_KEY",
 )
 
-# If any of these are already set, keyring is skipped unless ATLAS_USE_KEYRING=1.
+# If any of these, or a key variable an implicit provider profile names
+# (LLMHUB_API_KEY), is already set, keyring is skipped unless ATLAS_USE_KEYRING=1.
 _PRIMARY_LLM_KEYS = (
-    "LLMHUB_API_KEY",
-    "TSYSTEMS_API_KEY",
     "ANTHROPIC_API_KEY",
     "REASON_API_KEY",
 )
@@ -65,7 +62,7 @@ def keyring_lookups_enabled() -> bool:
         return True
     # .env / shell already has a usable LLM credential — do not poke optional
     # keys in the vault (that unlocks GNOME keyring GUI prompts).
-    if any(os.environ.get(k) for k in _PRIMARY_LLM_KEYS):
+    if any(os.environ.get(k) for k in (*_profile_key_vars(), *_PRIMARY_LLM_KEYS)):
         return False
     return True
 
@@ -79,9 +76,19 @@ def managed_keys() -> tuple[str, ...]:
     tree.
     """
     from core import providers
-    extra = tuple(name for name in providers.api_key_env_names()
-                  if name not in MANAGED_KEYS)
-    return MANAGED_KEYS + extra
+    keys = MANAGED_KEYS + tuple(_profile_key_vars())
+    return keys + tuple(name for name in providers.api_key_env_names() if name not in keys)
+
+
+def _profile_key_vars() -> list[str]:
+    """The key variables of the implicit provider profiles (the hub's). A
+    profile that cannot be read is reported where a provider resolves; the
+    keyring fill, which runs while servers start, never stops on it."""
+    try:
+        from core import provider_profiles
+        return provider_profiles.managed_key_vars()
+    except Exception:  # noqa: BLE001
+        return []
 
 
 def _lookup(key: str) -> str | None:
@@ -96,6 +103,24 @@ def _lookup(key: str) -> str | None:
         return None
     value = result.stdout
     return value if value else None
+
+
+def keyring_has(key: str) -> bool:
+    """Whether the OS keyring holds ``key`` (never returns or logs the value).
+    ATLAS_NO_KEYRING keeps the keyring out of this process: False."""
+    if _truthy("ATLAS_NO_KEYRING"):
+        return False
+    return bool(_lookup(key))
+
+
+def keyring_clear(key: str) -> bool:
+    """Remove ``key`` from the OS keyring; whether it is gone afterwards."""
+    try:
+        subprocess.run(["secret-tool", "clear", "service", SECRET_SERVICE, "key", key],
+                       capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return not keyring_has(key)
 
 
 def load_into_environ(keys: tuple[str, ...] | None = None) -> list[str]:

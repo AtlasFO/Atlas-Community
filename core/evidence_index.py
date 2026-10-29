@@ -30,7 +30,7 @@ import re
 import sqlite3
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional
 
 # Per-source ingestion cap. bulk_extractor/strings spills reach hundreds of
@@ -77,6 +77,11 @@ CREATE VIRTUAL TABLE IF NOT EXISTS windows_fts
 
 # ── DB location / connection ────────────────────────────────────────────────
 
+# The index's file under the trace directory; SQLite keeps its journal
+# beside it under the same name plus a suffix (-wal, -shm, -journal).
+INDEX_FILE = "evidence_index.db"
+
+
 def db_path() -> Optional[str]:
     """Index DB path in the active case's analysis/ dir, or None when no
     execution log is configured (no case → nowhere sane to index)."""
@@ -87,7 +92,7 @@ def db_path() -> Optional[str]:
         return None
     if not trace_dir:
         return None
-    path = os.path.join(trace_dir, "evidence_index.db")
+    path = os.path.join(trace_dir, INDEX_FILE)
     from core.paths import assert_output_safe
     assert_output_safe(path)
     return path
@@ -176,10 +181,19 @@ def _sanitize_fts5_query(query: str) -> str:
 
 
 # ── Timestamp reading ───────────────────────────────────────────────────────
-# The index reads three forms, in this order of trust: an ISO-8601 moment, a
-# syslog line (no year, so the caller supplies one), and a US-ordered date as
-# Plaso exports it. Each is a row in one table, read by one loop; the first
-# form found in the window is the window's time.
+# The index reads three forms, in this order of trust: an ISO-8601 moment
+# (converted to UTC when it states an offset), a syslog line (no year, so the
+# caller supplies one), and a US-ordered date as Plaso and US-locale exports
+# write it (one- or two-digit month and day, 24-hour or AM/PM clock); then
+# an ISO moment to the minute and a slashed year-first moment, after the
+# others so a text that one of them reads keeps that reading. Each is a row in
+# one table, read by one loop; the first form found in the window is the
+# window's time.
+
+# The zone a moment written to the minute may carry: "Z" or a "+" offset
+# within +14:00 (a "-" after a minute begins a span's end). Shared with
+# core.incident_window's statement reader.
+MINUTE_ZONE = r"(Z|\+(?:0\d|1[0-4]):?[0-5]\d(?![:\d]))?"
 
 _MONTHS = {m: i for i, m in enumerate(
     ("Jan", "Feb", "Mar", "Apr", "May", "Jun",
@@ -187,26 +201,128 @@ _MONTHS = {m: i for i, m in enumerate(
 
 
 def _read_iso(m: re.Match, _year: Optional[int]) -> datetime:
-    return datetime.fromisoformat(m.group(0))
+    """The moment as written, or converted to UTC when the text states an
+    offset ("Z", "+02:00", "-0500"); a time without an offset stays as
+    written, since its zone is unknown. Sub-second digits are dropped."""
+    moment = datetime.fromisoformat(m.group(1).replace("/", "-"))
+    zone = m.group(2)
+    if not zone:
+        return moment
+    if zone.upper() != "Z":
+        sign = -1 if zone[0] == "-" else 1
+        digits = zone[1:].replace(":", "")
+        moment -= sign * timedelta(hours=int(digits[:2]), minutes=int(digits[2:]))
+    return moment
 
 
-def _read_syslog(m: re.Match, year: Optional[int]) -> datetime:
+def _read_syslog(m: re.Match, year) -> datetime:
+    """A month-day-clock form names no year: with none known it is no
+    moment (ValueError, skipped), never one in the year the run happens to
+    be in. ``year`` is the evidence file's modification date (evidence_date)
+    or a year the text states (year_hint), as index_output passes it. A log
+    never carries a time after its file's last write: a month-day that
+    falls after the modification date's month-day belongs to the year
+    before (a December log read in January included). Ceilings: an evidence
+    file staged without its own mtime carries the staging date, and the
+    staging year wins where the text states none; an evidence image's mtime
+    is its acquisition date, later than the log lines inside it, so a log
+    older than a year inside an image takes the image's year (its
+    acquisition, never the run's year)."""
     month, day, hour, minute, second = m.groups()
-    return datetime(year=year or datetime.now(timezone.utc).year,
-                    month=_MONTHS[month], day=int(day), hour=int(hour),
+    if not year:
+        raise ValueError("a yearless form is no moment")
+    if isinstance(year, date):
+        y = year.year - (1 if (_MONTHS[month], int(day)) > (year.month, year.day) else 0)
+    else:
+        y = int(year)
+    return datetime(year=y, month=_MONTHS[month], day=int(day), hour=int(hour),
                     minute=int(minute), second=int(second))
 
 
+# A full-dated form in a text: the year the yearless forms in the same text
+# belong to, when the text states exactly one. An FTP listing writes the
+# age-old rows with a year beside the recent ones with a clock; a tool
+# banner's ctime form ("Tue Jun 03 08:41:19 2031") is not a dated record and
+# names no year for the records; a text that states two years (a
+# certificate's validity beside a listing) names none.
+_YEAR_HINT_RE = re.compile(
+    r"(?<!\d)(?P<iso>\d{4})-\d{2}-\d{2}(?!\d)"
+    r"|(?<![\d/])(?P<yf>\d{4})/\d{2}/\d{2}(?![\d/])"
+    r"|(?<!\d)\d{1,2}/\d{1,2}/(?P<us>\d{4})(?!\d)"
+    r"|\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\s+(?P<md>\d{4})\b")
+
+
+def year_hint(text: str) -> Optional[int]:
+    """The one year the full-dated forms of ``text`` state, or None when
+    they state none or more than one."""
+    years = {int(next(v for v in m.groups() if v)) for m in _YEAR_HINT_RE.finditer(text or "")}
+    years = {y for y in years if 1970 <= y <= 2100}
+    return years.pop() if len(years) == 1 else None
+
+
+def evidence_date(tokens) -> Optional[date]:
+    """The newest modification date among the evidence files ``tokens`` name
+    (paths under the case's evidence/ or mnt/ that exist), or None. An
+    export carries the run's date and says nothing; the evidence file keeps
+    the date it was acquired with (see _read_syslog for the staged copy)."""
+    path = db_path()
+    if not path:
+        return None
+    root = os.path.dirname(os.path.dirname(path))
+    roots = [os.path.join(root, "evidence"), os.path.join(root, "mnt")]
+    roots += [os.path.realpath(r) for r in list(roots)]
+    best: Optional[date] = None
+    for tok in tokens or ():
+        tok = str(tok or "").strip().strip("'\"")
+        if not tok:
+            continue
+        absolute = os.path.normpath(tok if os.path.isabs(tok) else os.path.join(root, tok))
+        forms = (absolute, os.path.realpath(absolute))
+        if not any(f == r or f.startswith(r.rstrip(os.sep) + os.sep) for f in forms for r in roots):
+            continue
+        try:
+            when = datetime.fromtimestamp(os.stat(absolute).st_mtime, timezone.utc).date()
+        except OSError:
+            continue
+        best = when if best is None or when > best else best
+    return best
+
+
 def _read_us_ordered(m: re.Match, _year: Optional[int]) -> datetime:
-    month, day, year, hour, minute, second = (int(g) for g in m.groups())
+    """Month first, as Plaso and US-locale exports write it; a 12-hour clock
+    ("10:16:00 PM", Windows Event Viewer and many SIEM exports) is read
+    into 24 hours. Ceiling: a day-first date (DD/MM/YYYY) reads as month
+    first, or is skipped when its day exceeds 12."""
+    month, day, year, hour, minute, second = (int(g) for g in m.groups()[:6])
+    marker = (m.group(7) or "").upper()
+    if marker:
+        if not 1 <= hour <= 12:
+            raise ValueError("a 12-hour clock reads 1 to 12")
+        hour = hour % 12 + (12 if marker == "PM" else 0)
     return datetime(year, month, day, hour, minute, second)
 
 
+# The ISO offset follows the entity extractor's rule: within +-14:00 and
+# never followed by ":" or a digit, so a seconds range ("10:16:00-10:48:00")
+# is not read as a moment with an offset.
 _TIME_FORMS = (
-    (re.compile(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}"), _read_iso),
+    (re.compile(r"(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2})(?:\.\d+)?"
+                r"(Z|[+-](?:0\d|1[0-4]):?[0-5]\d(?![:\d]))?"), _read_iso),
     (re.compile(r"(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)"
                 r"\s+(\d{1,2})\s+(\d{2}):(\d{2}):(\d{2})"), _read_syslog),
-    (re.compile(r"(\d{2})/(\d{2})/(\d{4})\s+(\d{2}):(\d{2}):(\d{2})"), _read_us_ordered),
+    (re.compile(r"(?<!\d)(\d{1,2})/(\d{1,2})/(\d{4})\s+(\d{1,2}):(\d{2}):(\d{2})"
+                r"(?:\s?([AaPp][Mm])\b)?"), _read_us_ordered),
+    # An ISO moment to the minute ("2031-03-10 14:02", "...T14:02Z"), as
+    # people and many reports write it; last, so a text with a moment to the
+    # second keeps its second reading. After a minute only "Z" or a "+" offset is a
+    # zone: "09:00-10:30" is a span whose end is not read, never a negative
+    # offset (logs that carry zones write seconds).
+    (re.compile(r"(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2})(?![:\d])" + MINUTE_ZONE), _read_iso),
+    # Year first with slashes, as vendor and appliance logs write it: year
+    # first leaves no day-month doubt. Same zone rules as the ISO forms.
+    (re.compile(r"(?<![\d/])(\d{4}/\d{2}/\d{2}[T ]\d{2}:\d{2}:\d{2})(?:\.\d+)?"
+                r"(Z|[+-](?:0\d|1[0-4]):?[0-5]\d(?![:\d]))?"), _read_iso),
+    (re.compile(r"(?<![\d/])(\d{4}/\d{2}/\d{2}[T ]\d{2}:\d{2})(?![:\d])" + MINUTE_ZONE), _read_iso),
 )
 
 
@@ -237,8 +353,15 @@ def _parse_timestamp(text: str,
 # ── Ingestion ────────────────────────────────────────────────────────────────
 
 def index_output(call_id: int, tool: str, text: str,
-                 source_path: str = "") -> dict:
+                 source_path: str = "", reference_year=None) -> dict:
     """Chunk `text` into windows and index it under the given call_id.
+
+    A window's event_time is the first moment its text states. A form that
+    names no year (syslog, an FTP listing's recent rows) takes
+    ``reference_year`` first (the caller's evidence_date of the files the
+    call read, with the year-before rule of _read_syslog), else the one year
+    the whole text states (year_hint), else no time at all; never the year
+    the run happens in.
 
     Returns a summary dict; raises on DB errors (callers hook this in
     best-effort try/except — indexing must never fail a tool call).
@@ -252,6 +375,7 @@ def index_output(call_id: int, tool: str, text: str,
     truncated = len(text) > MAX_INDEXED_BYTES
     if truncated:
         text = text[:MAX_INDEXED_BYTES]
+    year = reference_year or year_hint(text)
 
     line_count = text.count("\n") + 1
     source_hash = ("blake2b:" + hashlib.blake2b(
@@ -277,7 +401,7 @@ def index_output(call_id: int, tool: str, text: str,
                 if chunk.strip():
                     batch.append((source_id, lines_before + 1,
                                   lines_before + lines_in_chunk + 1,
-                                  _parse_timestamp(chunk), chunk))
+                                  _parse_timestamp(chunk, year), chunk))
                 lines_before += lines_in_chunk
                 if len(batch) >= _INSERT_BATCH_SIZE:
                     _insert_windows(conn, batch)
@@ -347,7 +471,8 @@ def search(query: str, tool: Optional[str] = None,
         sql += " AND w.event_time <= ?"
         params.append(time_end)
     sql += " ORDER BY rank LIMIT ?"
-    params.append(max(1, min(int(max_results), 500)))
+    limit = max(1, min(int(max_results), 500))
+    params.append(limit)
 
     conn = _connect(path)
     try:
@@ -362,8 +487,10 @@ def search(query: str, tool: Optional[str] = None,
     results = [{"call_id": r[0], "tool": r[1], "source_path": r[2],
                 "line_start": r[3], "line_end": r[4], "event_time": r[5],
                 "snippet": r[6]} for r in rows]
+    # A result that fills the limit may have more matches behind it: say so,
+    # so no reader takes the rows for all there are.
     return {"success": True, "query": sanitized, "results": results,
-            "result_count": len(results)}
+            "result_count": len(results), "hit_cap_reached": len(results) >= limit}
 
 
 def find_in_calls(query: str, call_ids: list[int], *, limit: int = 50) -> list[tuple[int, str]]:
@@ -397,6 +524,23 @@ def find_in_calls(query: str, call_ids: list[int], *, limit: int = 50) -> list[t
                 "ORDER BY window_id LIMIT 1", (source_id, window_id)).fetchone()
             out.append((int(call_id), (text or "") + (nxt[0] if nxt and nxt[0] else "")))
         return out
+    finally:
+        conn.close()
+
+
+def indexed_call_ids() -> set[int]:
+    """The call ids whose output the index holds (whole or cut at
+    MAX_INDEXED_BYTES), so a reader knows which spills it must scan itself."""
+    path = db_path()
+    if path is None or not os.path.exists(path):
+        return set()
+    conn = _connect(path)
+    try:
+        try:
+            rows = conn.execute("SELECT DISTINCT call_id FROM sources").fetchall()
+        except sqlite3.OperationalError:
+            return set()
+        return {int(r[0]) for r in rows if r[0] is not None}
     finally:
         conn.close()
 

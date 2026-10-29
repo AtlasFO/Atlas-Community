@@ -89,12 +89,34 @@ def _umount_once(mp: str, lazy: bool, proc_mounts: str | None) -> tuple:
         return gone, f"umount ran unlogged (no trace configured): {e}"
 
 
-def unmount_all_under(path: str, proc_mounts: str | None = None) -> dict:
+def _own_fuse_mounts(proc_mounts: str | None = None) -> set[str]:
+    """Mountpoints of FUSE mounts this user serves (a raw view among them):
+    their owner unmounts them with fusermount3, no root needed."""
+    uid = f"user_id={os.getuid()}"
+    out: set[str] = set()
+    try:
+        with open(proc_mounts or _PROC_MOUNTS, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                parts = line.split(" ")
+                if len(parts) >= 4 and parts[2].startswith("fuse") and uid in parts[3].split(","):
+                    out.add(_unescape_mountpoint(parts[1]))
+    except OSError:
+        pass
+    return out
+
+
+def unmount_all_under(path: str, proc_mounts: str | None = None,
+                      spare: set[str] | frozenset[str] = frozenset()) -> dict:
     """Unmount every filesystem at or under ``path``, innermost-first.
 
-    Tries a normal ``umount`` first, then ``umount -l`` (lazy) for busy mounts.
-    Re-scans /proc/mounts afterwards so ``remaining`` reflects reality rather
-    than the sum of per-call exit codes.
+    The daemons of the raw views under ``path`` are stopped first (each
+    unmounts its view; one whose view was unmounted from outside still runs
+    and holds its evidence open, so they are found by command line, not by
+    the mount table). A FUSE mount of this user is unmounted with fusermount3,
+    any other with ``umount``, then ``umount -l`` (lazy) for busy mounts.
+    ``spare``: paths a running background job reads; the mount holding one
+    stays. Re-scans /proc/mounts afterwards so ``remaining`` reflects reality
+    rather than the sum of per-call exit codes.
 
     Returns::
 
@@ -104,7 +126,24 @@ def unmount_all_under(path: str, proc_mounts: str | None = None) -> dict:
     """
     unmounted: list[str] = []
     failed: list[dict] = []
+    # The kernel's spelling, without a stat of the last part (a stale FUSE
+    # file answers every stat with an error).
+    kept = {os.path.join(os.path.realpath(os.path.dirname(os.path.abspath(str(s)))),
+                         os.path.basename(str(s))) for s in spare}
+    try:
+        from core.raw_views import stop_under
+        stop_under(path, spare=kept)
+    except Exception:  # noqa: BLE001 - the mounts below are still taken down
+        pass
+    own_fuse = _own_fuse_mounts(proc_mounts)
     for mp in find_mounts_under(path, proc_mounts):
+        if any(k == mp or k.startswith(mp.rstrip("/") + "/") for k in kept):
+            continue
+        if mp in own_fuse:
+            from core.raw_views import fuse_unmount
+            if fuse_unmount(mp) or mp not in find_mounts_under(mp, proc_mounts):
+                unmounted.append(mp)
+                continue
         ok, err = _umount_once(mp, lazy=False, proc_mounts=proc_mounts)
         if not ok:
             ok, err = _umount_once(mp, lazy=True, proc_mounts=proc_mounts)

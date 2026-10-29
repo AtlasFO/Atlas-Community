@@ -197,3 +197,93 @@ def is_protocol_block_message(text: str) -> bool:
         "already produced artifact",
     )
     return any(n in text for n in needles)
+
+
+# ── call-time switches of the work order ────────────────────────────────────
+
+def work_order_on() -> bool:
+    """ATLAS_WORK_ORDER: the item store, the closing rule, the per-turn
+    presentation, the director on events, the report ladder keyed on items."""
+    from core.envfile import env_flag
+    return env_flag("ATLAS_WORK_ORDER")
+
+
+def work_order_plan_on() -> bool:
+    from core.envfile import env_flag
+    return work_order_on() and env_flag("ATLAS_WORK_ORDER_PLAN")
+
+
+def work_order_sources_on() -> bool:
+    from core.envfile import env_flag
+    return work_order_on() and env_flag("ATLAS_WORK_ORDER_SOURCES")
+
+
+def estate_count_on() -> bool:
+    from core.envfile import env_flag
+    return env_flag("ATLAS_ESTATE_COUNT")
+
+
+def dair_principal_unseen_on() -> bool:
+    """ATLAS_DAIR_PRINCIPAL_UNSEEN: a principal candidate is any
+    account-shaped token the director's tool summary holds that the case
+    does not know yet (cue "unseen"), the rule the host candidates follow;
+    no logon or creation vocabulary decides it. Effective only while the
+    scenario report checks are off: their reader needs the cue tiers."""
+    from core.envfile import env_flag
+    return env_flag("ATLAS_DAIR_PRINCIPAL_UNSEEN", True) and report_check_no_scenario_on()
+
+
+def incomplete_read_debt_on() -> bool:
+    """ATLAS_INCOMPLETE_READ_DEBT: a read cut by a time bound is the
+    finish debt, whatever its topic (the investigate latch's incomplete_scan
+    issue, an executor time cut included); the topic-keyed critical-scan
+    debt no longer blocks the report or finish."""
+    from core.envfile import env_flag
+    return env_flag("ATLAS_INCOMPLETE_READ_DEBT", True)
+
+
+def estate_count_async_on() -> bool:
+    """The estate count reads its tables beside the analyst's turns, not
+    before them (ATLAS_ESTATE_COUNT_ASYNC); its lines join the block that
+    follows the pass."""
+    from core.envfile import env_flag
+    return env_flag("ATLAS_ESTATE_COUNT_ASYNC", True)
+
+
+def coverage_honesty_on() -> bool:
+    """ATLAS_COVERAGE_HONESTY, default: the value of ATLAS_WORK_ORDER."""
+    from core.envfile import env_flag
+    return env_flag("ATLAS_COVERAGE_HONESTY", default=work_order_on())
+
+
+def director_review_on() -> bool:
+    """ATLAS_DIRECTOR_REVIEW (inert without ATLAS_WORK_ORDER): the director
+    reviews the work order (QUESTIONS and WORK ORDER blocks in, work_items
+    and item dispositions out) instead of planning batches."""
+    from core.envfile import env_flag
+    return work_order_on() and env_flag("ATLAS_DIRECTOR_REVIEW")
+
+
+def dair_no_defer_on() -> bool:
+    """ATLAS_DAIR_NO_DEFER, default: the value of ATLAS_WORK_ORDER."""
+    from core.envfile import env_flag
+    return env_flag("ATLAS_DAIR_NO_DEFER", default=work_order_on())
+
+
+def report_check_no_scenario_on() -> bool:
+    """ATLAS_REPORT_CHECK_NO_SCENARIO: the scenario-shaped report
+    checks off; inert without the work order, which carries their reads."""
+    from core.envfile import env_flag
+    if not (work_order_on() and env_flag("ATLAS_REPORT_CHECK_NO_SCENARIO")):
+        return False
+    # Check 5's second-principal exclusion goes only where the evaluation of
+    # LIKELY attribution verdicts replaces it (ATLAS_EXTERNAL_LOOKUP_FIRST).
+    from core.attribution_identity import likely_attribution_evaluation_on
+    return likely_attribution_evaluation_on()
+
+
+def blocker_items_on() -> bool:
+    """ATLAS_BLOCKER_ITEMS: reviewer blockers as proposed work
+    items, the UNRESOLVABLE hatch off; inert without the work order."""
+    from core.envfile import env_flag
+    return work_order_on() and env_flag("ATLAS_BLOCKER_ITEMS")

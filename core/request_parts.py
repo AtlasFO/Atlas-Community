@@ -174,8 +174,13 @@ def _default_type(request_text: str) -> str:
             "enumeration": "list"}.get(question_kind(request_text), "name")
 
 
-def split_request(text: str, children: list[str] | None = None) -> list[dict[str, Any]]:
-    """The deterministic split of a request into parts."""
+def split_request(text: str, children: list[str] | None = None,
+                  whole: bool = False) -> list[dict[str, Any]]:
+    """The deterministic split of a request into parts. ``whole``: one
+    narrative part, the request's own text, answered by a belief that speaks
+    to it (a brief's main question beside the requests that spell it out)."""
+    if whole:
+        return [_part("p1", str(text or "").strip(), "narrative", "value", "default")]
     from core.answer_synthesis import is_general_question, request_body
     body = request_body(text)
     items = [c for c in (children or []) if c] or top_level_items(body) or [body]
@@ -206,26 +211,34 @@ def _part(pid: str, text: str, type_: str, kind: str, typed_by: str = "table") -
 
 
 def ensure_parts(task: dict[str, Any], children: list[str] | None = None,
-                 *, source: str = "deterministic") -> bool:
+                 *, source: str = "deterministic", whole: bool = False) -> bool:
     """Give ``task`` its parts when it has none, or re-split it when its
-    text changed; parts whose text is unchanged keep their status. Returns
-    True when the task changed."""
+    text changed, or when a deterministic split is to become ``whole`` or
+    stop being so (a brief gained or lost its requests); parts whose text is
+    unchanged keep their status. Returns True when the task changed."""
     text = str(task.get("text") or "")
     have = task.get("parts") or []
     stamp = task.get("parts_for") or ""
-    if have and stamp == _norm(text):
+    if have and stamp == _norm(text) and (
+            task.get("parts_source", "deterministic") != "deterministic"
+            or bool(task.get("parts_whole")) == whole):
         return False
-    fresh = split_request(text, children)
+    fresh = split_request(text, children, whole)
     old_by_text = {_norm(p.get("text")): p for p in have if isinstance(p, dict)}
     for p in fresh:
         old = old_by_text.get(_norm(p["text"]))
         if old:
-            for k in ("status", "claim_ids", "value", "limitation"):
-                p[k] = old.get(k, p[k])
+            for k in ("status", "claim_ids", "value", "limitation", "closed_by"):
+                if k in old:
+                    p[k] = old[k]
     task["parts"] = fresh
     task["parts_for"] = _norm(text)
     task["parts_source"] = source
     task["parts_version"] = SPLIT_VERSION
+    if whole:
+        task["parts_whole"] = True
+    else:
+        task.pop("parts_whole", None)
     return True
 
 
@@ -285,9 +298,15 @@ _PRESENCE_VERB_RE = re.compile(
 
 def part_words(part_text: str) -> set[str]:
     """What a part asks about: its qualifier (core.answer_values), presence
-    and linking verbs set aside."""
-    from core.answer_values import qualifier
-    return {w for w in qualifier(part_text) if not _PRESENCE_VERB_RE.match(w)}
+    and linking verbs set aside. When the qualifier's core held nothing but
+    such a verb ("Which accounts were used for lateral movement"), the
+    tail is what tells the part from its siblings: the part's words less
+    kind words and presence verbs."""
+    from core.answer_values import _KIND_WORDS, _tokens, qualifier
+    words = {w for w in qualifier(part_text) if not _PRESENCE_VERB_RE.match(w)}
+    if words:
+        return words
+    return {w for w in _tokens(part_text) if w not in _KIND_WORDS and not _PRESENCE_VERB_RE.match(w)}
 
 
 # A presence question can name a class of thing where a belief names a
@@ -376,22 +395,44 @@ def _answers_yes_no(part_text: str, request_text: str, node: dict[str, Any], *, 
 # name. A belief it reads no such value in states none, so the analyst's
 # link alone does not answer such a part. The other kinds keep the link:
 # a name, an account, a path, a date or a count has phrasings no pattern
-# reads ("the morning of the fifth", "a dozen").
+# reads ("the morning of the fifth", "a dozen"), beside the part's words. A
+# bare question word typed by itself ("when", "who") has no words to stand
+# beside its value: like these kinds, it needs the value read.
 STRICT_VALUE_TYPES = frozenset({"ip", "mac", "email", "hash", "domain"})
 
 
-def _clause_answers(part_text: str, node: dict[str, Any], refuse: tuple[str, ...]) -> bool:
+def _needs_read_value(part: dict[str, Any]) -> bool:
+    """A strict kind, or a part with no words of its own that its question
+    word typed: the analyst's link answers it only through a value read."""
+    return (str(part.get("type") or "") in STRICT_VALUE_TYPES
+            or (part.get("typed_by") == "question" and not part_words(str(part.get("text") or ""))))
+
+
+def _clause_answers(part_text: str, node: dict[str, Any], refuse: tuple[str, ...],
+                    request_text: str = "") -> bool:
     """A clause of the belief carries the part's words, in a statement whose
     kind is not in ``refuse``. The statement is the clause up to the next
     semicolon or sentence end, a "label: facts" pair read as one: a belief
     that walks through several parts is judged part by part, not by its
-    lead."""
-    from core.answer_synthesis import classify_statement
+    lead. A part with no words of its own ("why", "for each") is judged
+    against the request's whole text instead, its label included: for a
+    request that is a bare list, the label is its only subject."""
+    from core.answer_synthesis import classify_statement, speaks_to
     from core.answer_values import clauses
+    if part_words(part_text):
+        def says(clause: str) -> bool:
+            return carries_part(part_text, clause)
+    elif request_text:
+        host = str(node.get("host") or "")
+
+        def says(clause: str) -> bool:
+            return speaks_to(request_text, clause, host, strict=True)
+    else:
+        return False
     stmt = " ".join(str(node.get("statement") or "").split())
     pieces = clauses(stmt)
     for i, (clause, off) in enumerate(pieces):
-        if not carries_part(part_text, clause):
+        if not says(clause):
             continue
         j = i
         while j + 1 < len(pieces) and ":" in stmt[pieces[j][1] + len(pieces[j][0]):pieces[j + 1][1]]:
@@ -401,13 +442,14 @@ def _clause_answers(part_text: str, node: dict[str, Any], refuse: tuple[str, ...
     return False
 
 
-def _speaks_to_value_part(part_text: str, node: dict[str, Any]) -> bool:
+def _speaks_to_value_part(part_text: str, node: dict[str, Any], request_text: str = "") -> bool:
     """An analyst-named belief answers a value part whose value the binder
-    cannot read when a clause carries the part's words in a statement that is
-    neither a gap nor an absence: an absence cannot supply a value; it is a
-    limitation, not an answer."""
+    cannot read when a clause carries the part's words (the request's, for a
+    part with none of its own) in a statement that is neither a gap nor an
+    absence: an absence cannot supply a value; it is a limitation, not an
+    answer."""
     from core.answer_synthesis import ABSENCE, GAP
-    return _clause_answers(part_text, node, (GAP, ABSENCE))
+    return _clause_answers(part_text, node, (GAP, ABSENCE), request_text)
 
 
 def _yes_no_answers(part_text: str, request_text: str, node: dict[str, Any]) -> bool:
@@ -552,7 +594,9 @@ def assign(task: dict[str, Any], nodes: dict[str, dict], claim_ids: Iterable[str
                     hit = next((n for n in lexical if _yes_no_answers(str(part.get("text")), req, n)), None)
                     if hit:
                         _answer(part, hit, ""); done.append(pid)
-                    elif named and own:
+                        if not own:
+                            part["bound_by"] = "analyst"     # read against the request
+                    elif named and (own or req):
                         # A belief the analyst named for the part answers it
                         # through any clause that carries the part's words (a
                         # belief that walks through several parts names each
@@ -562,7 +606,8 @@ def assign(task: dict[str, Any], nodes: dict[str, dict], claim_ids: Iterable[str
                         # was found" is what the analyst determined. Marked,
                         # so the report and a successor keep the link.
                         from core.answer_synthesis import GAP
-                        hit = next((n for n in lexical if _clause_answers(str(part.get("text")), n, (GAP,))), None)
+                        hit = next((n for n in lexical
+                                    if _clause_answers(str(part.get("text")), n, (GAP,), req)), None)
                         if hit:
                             _answer(part, hit, "")
                             part["bound_by"] = "analyst"
@@ -579,9 +624,10 @@ def assign(task: dict[str, Any], nodes: dict[str, dict], claim_ids: Iterable[str
                 # belief carries what the part asks about. It is marked, so
                 # the report and the reviewer see an answer taken on the
                 # analyst's link rather than on a read value.
-                hit = None if typ in STRICT_VALUE_TYPES else next(
+                req = "" if kind == "standard" else request_text
+                hit = None if _needs_read_value(part) else next(
                     (n for n in named if str(n.get("kind") or "") != "observation"
-                     and _speaks_to_value_part(str(part.get("text")), n)), None)
+                     and _speaks_to_value_part(str(part.get("text")), n, req)), None)
                 if hit:
                     _answer(part, hit, "")
                     part["bound_by"] = "analyst"
@@ -604,6 +650,7 @@ def settle_umbrella(task: dict[str, Any]) -> bool:
         # A sub-question reopened: the umbrella is open again.
         if umbrella.get("status") != "open":
             umbrella["status"] = "open"; umbrella["claim_ids"] = []; umbrella["value"] = ""; umbrella["limitation"] = {}
+            umbrella.pop("closed_by", None)
             return True
         return False
     if any(p.get("status") == "answered" for p in standard):
@@ -625,6 +672,7 @@ def _answer(part: dict[str, Any], node: dict[str, Any], value: str) -> None:
     part["value"] = value if str(part.get("type")) in STRONG_TYPES else ""
     part["limitation"] = {}
     part.pop("bound_by", None)
+    part.pop("closed_by", None)
 
 
 def clear_gone(task: dict[str, Any], nodes: dict[str, dict]) -> list[str]:
@@ -651,11 +699,16 @@ def carry(task: dict[str, Any], old_id: str, new_id: str, nodes: dict[str, dict]
         if not isinstance(part, dict) or old_id not in (part.get("claim_ids") or []):
             continue
         linked = part.get("kind") == "relation" or part.get("bound_by") == "analyst"
+        closed_by_analyst = part.get("closed_by") == "analyst"
         part["status"] = "open"; part["claim_ids"] = []; part["value"] = ""
         part.pop("bound_by", None)
+        part.pop("closed_by", None)
         # A part the analyst's link answered stays linked to the successor.
         assign(task, nodes, [new_id], known_hosts=known_hosts, lenient=True,
                explicit={str(part.get("id")): [new_id]} if linked else None)
+        if closed_by_analyst and part.get("status") == "answered":
+            # The analyst closed the part by the belief this one replaces.
+            part["closed_by"] = "analyst"
         changed.append(str(part.get("id")))
     return changed
 
@@ -666,6 +719,8 @@ def limit(part: dict[str, Any], basis: str, reason: str, call_ids: Iterable[int]
     part["value"] = ""
     part["limitation"] = {"basis": basis, "reason": str(reason or "").strip(),
                           "call_ids": [int(c) for c in call_ids if str(c).strip().isdigit()]}
+    part.pop("bound_by", None)
+    part.pop("closed_by", None)
 
 
 def summary_lines(task: dict[str, Any]) -> list[str]:
@@ -791,8 +846,9 @@ def ensure_standard_parts(task: dict[str, Any], hosts: Iterable[str]) -> bool:
     for p in fresh:
         o = old_by_text.get(_norm(p["text"]))
         if o:
-            for k in ("status", "claim_ids", "value", "limitation"):
-                p[k] = o.get(k, p[k])
+            for k in ("status", "claim_ids", "value", "limitation", "closed_by"):
+                if k in o:
+                    p[k] = o[k]
     task["parts"] = [p for p in parts if p.get("kind") == "standard"] + fresh
     return True
 

@@ -61,6 +61,58 @@ def is_bulk_parse_tool(tool_name: str) -> bool:
     return bool(_BULK_PARSE_RE.search(tool_name or ""))
 
 
+# The repeat gate's key (ATLAS_REPEAT_KEY_PATHS): every argument except
+# those that cannot change a finished result: a time budget always, and how
+# many rows a call shows when it writes its whole output to a file.
+_BUDGET_ARGS = frozenset({"timeout", "timeout_per_file", "wall_clock_budget_s"})
+_SIZE_ARGS = frozenset({"max_records", "max_results", "max_hits", "top_n"})
+_OUTPUT_ARGS = ("output_path", "output_dir", "output_csv", "output_file", "output_json")
+
+
+# The tools the new key applies to (a staged rollout): the event-log
+# dump and filter, the calls the per-call deadline cuts and resumes. Every
+# other bulk tool keeps the full-argument key until a run shows the new one
+# works; extend this set then.
+REPEAT_KEY_TOOLS = ("evtx_dump", "evtx_filter")
+
+
+def _uses_repeat_key(tool: str) -> bool:
+    name = str(tool or "").replace(".", "_")
+    return any(name == t or name.endswith("_" + t) for t in REPEAT_KEY_TOOLS)
+
+
+def repeat_key_on() -> bool:
+    from core.envfile import env_flag
+    return env_flag("ATLAS_REPEAT_KEY_PATHS", True)
+
+
+def repeat_fingerprint(tool: str, args: dict | None, case_dir: str | None = None) -> str:
+    """The bulk repeat gate's key for a call: for the tools of
+    REPEAT_KEY_TOOLS what it reads, narrows to and writes, not its time
+    budget or (for a call writing a file) its display size; for every other
+    tool, and with the switch off, core.deferred_intents.args_fingerprint."""
+    from core.deferred_intents import args_fingerprint
+    if not repeat_key_on() or not _uses_repeat_key(tool):
+        return args_fingerprint(tool, args, case_dir)
+    import hashlib
+    import json
+    if case_dir is None:
+        try:
+            from core.execution_log import log as _elog
+            case_dir = _elog.case_dir()
+        except Exception:  # noqa: BLE001
+            case_dir = None
+    args = dict(args or {})
+    writes = any(args.get(o) for o in _OUTPUT_ARGS)
+    subset = {k: v for k, v in args.items()
+              if not k.startswith("_") and v is not None and v != "" and k not in _BUDGET_ARGS
+              and not (writes and k in _SIZE_ARGS)}
+    from core.call_memo import canonical_args
+    canon, _paths = canonical_args(subset, case_dir)
+    blob = json.dumps({"tool": tool, "args": canon}, sort_keys=True, default=str, ensure_ascii=False)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+
 def _has_narrowing(args: dict) -> bool:
     for k in _NARROWING_ARGS:
         v = args.get(k)
@@ -119,10 +171,25 @@ def affinity_score(path: str, focus_text: str) -> float:
     return _affinity_score(path, focus_text)
 
 
+def shard_order_neutral_on() -> bool:
+    """ATLAS_SHARD_ORDER_NEUTRAL: a path ranks by the words of the
+    model's own focus text it holds, then by name; no word list maps a
+    question to a log, and no log is preferred or penalised by its name."""
+    from core.envfile import env_flag
+    return env_flag("ATLAS_SHARD_ORDER_NEUTRAL", True)
+
+
 def _affinity_score(path: str, focus_text: str) -> float:
     text = (focus_text or "").casefold()
     name = path.replace("\\", "/").casefold()
     score = 0.0
+    if shard_order_neutral_on():
+        base = Path(path).stem.casefold()
+        # Every occurrence counts, as the focus text repeats what it is about.
+        for tok in re.findall(r"[a-z0-9]{4,}", text):
+            if tok in base or tok in name:
+                score += 1.5
+        return score
     if not text:
         base = Path(path).name.casefold()
         if base == "security.evtx":
@@ -188,7 +255,10 @@ def rank_shards(
         except OSError:
             size = 0
         scored.append((_affinity_score(str(p), focus_text), p, size))
-    scored.sort(key=lambda t: (-t[0], t[2], t[1].name.lower()))
+    if shard_order_neutral_on():
+        scored.sort(key=lambda t: (-t[0], t[1].name.lower()))
+    else:
+        scored.sort(key=lambda t: (-t[0], t[2], t[1].name.lower()))
     out: list[dict[str, Any]] = []
     for aff, p, size in scored[:cap]:
         out.append({
@@ -197,6 +267,19 @@ def rank_shards(
             "affinity": round(aff, 2),
             "est_tokens": estimate_path_cost_tokens(str(p)),
         })
+    return out
+
+
+def _shards_more(path: str, total: int, shown: int) -> dict[str, Any]:
+    """The total of a directory's files a ranked slice comes from and, past
+    the slice, the listing that pages through the rest, so the cut hides
+    nothing (ATLAS_SHARD_ORDER_NEUTRAL)."""
+    if not shard_order_neutral_on():
+        return {}
+    out: dict[str, Any] = {"shards_total": total}
+    if total > shown:
+        out["shards_more"] = (f"+{total - shown} more files: misc.list_evidence_dir(path={path!r}, "
+                              f"offset=0) lists every one by name")
     return out
 
 
@@ -326,10 +409,12 @@ def check(
                         + (f" Highest-value files: {' | '.join(top_paths)}"
                            if top_paths else "")
                     )
+                more = _shards_more(path, len(kids), len(shards))
                 return {
                     "success": False,
                     "gate": "input_scale",
                     "error": err,
+                    **more,
                     "hint": (
                         "Disk-first: parse the highest-affinity single file "
                         "(stdout will be compacted to artifact_ready + "
@@ -349,9 +434,11 @@ def check(
                 example = dict(args)
                 if shards:
                     example[key] = shards[0]["path"]
+                more = _shards_more(path, len(kids), len(shards))
                 return {
                     "success": False,
                     "gate": "context_budget",
+                    **more,
                     "error": (
                         f"{tool_name} refused: estimated dump "
                         f"~{est} tokens exceeds remaining tool-output budget "

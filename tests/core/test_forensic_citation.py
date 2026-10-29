@@ -110,3 +110,48 @@ class TestRenderCitations:
         out = fc.render_citations([{"text": "x", "source": "a.log",
                                     "call_id": 9}])
         assert "call_id=9" in out
+
+
+class TestRecordHost:
+    """The host of a record is the record's, in one rule for the bullets
+    and the timeline: its source path's host first, then a host-shaped
+    host field, then the one case host its text names."""
+
+    def test_the_source_paths_host_wins_in_either_host_order(self):
+        ev = {"text": "An account was successfully logged on from CORP-WS01. Account: jane.doe",
+              "record_ref": "analysis/corp-fs01-security.csv:12:4624", "host": ""}
+        for hosts in (["CORP-WS01", "CORP-FS01"], ["CORP-FS01", "CORP-WS01"]):
+            assert fc.record_host(ev, hosts) == "CORP-FS01"
+            assert fc.citation_from_event(ev, known_hosts=hosts).host == "CORP-FS01"
+
+    def test_a_text_naming_two_hosts_decides_nothing_and_the_claim_stands_in(self):
+        ev = {"text": "CORP-WS01 reached CORP-FS01 over SMB", "source": "evidence_index call_id=12"}
+        hosts = ["CORP-WS01", "CORP-FS01"]
+        assert fc.record_host(ev, hosts) == ""
+        assert fc.citation_from_event(ev, known_hosts=hosts, claim_host="CORP-DC01").host == "CORP-DC01"
+        one = {"text": "jane.doe logged on at CORP-FS01", "source": "evidence_index call_id=12"}
+        assert fc.record_host(one, hosts) == "CORP-FS01"
+
+    def test_a_host_shaped_host_field_counts_a_digits_cell_does_not(self):
+        hosts = ["CORP-WS01"]
+        assert fc.record_host({"text": "x", "host": "CORP-WS01", "source": "evidence_index call_id=3"}, hosts) == "CORP-WS01"
+        assert fc.record_host({"text": "x", "host": "17", "source": "evidence_index call_id=3"}, hosts) == ""
+
+
+def test_an_image_not_named_after_its_host_resolves_through_the_evidence_links(tmp_path):
+    import json
+    case = tmp_path / "case"
+    (case / ".atlas").mkdir(parents=True)
+    (case / "evidence" / "disk").mkdir(parents=True)
+    (case / "evidence" / "disk" / "img-0001.raw").write_bytes(b"\0" * 512)
+    (case / ".atlas" / "evidence_links.json").write_text(json.dumps({"entries": [
+        {"label": "CORP-WS01", "path": "evidence/disk/img-0001.raw"}]}), encoding="utf-8")
+    ev = {"text": "An account was successfully logged on. Account: jane.doe",
+          "record_ref": "evidence/disk/img-0001.raw::Windows/System32/winevt/Logs/Security.evtx:12:4624"}
+    assert fc.record_host(ev, ["CORP-WS01", "CORP-FS01"], case) == "CORP-WS01"
+    assert fc.record_host(ev, ["CORP-WS01", "CORP-FS01"]) == ""           # without the root: no label in the path
+    assert fc.citation_from_event(ev, known_hosts=["CORP-WS01"], case_dir=case).host == "CORP-WS01"
+    from core.evidence_resolver import format_evidence_markdown
+    pack = {"events": [dict(ev, timestamp="2031-03-10T12:00:00Z", call_id=7)]}
+    assert "CORP-WS01" in format_evidence_markdown(pack, compact=True, known_hosts=["CORP-WS01", "CORP-FS01"],
+                                                   case_dir=case)

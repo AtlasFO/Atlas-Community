@@ -16,6 +16,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
 
+from core.table_rows import record_moment
+
 _MANIFEST_PATH = Path(__file__).with_name("reconciliation_manifest.yaml")
 
 _IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
@@ -24,6 +26,9 @@ _PRIVATE_IP_RE = re.compile(
 )
 _LOGON_TYPE_RE = re.compile(r"Logon Type:\s*(\d+)", re.IGNORECASE)
 _EID_COLS = ("EventId", "Event ID", "EventID", "event_id", "eventID")
+# Which files are event-log tables stays on these names; once a file is
+# accepted, a row's moment is read through the program's one time-column list
+# (core.table_rows.record_moment), this list the fallback.
 _TS_COLS = ("TimeCreated", "Timestamp", "timestamp", "timecreated", "Date")
 _HOST_COLS = ("Computer", "computer", "Hostname", "host", "Machine")
 _USER_COLS = ("UserName", "User", "user", "TargetUserName", "SubjectUserName")
@@ -91,6 +96,12 @@ def _normalize_ts(raw: str) -> str:
         return ""
     s = str(raw).replace("T", " ").split("+")[0].split("Z")[0]
     return s.split(".")[0].strip()
+
+
+def _row_time(row: dict) -> str:
+    """A row's moment through the shared time columns, else this module's
+    own time column as written, normalised."""
+    return _normalize_ts(record_moment(row) or _pick(row, _TS_COLS))
 
 
 def _external_ips(text: str) -> list[str]:
@@ -257,7 +268,7 @@ def _csv_to_events(path: Path, profile: str, eids: set[int], kind: str) -> list[
                     continue
                 if eid not in eids:
                     continue
-                ts = _normalize_ts(_pick(row, _TS_COLS))
+                ts = _row_time(row)
                 if not ts:
                     continue
                 ip = _pick(row, _IP_COLS)

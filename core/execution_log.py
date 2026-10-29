@@ -20,6 +20,16 @@ from typing import Optional
 # raw shell verb run via the generic batch executor.
 current_mcp_tool: "contextvars.ContextVar[str | None]" = contextvars.ContextVar(
     "current_mcp_tool", default=None)
+# The trace entries the current call's input was derived from: the Toolbox
+# sets it to an image handle's extraction around the parse it substitutes
+# the copy into (and resets it itself), so every entry the parse writes
+# names the extraction in its input_call_ids.
+derived_from_call_ids: "contextvars.ContextVar[tuple[int, ...]]" = contextvars.ContextVar(
+    "derived_from_call_ids", default=())
+# What a tool call is run for when that is not the analyst's read: set by
+# the coverage path around its parses ("coverage"), stamped on every entry
+# they write, so read credit (core.artifact_value) never counts them.
+call_source: "contextvars.ContextVar[str]" = contextvars.ContextVar("call_source", default="")
 # One id per model tool call, set by the middleware. A tool that shells out
 # more than once per call (an ASCII and a UTF-16 strings pass, say) records
 # one entry per subprocess; the id lets action windows count the call once.
@@ -207,7 +217,8 @@ def _next_shared_call_id(trace_path: Optional[str] = None, in_memory_seq: int = 
             pass
         lock_fp.close()
 
-# Written on every configure() so the singleton can auto-recover after a server restart.
+# The run started last on this host (configure with save_session=True), for
+# `atlas review` without --case. Nothing binds a log from it (_auto_recover).
 _SESSION_FILE = os.path.expanduser("~/.cache/atlas/session.json")
 
 # Per-case "this run was cleared at T" markers. clear_case_run writes one;
@@ -324,51 +335,6 @@ def _cwd_case_dir() -> Optional[str]:
     if any(os.path.exists(os.path.join(cwd, n)) for n in ("CASE.md", "CLAUDE.md")):
         return cwd
     return None
-
-
-# One notice per process for each kind of guessed binding (below).
-_BINDING_NOTED: set[str] = set()
-
-
-def _beacon_is_unambiguous(trace_path: str) -> bool:
-    """Whether a process outside any case directory may follow the session
-    beacon. The beacon is one slot per host: with more than one run alive
-    it names only the run started last, so the restore does not guess and
-    says so once. With one run alive and it the beacon's case, the restore
-    binds but says that this process now writes into a live run's trace.
-    Inside a case directory the directory decides (_beacon_is_foreign)."""
-    if _cwd_case_dir():
-        return True
-    try:
-        from core.run_state import live_runs, run_status
-        live = live_runs()
-    except Exception:  # noqa: BLE001 - no answer is no reason to stop binding
-        return True
-    if len(live) > 1:
-        if "ambiguous" not in _BINDING_NOTED:
-            _BINDING_NOTED.add("ambiguous")
-            _warn(f"session beacon not followed: {len(live)} runs are live on this host "
-                  f"({', '.join(live)}); start_execution_log names the case this process "
-                  "writes to")
-        return False
-    case = os.path.realpath(_case_dir_for_trace(trace_path))
-    pid = run_status(case).get("pid") if any(os.path.realpath(c) == case for c in live) else None
-    if pid and str(pid) != str(os.getpid()) and "live" not in _BINDING_NOTED:
-        _BINDING_NOTED.add("live")
-        _warn(f"session beacon followed into {case}, whose run is live in pid {pid}: this "
-              "process now writes into that run's trace")
-    return True
-
-
-def _beacon_is_foreign(trace_path: str) -> bool:
-    """The session beacon names the trace an MCP server restarted from an
-    arbitrary directory should resume. A run launched inside a different
-    case (``--case``, the dashboard) must not inherit it: the log would bind
-    to the old case and refuse every write into the new one."""
-    here = _cwd_case_dir()
-    if not here:
-        return False
-    return os.path.realpath(_case_dir_for_trace(trace_path)) != os.path.realpath(here)
 
 
 def _parse_ts(s: object) -> Optional[datetime.datetime]:
@@ -735,6 +701,15 @@ def _extract_tool_from_entry(entry: dict) -> str:
     return os.path.basename(first)
 
 
+# The narration kinds written for people to read: the model's notes (no
+# kind) and a disposition (a record of work done and its empty outcome).
+# Any other kind is a machine record kept in the trace for tools (the
+# report composer's per-question measurement, kind "report_answer"); a
+# view that shows "what the run last said" shows only these. A new kind
+# is classified here, where it is defined.
+PROSE_NARRATION_KINDS = frozenset({"", "disposition"})
+
+
 class ExecutionLog:
     def __init__(self):
         self._entries: list[dict] = []
@@ -983,7 +958,7 @@ class ExecutionLog:
 
         # Phase stack is sole authority. On stay, a stale agent-declared
         # current_phase must NOT rename the stack top — that created the
-        # Collect↔Analyze oscillation. Only seed the stack when we have no phase yet (cold start).
+        # Collect<->Analyze oscillation. Only seed the stack when we have no phase yet (cold start).
         if (sa == "stay" and current_phase and not self._current_phase):
             self._current_phase = current_phase
             if not self._phase_stack:
@@ -1045,15 +1020,14 @@ class ExecutionLog:
         a new case).
 
         save_session: when True, persist (case_id, path) to
-            ~/.cache/atlas/session.json so a future MCP server boot
-            auto-recovers this trace. Only the investigation's own start
+            ~/.cache/atlas/session.json, the run started last, which
+            `atlas review` without --case reviews. No process binds its log
+            from it (_auto_recover). Only the investigation's own start
             (start_execution_log, the CLI, the monitor) passes True; the
             default is False, so a test fixture, a probe or an ad-hoc
-            script can never hijack the active investigation's recovery
-            beacon and silently redirect tool calls to the wrong trace.
-            When save_session=True is requested but the existing session
-            points at a different case, a loud WARN is emitted before
-            the overwrite happens.
+            script never moves it. When save_session=True is requested but
+            the existing session points at a different case, a loud WARN is
+            emitted before the overwrite happens.
         """
         with self._lock:
             try:
@@ -1239,11 +1213,9 @@ class ExecutionLog:
 
     def _save_session(self) -> None:
         # Must be called under self._lock.
-        # Surface cross-case overwrites loudly — if a previously active
-        # session for a different case is still on disk and its trace dir
-        # exists, that investigation will silently follow this one's path
-        # on the next MCP server restart — an ad-hoc smoke script that
-        # configures its own trace is enough to cause it.
+        # Surface cross-case overwrites loudly: `atlas review` without
+        # --case reviews the run named here, and an ad-hoc smoke script that
+        # configures its own trace with save_session=True moves it.
         try:
             with open(_SESSION_FILE) as f:
                 prior = json.load(f)
@@ -1262,25 +1234,20 @@ class ExecutionLog:
             pass
         try:
             os.makedirs(os.path.dirname(_SESSION_FILE), exist_ok=True)
-            # Persist the ABSOLUTE path so the UserPromptSubmit /
-            # PostToolUse hooks can resolve it regardless of CWD. The
-            # hooks read this beacon and write to `path` directly —
-            # relative paths there silently no-op when the hook is
-            # launched from a different working directory than the
-            # one the MCP server happened to be in.
+            # The absolute path: its reader runs in another directory.
             abs_path = os.path.abspath(self._path) if self._path else self._path
             with open(_SESSION_FILE, "w") as f:
                 json.dump({"case_id": self._case_id, "path": abs_path}, f)
         except OSError as e:
-            _warn(f"session save failed — auto-recovery on restart will not work: {e}")
+            _warn(f"session save failed — `atlas review` without --case will not find this run: {e}")
 
     def case_dir(self) -> Optional[str]:
         """Absolute path of the active case directory (parent of the
         analysis/exports/reports dir holding the trace), or None when no
-        trace is configured. Attempts session-file / CWD auto-recovery
-        first so a restarted MCP server still resolves against the right
-        case. Used by core.middleware to resolve case-relative
-        output/mount path arguments."""
+        trace is configured. An unconfigured log first binds the case
+        directory the process runs in (_auto_recover). Used by
+        core.middleware to resolve case-relative output/mount path
+        arguments."""
         with self._lock:
             self._auto_recover()
             if not self._path:
@@ -1305,36 +1272,16 @@ class ExecutionLog:
 
     def _auto_recover(self) -> None:
         # Must be called under self._lock.
+        # A process binds a case by its own start (configure) or by running
+        # inside the case directory, never by the host-wide session beacon:
+        # that names the run started last, finished or not, and a probe, a
+        # harness or a restarted MCP server outside every case would write
+        # into it. Inside a real case directory (case brief present AND
+        # analysis/<X>_trace.json present) every record_* call into an
+        # unconfigured log binds to the case's existing trace. Both signals
+        # are required so the repo root, pytest tmp dirs, etc. never bind.
         if self._path is not None:
             return
-
-        # 1) Session-file recovery (preserves cross-CWD MCP-server restart cases).
-        try:
-            with open(_SESSION_FILE) as f:
-                s = json.load(f)
-            case_id, path = s.get("case_id"), s.get("path")
-            if case_id and path:
-                # Reject stale sessions pointing to deleted directories
-                # (e.g. pytest temp dirs).
-                parent = os.path.dirname(os.path.abspath(path))
-                if (os.path.isdir(parent) and not _beacon_is_foreign(path)
-                        and _beacon_is_unambiguous(path)):
-                    # save_session=False — we already read it from disk;
-                    # rewriting under contention with another process can
-                    # race on the file.
-                    self.configure(case_id, path, save_session=False)
-                    if self._path is not None:
-                        return
-        except (OSError, json.JSONDecodeError, ValueError):
-            pass
-
-        # 2) CWD-based recovery: if the MCP server is launched inside a real
-        # case directory (case brief present AND analysis/<X>_trace.json
-        # present), resume from that trace. Both signals are required so the
-        # repo root, pytest tmp dirs, etc. never trigger this fallback.
-        # Lets the agent skip start_execution_log on resume without losing
-        # writes — every record_* call into an unconfigured log will lazily
-        # bind to the case's existing trace.
         try:
             cwd = _cwd_case_dir()
             if not cwd:
@@ -1551,9 +1498,8 @@ class ExecutionLog:
     # ── Record methods ────────────────────────────────────────────────────────
 
     def _require_configured(self, kind: str) -> None:
-        """Raise if no trace path is set. Replaces the old warn-and-drop
-        behaviour so callers can't silently lose entries when
-        start_execution_log was skipped."""
+        """Raise if no trace path is set, so callers can't silently lose
+        entries when start_execution_log was skipped."""
         if self._path is None:
             raise RuntimeError(
                 f"trace log not configured — cannot record {kind}. Call "
@@ -1713,6 +1659,7 @@ class ExecutionLog:
         output_hash: str = "",
         vmdk_snapshot_warning: str = "",
         interrupted: bool = False,
+        action_id: int | None = None,
     ) -> int:
         with self._lock:
             self._auto_recover()
@@ -1744,14 +1691,20 @@ class ExecutionLog:
             _mcp = current_mcp_tool.get()
             if _mcp and not cmd.startswith("<py>:"):
                 entry["mcp_tool"] = _mcp
-            _aid = current_action_id.get()
+            # The model call the entry belongs to: the middleware's id, passed
+            # explicitly by a writer that runs after the call's context ended
+            # (the result entry), else the contextvar.
+            _aid = action_id if action_id is not None else current_action_id.get()
             if _aid:
                 entry["action_id"] = _aid
             # Which evidence image/mount the call ran against (multi-host
             # traces). Explicit param wins; else the middleware contextvar.
             _eref = evidence_ref or current_evidence_ref.get()
             if _eref:
-                entry["evidence_ref"] = str(_eref)[:256]
+                # A path parameter's whole value (core.middleware
+                # ._extract_evidence_ref, at most 1024): a cut one names a
+                # shorter path.
+                entry["evidence_ref"] = str(_eref)[:1024]
             if timed_out:
                 entry["timed_out"] = True
             if interrupted:
@@ -1782,28 +1735,19 @@ class ExecutionLog:
             # re-parsing (and mis-splitting) the command string.
             if vmdk_snapshot_warning:
                 entry["vmdk_snapshot_warning"] = str(vmdk_snapshot_warning)[:512]
+            input_call_ids = list(input_call_ids or []) + [
+                c for c in derived_from_call_ids.get() if c not in (input_call_ids or [])]
             if input_call_ids:
                 entry["input_call_ids"] = [int(c) for c in input_call_ids if c]
-            # Protocol audit: a tool_call must be preceded by an active DAIR batch.
-            # Scan the last 20 entries; if no dair_call is present (and the log is
-            # not empty), flag the tool_call as a protocol violation. The flag is
-            # surfaced in trace.json and trace.md so silent skips are auditable.
-            if self._entries:
-                window = self._entries[-20:]
-                has_recent_dair = any(e.get("type") == "dair_call" for e in window)
-                if not has_recent_dair:
-                    # Cold-start grace: the mandated pre-plan recon batch (hash
-                    # verify, image mount, hive reads) legitimately runs before
-                    # the first dair_assess. Only flag a missing-DAIR violation
-                    # once the investigation has actually engaged DAIR at least
-                    # once — i.e. a dair_call exists earlier in the trace but has
-                    # aged out of the 20-entry window. Flagging pre-DAIR recon
-                    # was a self-contradiction: the workflow mandates those reads.
-                    ever_had_dair = any(
-                        e.get("type") == "dair_call" for e in self._entries
-                    )
-                    if ever_had_dair:
-                        entry["protocol_violation"] = "no_active_dair_batch"
+            if call_source.get():
+                entry["source"] = call_source.get()
+            # No protocol flag here: the DAIR gate (core.middleware) refuses
+            # a forensic call outside a batch before it runs, so a call that
+            # reaches this log kept the protocol. A rule drawn from the last
+            # raw entries would count a call's sub-commands and know neither
+            # the batch grace nor a run without deferral, and so mark calls
+            # the gate let through. The markdown renders the field where an
+            # older trace carries it.
             self._append_entry(entry)
             return entry["call_id"]
 
@@ -1847,8 +1791,8 @@ class ExecutionLog:
                 entry["inputs"] = inputs
             if input_call_ids:
                 entry["input_call_ids"] = [int(c) for c in input_call_ids if c]
-            # Failure diagnostics — previously dropped, so empty gpt-5-mini
-            # responses looked like silent 0-token fails.
+            # Failure diagnostics, kept so an empty model response is not
+            # mistaken for a silent 0-token failure.
             if error:
                 entry["error"] = str(error)[:2000]
             if finish_reason:
@@ -1991,6 +1935,7 @@ class ExecutionLog:
         tool: str,
         reason: str,
         input_call_ids: list[int] | None = None,
+        args: dict | None = None,
     ) -> int:
         with self._lock:
             self._auto_recover()
@@ -2002,10 +1947,58 @@ class ExecutionLog:
                 "tool": tool,
                 "reason": reason,
             }
+            input_call_ids = list(input_call_ids or []) + [
+                c for c in derived_from_call_ids.get() if c not in (input_call_ids or [])]
             if input_call_ids:
                 entry["input_call_ids"] = [int(c) for c in input_call_ids if c]
+            if args:
+                # The refused call's arguments (cut like a tool call's), so a
+                # work item created later can tell its own ready call was refused.
+                entry["args"] = json.dumps(args, sort_keys=True, default=str)[:400]
             self._append_entry(entry)
             return entry["call_id"]
+
+    # ── Work items (the work order, core/work_order.py) ────────────────────
+
+    def add_work_item(self, origin, task_ids, tool, target, why, args=None, status="due",
+                      source_ref=None, extra_key="") -> dict:
+        from core.work_order import add_work_item
+        with self._lock:
+            self._auto_recover()
+            self._require_configured(f"work_item: {tool}")
+            return add_work_item(self, origin, task_ids, tool, target, why, args=args, status=status,
+                                 source_ref=source_ref, extra_key=extra_key)
+
+    def work_items(self, statuses=None, task_id=None) -> list[dict]:
+        from core.work_order import work_items
+        with self._lock:
+            self._auto_recover()
+            return work_items(self, statuses, task_id)
+
+    def dispose_work_item(self, item_id, action, basis_call_id=None, target=None, note="") -> dict:
+        from core.work_order import dispose_work_item
+        with self._lock:
+            self._auto_recover()
+            return dispose_work_item(self, item_id, action, basis_call_id, target, note)
+
+    def close_items_for_call(self, tool, args, call_entries, abandoned=None, *, closing_call_id=None) -> list[int]:
+        from core.work_order import close_items_for_call
+        with self._lock:
+            self._auto_recover()
+            return close_items_for_call(self, tool, args, call_entries, abandoned,
+                                        closing_call_id=closing_call_id)
+
+    def retire_protocol_intents(self, note: str) -> int:
+        from core.work_order import retire_protocol_intents
+        with self._lock:
+            self._auto_recover()
+            return retire_protocol_intents(self, note)
+
+    def shortest_ready_call(self) -> str:
+        from core.work_order import shortest_ready_call
+        with self._lock:
+            self._auto_recover()
+            return shortest_ready_call(self)
 
     # ── Deferred intents (DAIR-batch recovery) ─────────────────────────────
 
@@ -2017,6 +2010,12 @@ class ExecutionLog:
         ]
 
     def open_deferred_intents(self) -> list[dict]:
+        """Open protocol intents; none while no deferral is on
+        (ATLAS_DAIR_NO_DEFER): nothing blocks a forensic call then, so no
+        reader may say forensic tools are waiting."""
+        from core.deferred_intents import dair_no_defer_on
+        if dair_no_defer_on():
+            return []
         with self._lock:
             self._auto_recover()
             return list(self._deferred_open_locked())
@@ -2634,22 +2633,31 @@ def _trace_entries_on_disk(case_root: str) -> Optional[list[dict]]:
     return out
 
 
-def trace_tool_calls(case_dir: str | os.PathLike) -> Optional[list[dict]]:
-    """The tool calls a case's trace holds, oldest first; None when the case
-    has no trace. The live log when it is this case's (it holds the trace and
-    what this process recorded since), the trace on disk otherwise. Entries
-    from before the case's last clear belong to a dead run and are left out,
-    as configure() leaves them out."""
+def trace_entries(case_dir: str | os.PathLike) -> Optional[list[dict]]:
+    """Every entry a case's trace holds, oldest first; None when the case has
+    no trace. The live log when it is this case's (it holds the trace and
+    what this process recorded since), the case's own document on disk
+    otherwise (case_trace_document). Entries from before the case's last
+    clear belong to a dead run and are left out, as configure() leaves them
+    out."""
     root = os.path.realpath(str(case_dir))
     live = log.trace_path()
     if live and os.path.realpath(_case_dir_for_trace(live)) == root:
         with log._lock:
-            entries: Optional[list[dict]] = list(log._entries)
-    else:
-        entries = _trace_entries_on_disk(root)
-        if entries is None:
-            return None
-        marker = read_clear_marker_ts(root)
-        if marker:
-            entries = [e for e in entries if _ts_ge(e.get("ts"), marker)]
-    return [e for e in entries or [] if e.get("type") == "tool_call"]
+            return list(log._entries)
+    entries = _trace_entries_on_disk(root)
+    if entries is None:
+        return None
+    marker = read_clear_marker_ts(root)
+    if marker:
+        entries = [e for e in entries if _ts_ge(e.get("ts"), marker)]
+    return entries
+
+
+def trace_tool_calls(case_dir: str | os.PathLike) -> Optional[list[dict]]:
+    """The tool calls of the case's trace (trace_entries), oldest first;
+    None when the case has no trace."""
+    entries = trace_entries(case_dir)
+    if entries is None:
+        return None
+    return [e for e in entries if e.get("type") == "tool_call"]

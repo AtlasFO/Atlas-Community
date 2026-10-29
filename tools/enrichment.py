@@ -130,8 +130,6 @@ def _request_json(service: str, method: str, url: str, **kwargs) -> tuple:
     return None, (last or {"success": False,
                            "error": f"{service} request failed", "service": service})
 
-_SESSION_FILE = os.path.expanduser("~/.cache/atlas/session.json")
-
 
 def _no_key(service: str) -> dict:
     return {
@@ -141,32 +139,16 @@ def _no_key(service: str) -> dict:
 
 
 def _analysis_dir() -> Optional[str]:
-    """Best-effort resolve the active case's analysis/ dir from the trace path.
-
-    Order: the live execution-log singleton, then ~/.cache/atlas/session.json.
-    Returns None when no case is configured, so enrichment persistence is a
-    no-op outside a case (e.g. an ad-hoc lookup or a unit test).
+    """The analysis/ dir of the case this process's execution log is bound
+    to. None when it is bound to none, so enrichment persistence is a no-op
+    outside a case (an ad-hoc lookup, a unit test); never the host-wide
+    session beacon, which names the run started last, not this process's.
     """
-    trace_path = None
     try:
         from core.execution_log import log as _log
         trace_path = getattr(_log, "_path", None)
     except Exception:
         trace_path = None
-    if not trace_path:
-        # With more than one run alive the beacon names only the run started
-        # last: a lookup that names no case is persisted nowhere.
-        try:
-            from core.run_state import live_runs
-            if len(live_runs()) > 1:
-                return None
-        except Exception:  # noqa: BLE001 - no answer keeps the beacon fallback
-            pass
-        try:
-            with open(_SESSION_FILE) as fh:
-                trace_path = (json.load(fh) or {}).get("path")
-        except Exception:
-            trace_path = None
     if not trace_path:
         return None
     d = os.path.dirname(os.path.abspath(trace_path))

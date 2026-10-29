@@ -33,6 +33,11 @@ from typing import Any, Iterable
 STOP_FILE = "HANDLING_STOP.json"
 RECORD_FILE = "handling_stop_record.json"
 STOP_CLASSES = ("csam",)
+# The frames under which a stop hands the device over (or, with no device
+# on record, all evidence) and ends the examination. The neutral frame (a
+# brief that names no system owner) is one: safety first, a stop must end
+# the examination whoever owns the system.
+HANDOVER_FRAMES = ("incident", "neutral")
 
 MEDIA_EXTENSIONS = frozenset({
     "jpg", "jpeg", "jpe", "jfif", "png", "gif", "bmp", "webp", "heic", "heif", "tif", "tiff", "psd", "avif",
@@ -45,9 +50,9 @@ REFUSED_TOOLS = frozenset((
     "bin_upx_unpack", "carve_bulk_extractor_scan", "carve_bulk_extractor_unallocated",
     "carve_foremost_carve", "carve_scalpel_carve", "img_photorec_carve",
     "img_vmdk_export_raw", "job_job_start_bulk_extractor", "job_job_start_foremost_carve",
-    "job_job_start_scalpel_carve", "misc_batch_run", "misc_pe_carver", "misc_pff_export",
+    "job_job_start_image_extract", "job_job_start_scalpel_carve", "misc_batch_run", "misc_pe_carver", "misc_pff_export",
     "misc_readpst_extract", "misc_symlink_evidence", "net_tcpdump_extract_http",
-    "net_tcpdump_write_filtered", "net_tcpxtract_streams", "tsk_tsk_blkcat",
+    "net_tcpdump_write_filtered", "net_tcpxtract_streams", "net_tshark_export_objects", "tsk_tsk_blkcat",
     "tsk_tsk_blkls", "tsk_tsk_jcat", "tsk_tsk_mmcat", "tsk_tsk_recover",
     "tsk_tsk_sorter", "steg_steg_extract", "velo_collect_artifact",
     "velo_get_collection_results", "velo_query", "velo_upload_artifact_yaml",
@@ -56,6 +61,7 @@ REFUSED_TOOLS = frozenset((
 MEDIA_TOOLS = frozenset((
     "bin_binwalk_scan", "bin_diec_scan", "bin_r2_summary", "crypto_decrypt",
     "deob_base64_hunt", "deob_js_beautify", "deob_powershell_decode", "ez_ez_bstrings",
+    "images_describe",
     "live_live_read_file", "misc_capa_analyze", "misc_parse_email", "misc_parse_emlx",
     "misc_parse_msg_ole", "misc_pdf_parser_analyze", "misc_pdfid_scan", "tsk_tsk_icat",
     "steg_steg_status", "strings_floss_extract", "strings_hexdump", "strings_read_text",
@@ -85,7 +91,8 @@ ALLOWED_TOOLS = frozenset((
     "correlate_mitre_validate", "correlate_network_to_process", "correlate_process_to_file",
     "coverage_audit_evidence_coverage", "coverage_audit_hostile_auth_coverage",
     "coverage_audit_tool_coverage", "coverage_coverage_report", "coverage_ledger_status",
-    "coverage_mark_blocked", "crypto_algorithms_supported", "dair_dair_assess",
+    "coverage_mark_blocked", "coverage_set_evidence_disposition", "crypto_algorithms_supported",
+    "dair_dair_assess",
     "deob_decode_chain", "deob_hex_decode", "deob_supported_ops", "deob_xor_bruteforce",
     "ese_esedb_export", "ese_esedb_info", "evt_evt_export", "ewf_ewf_info", "ewf_ewf_mount",
     "ewf_ewf_umount", "ewf_ewf_verify", "ewf_mount_full_image", "ewf_mount_ntfs",
@@ -141,7 +148,7 @@ ALLOWED_TOOLS = frozenset((
     "tsk_tsk_blkcalc", "tsk_tsk_blkstat", "tsk_tsk_ffind", "tsk_tsk_fls",
     "tsk_tsk_fsstat", "tsk_tsk_hfind", "tsk_tsk_ils", "tsk_tsk_indxparse",
     "tsk_tsk_istat", "tsk_tsk_jls", "tsk_tsk_mactime", "tsk_tsk_mmls",
-    "tsk_tsk_mmstat", "tsk_tsk_resolve_path", "tsk_tsk_sigfind",
+    "tsk_tsk_mmstat", "tsk_tsk_resolve_path", "tsk_tsk_sigfind", "tsk_tsk_index_find",
     "strings_exiftool_batch", "strings_exiftool_metadata", "strings_file_identify",
     "strings_file_identify_directory", "strings_stat_file", "strings_strings_grep",
     "table_table_grep", "table_table_pivot", "table_table_query", "table_table_schema",
@@ -265,7 +272,7 @@ def _assert_here(case_dir: str | os.PathLike, cls: str, basis: str, *, frame: st
         except Exception:  # noqa: BLE001
             frame = "incident"
     state = {"class": cls, "asserted_at": _utcnow(), "basis": basis, "frame": frame,
-             "device": device if frame == "incident" else "", "refused": []}
+             "device": device if frame in HANDOVER_FRAMES else "", "refused": []}
     _write(stop_path(case_dir), state)
     _write(record_path(case_dir), {**state, "lifted_at": ""})
     return state
@@ -540,7 +547,7 @@ def gate(tool_name: str, args: dict[str, Any], case_dir: str | os.PathLike | Non
                 if (p.is_file() or p.suffix) and path_is_media(p):
                     reason = f"Tool {tool_name} refused: {value[:120]} is an image or a video."
                     break
-    if reason is None and st.get("frame") == "incident" and not tool_name.startswith(_BOOKKEEPING_PREFIXES):
+    if reason is None and st.get("frame") in HANDOVER_FRAMES and not tool_name.startswith(_BOOKKEEPING_PREFIXES):
         # The affected device is handed over; with no device on record, or
         # one that matches no evidence entry, all evidence is.
         roots = device_paths(case_dir, st.get("device") or "")
@@ -616,7 +623,7 @@ def prompt_block(case_dir: str | os.PathLike | None) -> str:
              "online lookup are refused; nothing of the material is copied, rendered or hashed to an outside service. "
              "Continue with metadata, timeline, attribution and single-file hashes for the human examiner's hash-set "
              "match; do not prescribe a refused tool. The material goes to the human examiner."]
-    if st.get("frame") == "incident":
+    if st.get("frame") in HANDOVER_FRAMES:
         if st.get("device"):
             lines.append(f"The automated examination of {st['device']} ended at the assertion: it is preserved and "
                          "handed over; continue with the rest of the estate.")
@@ -640,7 +647,7 @@ def report_lines(case_dir: str | os.PathLike | None, language: str = "en") -> li
                      f"einen externen Dienst gemeldet; {refused} Aufrufe wurden abgewiesen.")
         lines.append("- Vor der Auslösung geschriebene Exporte unter exports/ sind unter Quarantäne und gehen ungeöffnet an "
                      "die Prüferin oder den Prüfer.")
-        if rec.get("frame") == "incident":
+        if rec.get("frame") in HANDOVER_FRAMES:
             lines.append(f"- Die automatisierte Untersuchung von {rec['device']} endete mit der Auslösung; das Gerät wurde "
                          "gesichert und übergeben." if rec.get("device") else
                          "- Der Stopp nennt kein Gerät: alle Beweismittel gelten seit der Auslösung als übergeben.")
@@ -651,7 +658,7 @@ def report_lines(case_dir: str | os.PathLike | None, language: str = "en") -> li
                      f"outside service; {refused} calls were refused.")
         lines.append("- Exports written before the assertion under exports/ are quarantined and go to the human examiner "
                      "unopened.")
-        if rec.get("frame") == "incident":
+        if rec.get("frame") in HANDOVER_FRAMES:
             lines.append(f"- The automated examination of {rec['device']} ended at the assertion; the device was "
                          "preserved and handed over." if rec.get("device") else
                          "- The stop names no device: all evidence is handed over since the assertion.")

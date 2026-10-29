@@ -214,29 +214,36 @@ def add_conflict(
 
 @mcp.tool()
 def promote_conclusion(
-    claim_id: str,
+    basis_ids: str = "",
     statement: str = "",
     confidence: str = "",
     reasoning: str = "",
     gaps: str = "",
+    supersedes: str = "",
+    claim_id: str = "",
     case_dir: str = "",
 ) -> dict:
-    """Promote an active Claim to a Conclusion after gates/reconciliation.
+    """Record a conclusion: one statement resting on recorded claims.
 
-    `claim_id`: the claim being promoted (C0004) - the conclusion rests on
-    it, so there is no separate list of basis ids. `statement`: the
-    conclusion's wording; empty keeps the claim's own. `confidence`: its
-    tier; empty keeps the claim's. `reasoning`: why the claim is now a
-    conclusion. `gaps`: semicolon-separated open gaps.
+    `basis_ids`: the claim or conclusion ids it rests on, comma-separated (C0004,C0009).
+    `statement`: every file, address, hash, URL, domain, account, host and time it names must appear in a basis
+    claim. Empty, with one basis, keeps that claim's words.
+    `confidence`: the tier asked for; it is recorded at most at the weakest basis's tier.
+    `supersedes`: the conclusion this one replaces; revise a conclusion this way.
     """
-    from core.claim_graph import promote_conclusion as _promo
-
     cd, err = _case_dir_or_error(case_dir)
     if err:
         return err
     gap_list = [x.strip() for x in gaps.split(";") if x.strip()]
+    from core.conclusion_door import door_on, promote
+    if door_on():
+        from core.execution_log import log
+        return promote(cd, basis_ids=basis_ids, statement=statement, confidence=confidence,
+                       reasoning=reasoning, gaps=gap_list or None, supersedes=supersedes,
+                       claim_id=claim_id, log=log)
+    from core.claim_graph import promote_conclusion as _promo
     return _promo(
-        cd, claim_id,
+        cd, claim_id or (basis_ids.split(",")[0].strip() if basis_ids else ""),
         statement=statement or None,
         confidence=confidence or None,
         reasoning=reasoning,
@@ -260,6 +267,10 @@ def supersede(
     support. `reason` is then required (what was withdrawn and why). A
     retired claim no longer counts for any report gate; its trace entry
     remains for audit.
+    `old_id` may also be the call id of a refused record_finding that the
+    open work lists ("call 182"): with no new_id and a reason it withdraws
+    that refused finding; the report states it as refused and withdrawn,
+    with the reason.
     A recommendation is never superseded: close it with update_recommendation
     (state done, with a note for a mandatory escalation).
     """
@@ -268,7 +279,46 @@ def supersede(
     cd, err = _case_dir_or_error(case_dir)
     if err:
         return err
+    withdrawn = _withdraw_refused(old_id, new_id, reason)
+    if withdrawn is not None:
+        return withdrawn
+    from core.conclusion_door import door_on
+    if door_on() and new_id and new_id != old_id:
+        # A conclusion changes only through the door.
+        from core.claim_graph import get_node, load_graph
+        nodes = load_graph(cd)
+        old_n, new_n = get_node(nodes, old_id) or {}, get_node(nodes, new_id) or {}
+        if old_n.get("kind") == "conclusion":
+            return {"success": False, "gate": "conclusion_door",
+                    "error": (f"{old_id} is a conclusion: revise it with claim.promote_conclusion("
+                              f"supersedes={old_id}, ...), or withdraw it with claim.supersede("
+                              f"old_id={old_id}, reason=...).")}
+        if new_n.get("kind") == "conclusion" and old_id in (new_n.get("basis_ids") or []):
+            return {"success": False, "gate": "conclusion_door",
+                    "error": f"{new_id} rests on {old_id}: a conclusion does not replace its own basis."}
     return _sup(cd, old_id, new_id, reason=reason)
+
+
+def _withdraw_refused(old_id: str, new_id: str, reason: str) -> dict | None:
+    """The withdrawal of a refused finding named by its refusal's call id,
+    or None when ``old_id`` names none (a claim id goes to the graph). The
+    withdrawal is this call's trace entry (core.work_order.refused_findings
+    reads it); a reason is required."""
+    from core.work_order import refusal_call_id
+    cid = refusal_call_id(old_id)
+    if cid is None or str(new_id or "").strip():
+        return None
+    try:
+        from core.execution_log import log
+        entry = log.index().by_call_id.get(int(cid))
+    except Exception:  # noqa: BLE001
+        entry = None
+    if not isinstance(entry, dict) or not entry.get("refused_description"):
+        return None
+    if not str(reason or "").strip():
+        return {"success": False, "gate": "withdraw_reason",
+                "error": f"Withdrawing the finding refused at call {cid} needs reason=: why it is not recorded."}
+    return {"success": True, "withdrawn_refused_finding": int(cid), "reason": str(reason)[:300]}
 
 
 def _iso(value) -> "datetime | None":
@@ -303,15 +353,18 @@ def _names_any(text: str, names) -> bool:
     return False
 
 
-def _revalidation_refusal(node: dict, call_ids: list[int], log=None) -> dict | None:
+def _revalidation_refusal(node: dict, call_ids: list[int], log=None, *,
+                          case_dir: str = "") -> dict | None:
     """Why a re-validation is refused, or None. The cited calls must exist
     in the trace, be evidence with recorded output rather than the run's
     own words, have found something, not predate the review that
     questioned the belief, have read what changed when the review names
-    it, and show what the belief names: an identifier (the citation test
-    every finding is held to) and, when the belief names artifacts, one of
-    them. A belief that names neither is held to the artifacts its own
-    evidence refs name."""
+    it (an image a recount corrected: read by the rule the recount counts
+    by, and a belief saying that image could not be read is contradicted by
+    the read and superseded instead), and show what the belief names: an
+    identifier (the citation test every finding is held to) and, when the
+    belief names artifacts, one of them. A belief that names neither is
+    held to the artifacts its own evidence refs name."""
     from core.entities import artifact_tokens
     from tools._gates import lineage_required
     from tools._gates.citation_support import citation_supports, evidence_calls, has_output
@@ -340,6 +393,36 @@ def _revalidation_refusal(node: dict, call_ids: list[int], log=None) -> dict | N
                       "_atlas_call_id", unknown_cids=bad)
     by_id = log.index().by_call_id
     cited = [by_id[c] for c in call_ids if c in by_id]
+    # Checked before the output tests: a cited read of the image that failed
+    # has no output, and its answer is the way to keep a limitation that holds.
+    recounted = list((node.get("invalidated_by") or {}).get("recounted") or [])
+    if recounted and case_dir:
+        from core.coverage_ledger import CONTAINER_KIND, image_reads, read_hint
+        read, failed = image_reads(case_dir, cited, recounted)
+        if not read:
+            listed = ", ".join(recounted[:4]) + (", ..." if len(recounted) > 4 else "")
+            how = f"To read an image, {read_hint(CONTAINER_KIND)}."
+            if failed:
+                return refuse(f"the review was raised by a coverage correction of {listed}, "
+                              "and the cited read of it failed, so the limitation may hold: "
+                              "mark the image blocked naming the failure "
+                              "(coverage.mark_blocked), then record the limitation again "
+                              "citing that failed call with misc.record_finding("
+                              f"supersedes={claim_id}), which replaces this finding. {how}",
+                              recounted_paths=recounted[:8])
+            return refuse(f"the review was raised by a coverage correction of {listed}; "
+                          f"none of the cited calls read one of them. {how} Cite that read, "
+                          "or supersede this finding if what it states no longer holds",
+                          recounted_paths=recounted[:8])
+        from core.coverage_ledger import states_unread
+        text = " ".join([str(node.get("statement") or "")]
+                        + [str(g) for g in node.get("gaps") or [] if g])
+        if states_unread(case_dir, text, recounted):
+            return refuse("the cited call read an image this finding states could not be "
+                          "read, so the coverage it states no longer holds: record what the "
+                          f"read shows with misc.record_finding(supersedes={claim_id}), or "
+                          "withdraw the finding with claim.supersede",
+                          recounted_paths=recounted[:8])
     evidence = [e for e in evidence_calls(cited) if has_output(e)]
     shown_ids = {e.get("call_id") for e in evidence}
     own = [c for c in call_ids if c not in shown_ids]
@@ -376,9 +459,13 @@ def _revalidation_refusal(node: dict, call_ids: list[int], log=None) -> dict | N
     supports = citation_supports(statement, evidence,
                                  tool_calls=evidence_calls(list(log._entries)))
     from core.evidence_resolver import _claim_anchors
+    from tools._gates.citation_support import claim_terms
     anchors = sorted(_claim_anchors({"statement": statement}, demanding=True))
     if supports is False:
-        named = (" (" + ", ".join(anchors[:6]) + ")") if anchors else ""
+        # What the belief names, as the row test reads it: its strong
+        # entities, and the anchors beside them.
+        names = sorted({e.split(":", 1)[1] for e in claim_terms(statement)["strong"]} | set(anchors))
+        named = (" (" + ", ".join(names[:6]) + ")") if names else ""
         return refuse("the cited output shows nothing the belief names" + named +
                       ": the evidence as it is now does not carry the belief. Withdraw "
                       "or replace it with claim.supersede, or record the corrected "
@@ -442,7 +529,7 @@ def revalidate(
     node = get_node(load_graph(cd), claim_id)
     if not node:
         return {"success": False, "error": f"unknown claim_id: {claim_id}"}
-    refusal = _revalidation_refusal(node, ids)
+    refusal = _revalidation_refusal(node, ids, case_dir=cd)
     if refusal is not None:
         return refusal
     import os
@@ -532,8 +619,13 @@ def record_recommendation(
     `basis_ids`: comma-separated claim/conclusion ids (C0004, N0001) this
     rests on — required. `scope`: host | network | estate; estate needs a
     basis that reaches beyond one host. `urgency`: now | soon | later.
-    `hosts` / `indicators`: comma-separated. A restatement of an existing
-    open recommendation is folded (`duplicate: true`), not added.
+    `hosts` / `indicators`: comma-separated. A contain, eradicate, recover
+    or harden step names only addresses, domains, URLs and mail addresses a
+    tool output of this case shows, and blocks a name, never an address in
+    a published shared edge range or a vendor's service name. A step
+    refused once for such a value is recorded without the value when it is
+    sent again unchanged. A restatement of an existing open recommendation
+    is folded (`duplicate: true`), not added.
     """
     from core.claim_graph import add_recommendation
 
@@ -556,9 +648,9 @@ def add_indicators(
 ) -> dict:
     """Attach typed indicators to a recorded claim or conclusion: each row
     {"type", "value", "side"} with optional "first_seen"/"last_seen", the
-    same rows misc.record_finding takes. Every value must appear in the
-    output of a call the claim cites; a value those outputs do not show is
-    dropped and named in `dropped`. Use this when the pre-report check
+    same rows misc.record_finding takes. Every value needs a tool output of
+    this case that read evidence and shows it, the claim's cited calls
+    first; a value no such output shows is dropped and named in `dropped`. Use this when the pre-report check
     lists a finding without typed indicators, or when a finding named a
     value its rows left out."""
     from core.claim_graph import get_node, load_graph, set_claim_indicators
@@ -576,7 +668,8 @@ def add_indicators(
     cited += [int(c) for c in (node.get("input_call_ids") or []) if c]
     cited += [int(e["call_id"]) for e in (node.get("evidence") or [])
               if isinstance(e, dict) and e.get("call_id")]
-    checked = validate(indicators, call_ids=cited, case_dir=cd, frame=frame_for(cd))
+    checked = validate(indicators, call_ids=cited, case_dir=cd, frame=frame_for(cd),
+                       host=str(node.get("host") or ""))
     out = {"success": True, "claim_id": node["id"], "kept": checked["kept"],
            "dropped": checked["dropped"], "resided": checked["resided"]}
     if checked["kept"] or checked["dropped"]:

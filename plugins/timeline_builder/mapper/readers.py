@@ -10,7 +10,15 @@ from typing import Iterator
 
 from plugins.timeline_builder.models import EvidenceRecord
 
-# EvtxECmd / SIEM / session-broker / common tabular column aliases
+# Once a reader has accepted a file, _pick_time reads a row's moment through
+# the program's one time-column list (core.table_rows.TIME_COLUMNS), a Plaso
+# date-and-time pair included. Which files a reader accepts stays on the
+# reader's own column names below: the shared list names any date or time
+# column, and a list the analyst wrote (an indicator list with a date
+# column, notes with a time) must not enter the timeline as events.
+from core.table_rows import TIME_COLUMNS, record_moment  # noqa: E402
+
+# EvtxECmd / SIEM / session-broker / common tabular column aliases.
 _TS_COLS = (
     "TimeCreated", "Timestamp", "timestamp", "timecreated",
     "startDateTime", "deviceDateTime", "StartDate", "CreatedDate",
@@ -92,6 +100,16 @@ def _fields_have(fields: set[str], names: tuple[str, ...]) -> bool:
     return any(n in fields or n.lower() in lower for n in names)
 
 
+def _pick_time(row: dict) -> str:
+    """The row's moment as "YYYY-MM-DD HH:MM:SS" through the shared time
+    columns, else the first time column's cell as written (for the
+    normaliser to read), else ""."""
+    moment = record_moment(row)
+    if moment:
+        return moment
+    return _pick({k.lstrip("\ufeff") if isinstance(k, str) else k: v for k, v in row.items()}, TIME_COLUMNS)
+
+
 class EvtxCsvReader:
     """Windows event log CSV (EvtxECmd, similar exports)."""
 
@@ -117,7 +135,7 @@ class EvtxCsvReader:
                 if i > max_rows:
                     break
                 eid = _pick_eid(row)
-                ts = _normalize_ts(_pick(row, _TS_COLS))
+                ts = _normalize_ts(_pick_time(row))
                 if not ts or not eid:
                     continue
                 yield EvidenceRecord(
@@ -303,7 +321,7 @@ class GenericCsvReader:
                 if i > max_rows:
                     break
                 eid = _pick_eid(row)
-                ts = _normalize_ts(_pick(row, _TS_COLS))
+                ts = _normalize_ts(_pick_time(row))
                 if not ts or not eid:
                     continue
                 yield EvidenceRecord(
@@ -351,7 +369,7 @@ class TimestampedCsvReader:
             for i, row in enumerate(reader, 1):
                 if i > max_rows:
                     break
-                ts = _normalize_ts(_pick(row, _GENERIC_TS_COLS + _TS_COLS))
+                ts = _normalize_ts(_pick_time(row))
                 if not ts:
                     continue
                 desc_bits = []
@@ -374,12 +392,20 @@ class TimestampedCsvReader:
 
 
 def read_inline_rows(rows: list[dict], *, artifact_path: str = "") -> Iterator[EvidenceRecord]:
-    """Parse table_query/table_grep inline row payloads."""
+    """Parse table_query/table_grep inline row payloads. A row's place is
+    the file's data-row ordinal the table tools attach (``_row``), the same
+    number the artifact readers give it, so a row shown in a result is the
+    event its table's read already holds; its place in the result otherwise.
+    In a workbook ``_row`` counts within its sheet; no artifact reader reads
+    a workbook (CSV and TSV only), so no artifact event competes with its
+    rows, and two sheets collide only on the whole key, as at finalize."""
     for i, row in enumerate(rows, 1):
         if not isinstance(row, dict):
             continue
+        place = row.get("_row")
+        line_number = int(place) if isinstance(place, int) or str(place).isdigit() else i
         eid = _pick_eid(row)
-        ts = _normalize_ts(_pick(row, _TS_COLS))
+        ts = _normalize_ts(_pick_time(row))
         if not ts or not eid:
             continue
         yield EvidenceRecord(
@@ -391,7 +417,7 @@ def read_inline_rows(rows: list[dict], *, artifact_path: str = "") -> Iterator[E
             artifact_path=artifact_path,
             source_file="",
             fields=dict(row),
-            line_number=i,
+            line_number=line_number,
         )
 
 

@@ -72,6 +72,21 @@ CONTRACT = (
     "or a disposition, cite that id in the text."
 )
 
+# ATLAS_IOC_PRIOR_CONTEXT: a named indicator is context until the
+# evidence shows it.
+PRIOR_INDICATOR_SENTENCE = ("An indicator named here enters the indicator list only when a tool output of this "
+                            "case shows it in evidence; until then it is listed as named and not seen.")
+
+
+def contract_text() -> str:
+    """CONTRACT, with the prior-indicator sentence after the
+    coverage-statement sentence while its switch is on."""
+    from core.envfile import env_flag
+    if not env_flag("ATLAS_IOC_PRIOR_CONTEXT", True):
+        return CONTRACT
+    return CONTRACT.replace("never exoneration.\n", "never exoneration. " + PRIOR_INDICATOR_SENTENCE + "\n", 1)
+
+
 # The block's size bound, the threat context's (core.threat_context
 # PROMPT_BYTES): a section grown by many reruns is cut at a line, and the
 # cut says where the rest stands.
@@ -108,6 +123,43 @@ def section_text(markdown: str) -> str:
                    or (not out[-1][1] and _THEMATIC_BREAK_RE.match(out[-1][0]))):
         out.pop()
     return "\n".join(line for line, _ in out).strip()
+
+
+_TABLE_ROW_RE = re.compile(r"^\s*\|.*\|\s*$")
+
+
+def narrative_sections(markdown: str) -> list[tuple[str, str]]:
+    """``(heading, body)`` of every section of CASE.md that is not an
+    inventory, HTML comments removed: a section is an inventory when half or
+    more of its non-blank lines are markdown table rows, or when its heading
+    is the evidence links heading core.evidence_links recognises. Shapes,
+    not a case rule: the brief's narrative names the hosts and the dates the
+    questions are about, its inventories name every host of the case. Text
+    before the first heading belongs to a section with an empty heading."""
+    from core.evidence_links import _SECTION_HEADINGS as _LINKS
+    from core.investigation_tasks import _HEADING_RE, fenced_flags, strip_html_comments
+
+    if not markdown or not markdown.strip():
+        return []
+    lines = strip_html_comments(markdown).splitlines()
+    sections: list[tuple[str, list[str]]] = [("", [])]
+    for line, fenced in zip(lines, fenced_flags(lines)):
+        heading = None if fenced else _HEADING_RE.match(line)
+        if heading:
+            sections.append((heading.group(1).strip().strip("*_ "), []))
+        else:
+            sections[-1][1].append(line)
+    out: list[tuple[str, str]] = []
+    for heading, body in sections:
+        filled = [ln for ln in body if ln.strip()]
+        if not filled:
+            continue
+        if heading.casefold() in _LINKS:
+            continue
+        if sum(1 for ln in filled if _TABLE_ROW_RE.match(ln)) * 2 >= len(filled):
+            continue
+        out.append((heading, "\n".join(body).strip()))
+    return out
 
 
 def replace_section_body(markdown: str, replacement: str) -> str:
@@ -257,10 +309,16 @@ def prompt_note(case_dir: str | os.PathLike, *, chat: bool = False) -> str:
         "────────────────────────────────────────────────────────",
         "# PRIOR KNOWLEDGE (CASE.md, 'What you already know')",
         "",
-        CONTRACT,
+        contract_text(),
     ]
     named = len(read(case_dir).get("indicators") or {})
-    if named and not chat:
+    from core.deferred_intents import estate_count_on
+    if named and not chat and estate_count_on():
+        lines.append("The indicators named here are counted across every host's tables when the run "
+                     "starts, and again whenever a new table appears; the counts arrive as [estate "
+                     "counts], rows per host with first and last time. They are context, not owed "
+                     "searches: read the rows where the counts point.")
+    elif named and not chat:
         from core.ioc_pivots import MAX_PIVOTS
         lines.append(f"{min(named, MAX_PIVOTS)} indicator(s) named here are "
                      "seeded as search obligations against the sources that can "
@@ -456,24 +514,16 @@ def remove_fact_text(markdown: str, fact: str) -> str:
 
 def append_facts(case_dir: str | os.PathLike, new_facts: Any) -> list[str]:
     """Append to the case file; returns the facts actually added."""
-    from core.investigation_tasks import read_case_markdown, write_case_markdown
+    from core.investigation_tasks import edit_case_markdown
 
-    md = read_case_markdown(case_dir)
+    md, out = edit_case_markdown(case_dir, lambda md: append_facts_text(md, new_facts))
     before = {_key(f) for f in facts_in(md)}
-    out = append_facts_text(md, new_facts)
-    if out == md:
-        return []
-    write_case_markdown(case_dir, out)
     return [f for f in facts_in(out) if _key(f) not in before]
 
 
 def remove_fact(case_dir: str | os.PathLike, fact: str) -> bool:
     """Drop the bullet stating ``fact`` from the case file; False when none did."""
-    from core.investigation_tasks import read_case_markdown, write_case_markdown
+    from core.investigation_tasks import edit_case_markdown
 
-    md = read_case_markdown(case_dir)
-    out = remove_fact_text(md, fact)
-    if out == md:
-        return False
-    write_case_markdown(case_dir, out)
-    return True
+    md, out = edit_case_markdown(case_dir, lambda md: remove_fact_text(md, fact))
+    return out != md

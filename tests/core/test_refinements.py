@@ -79,3 +79,55 @@ def test_the_report_shows_a_refinement_beside_its_base(tmp_path):
     md = assemble_client_report(case, report_scope="estate")
     assert "Refines F-001 [CONFIRMED]" in md
     assert "Refined by F-002 [SUSPECTED]" in md
+
+
+def test_a_twin_of_two_claims_folds_the_second_into_the_first(tmp_path, monkeypatch):
+    """Two records of one event that each lacked an identifier the other
+    held become one claim when a later record shows both: the twin joins the
+    first and the second is superseded by it, its citations carried."""
+    case = _case(tmp_path)
+    a = _claim(case, "jane.doe opened the share at 2031-02-04 12:06:28 and listed it at "
+                     "2031-02-04 12:07:10.", "LIKELY", 1)
+    b = _claim(case, "Share access by jane.doe from 2031-02-04 12:06:28; cookies from "
+                     "2031-02-04 12:09:44.", "LIKELY", 2)
+    assert a != b
+    c = _claim(case, "jane.doe reached the share at 2031-02-04 12:06:28, listed it at "
+                     "2031-02-04 12:07:10, cookies from 2031-02-04 12:09:44.", "LIKELY", 3)
+    graph = load_graph(case)
+    assert c == a
+    assert graph["nodes"][b]["status"] == "superseded" and graph["nodes"][b]["superseded_by"] == a
+    assert {2, 3} <= set(graph["nodes"][a]["merged_finding_call_ids"])
+    # Off: the second record stays a claim of its own.
+    monkeypatch.setenv("ATLAS_TWIN_FOLD", "0")
+    case2 = _case(tmp_path / "off")
+    a2 = _claim(case2, "jane.doe opened the share at 2031-02-04 12:06:28 and listed it at "
+                       "2031-02-04 12:07:10.", "LIKELY", 1)
+    b2 = _claim(case2, "Share access by jane.doe from 2031-02-04 12:06:28; cookies from "
+                       "2031-02-04 12:09:44.", "LIKELY", 2)
+    _claim(case2, "jane.doe reached the share at 2031-02-04 12:06:28, listed it at "
+                  "2031-02-04 12:07:10, cookies from 2031-02-04 12:09:44.", "LIKELY", 3)
+    assert load_graph(case2)["nodes"][b2]["status"] == "new" and a2 != b2
+
+
+def test_a_stronger_twin_or_a_refinement_is_never_folded(tmp_path):
+    case = _case(tmp_path)
+    a = _claim(case, EVENT + ".", "LIKELY", 1)
+    b = _claim(case, "PSEXESVC installed at 2031-02-04 12:06:28 UTC; started at "
+                     "2031-02-04 12:06:30 UTC.", "CONFIRMED", 2)
+    _claim(case, EVENT + ", started at 2031-02-04 12:06:30 UTC.", "LIKELY", 3)
+    graph = load_graph(case)
+    assert graph["nodes"][a]["status"] == "new" and graph["nodes"][b]["status"] == "new"
+
+
+def test_two_findings_on_one_file_at_different_minutes_both_stay_current(tmp_path):
+    """The fold rests on shared event identifiers (anchors_agree), never on a
+    shared file: a twin merge into one finding leaves the other current."""
+    case = _case(tmp_path)
+    path = "C:\\Users\\jane.doe\\AppData\\Local\\Temp\\upd.exe"
+    a = _claim(case, f"{path} ran at 2031-02-04 12:06:28 and wrote a file at 2031-02-04 12:07:10.", "LIKELY", 1)
+    b = _claim(case, f"{path} ran again at 2031-02-04 13:15:02.", "LIKELY", 2)
+    c = _claim(case, f"{path} ran at 2031-02-04 12:06:28 and wrote upd.dat at 2031-02-04 12:07:10.",
+               "LIKELY", 3)
+    graph = load_graph(case)
+    assert c == a and b != a
+    assert graph["nodes"][a]["status"] == "new" and graph["nodes"][b]["status"] == "new"

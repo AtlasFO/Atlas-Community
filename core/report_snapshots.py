@@ -465,6 +465,147 @@ def resolve_latest_report_dir(case_dir: str | os.PathLike) -> Path:
     return root
 
 
+# ── The case's report files and its report: one rule for the CLI and the
+# dashboard (atlas report, the Report view, the bundle download) ────────────
+
+# Process and audit artifacts that sit in reports/ but are no deliverable.
+_REPORT_SKIP_NAMES = frozenset({
+    "claim_snapshot.json",
+    "investigation_fingerprint.json",
+})
+_REPORT_SKIP_SUFFIXES = (
+    "_trace.md", "_trace.json", ".before_trim",
+)
+
+
+def is_report_deliverable(name: str) -> bool:
+    """Markdown reports + timeline TSVs/CSVs (+ small timeline README)."""
+    if name.startswith(".") or name in _REPORT_SKIP_NAMES:
+        return False
+    if any(name.endswith(s) for s in _REPORT_SKIP_SUFFIXES):
+        return False
+    low = name.lower()
+    if low.endswith(".md"):
+        return True
+    if "timeline" in low and low.endswith((".tsv", ".csv", ".txt")):
+        return True
+    return False
+
+
+def report_file_kind(name: str) -> str:
+    low = name.lower()
+    if "timeline" in low and low.endswith((".tsv", ".csv")):
+        return "timeline"
+    if "timeline" in low and low.endswith(".txt"):
+        return "timeline_readme"
+    if low.endswith(".md"):
+        return "report"
+    return "other"
+
+
+def report_snapshot_dir(case_dir: str | os.PathLike) -> str | None:
+    """The rerun snapshot ``reports/latest`` names, when the case has one.
+
+    A persisting ``atlas rerun`` freezes the report pack into
+    ``reports/initial_report/`` or ``reports/rerun_NNNN/`` and points
+    ``reports/latest`` at the newest one. Only a directory that resolves
+    inside the case's own reports/ counts: a link aimed anywhere else, or one
+    that cannot be resolved, leaves reports/ as the only source.
+    """
+    reports = os.path.realpath(os.path.join(str(case_dir), "reports"))
+    try:
+        snap = os.path.realpath(resolve_latest_report_dir(case_dir))
+    except (OSError, RuntimeError):  # RuntimeError: a symlink loop, Python < 3.13
+        return None
+    if not snap.startswith(reports + os.sep) or not os.path.isdir(snap):
+        return None
+    return snap
+
+
+def report_files(case_dir: str | os.PathLike) -> list[dict[str, Any]]:
+    """Case-scoped report deliverables (markdown + timeline files).
+
+    reports/ first, then the files of the newest rerun snapshot that reports/
+    does not hold under the same name. Promoting a snapshot moves every
+    deliverable out of reports/, so a file found there was written after the
+    snapshot was taken and supersedes the snapshot's copy of that name: a
+    rerun that changed no investigation state regenerates its report in
+    reports/ and leaves the snapshot as it was. Names are therefore unique,
+    which is what lets the dashboard's export route find a file by name in
+    this same listing. A file that resolves outside the case's reports/ is not
+    listed. Each entry: name, rel (to reports/), kind, size, mtime, abs_path.
+    """
+    reports = os.path.join(str(case_dir), "reports")
+    real_reports = os.path.realpath(reports)
+    sources = [(reports, "")]
+    snap = report_snapshot_dir(case_dir)
+    if snap is not None:
+        sources.append((snap, os.path.relpath(snap, real_reports)))
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for d, sub in sources:
+        try:
+            names = sorted(os.listdir(d))
+        except OSError:
+            continue
+        for fn in names:
+            if fn in seen or not is_report_deliverable(fn):
+                continue
+            p = os.path.join(d, fn)
+            real = os.path.realpath(p)
+            if not real.startswith(real_reports + os.sep) \
+                    or not os.path.isfile(real):
+                continue
+            try:
+                st = os.stat(p)
+            except OSError:
+                continue
+            seen.add(fn)
+            out.append({
+                "name": fn,
+                "rel": f"{sub}/{fn}" if sub else fn,
+                "kind": report_file_kind(fn),
+                "size": st.st_size,
+                "mtime": st.st_mtime,
+                "abs_path": p,
+            })
+    return out
+
+
+def is_main_report_name(name: str) -> bool:
+    """Whether a file name is the case's main report rather than a note, a
+    review, a host section or the change history: ``*_report.md`` and the
+    official deliverable names (core.report_exit), never ``host_*``."""
+    from core.report_exit import OFFICIAL_NAME_PREFIXES, OFFICIAL_NAMES
+    low = name.lower()
+    if not low.endswith(".md") or low.startswith("host_") or name in RESERVED_FILES:
+        return False
+    return (low.endswith("_report.md") or low in OFFICIAL_NAMES
+            or low.startswith(OFFICIAL_NAME_PREFIXES))
+
+
+def report_rank(f: dict[str, Any], reports: str) -> tuple:
+    """Order for the case's default report, best last.
+
+    The case's main report before notes, reviews, host sections and the
+    rerun change history; then the working copy in ``reports`` before a
+    snapshot's file; then the estate report before a single-scope one; then
+    the newest. ``reports`` is the same join report_files builds its root
+    entries from.
+    """
+    return (is_main_report_name(f["name"]),
+            os.path.dirname(f["abs_path"]) == reports,
+            f["name"].lower().endswith("estate_report.md"), f.get("mtime") or 0)
+
+
+def default_report(case_dir: str | os.PathLike) -> Path | None:
+    """The case's report: the best-ranked markdown file of report_files."""
+    reports = os.path.join(str(case_dir), "reports")
+    md = [f for f in report_files(case_dir) if f["kind"] == "report"]
+    best = max(md, key=lambda f: report_rank(f, reports), default=None)
+    return Path(best["abs_path"]) if best else None
+
+
 def _load_index(case_dir: str | os.PathLike) -> dict[str, Any]:
     path = snapshots_index_path(case_dir)
     if not path.is_file():

@@ -36,7 +36,10 @@ _CLASS_KIND = {"disk": "image", "memory": "memory", "pcap": "capture"}
 _ARCHIVE_SUFFIXES = (".zip", ".7z", ".rar", ".tar", ".tgz", ".tbz2", ".txz", ".gz", ".bz2", ".xz")
 _SPLIT_RE = re.compile(r"\.(\d{3})$")
 _VMDK_EXTENT_RE = re.compile(r"^(.+)-(?:flat|s\d{3}|f\d{3})\.vmdk$", re.I)
-_STATE_KEYS = ("status", "touched", "calls", "examined_by", "examined_at", "blocked_reason")
+# read_by and listed_by too: a rebuild that dropped them would turn a listing
+# into a read (was_read reads an item without either as read).
+_STATE_KEYS = ("status", "touched", "calls", "examined_by", "examined_at", "blocked_reason",
+               "read_by", "listed_by")
 # ponytail: a run naming more distinct paths under one item than this
 # undercounts it; a set per item would lift it at the cost of ledger size.
 MAX_TOUCHED = 2000
@@ -175,22 +178,41 @@ def _roots(ledger: dict[str, Any]) -> list[tuple[str, str]]:
     return sorted(out, key=lambda r: -len(r[0]))
 
 
-def observe(ledger: dict[str, Any], case_root: Path, paths: list[str], *,
-            tool: str = "", call_id: str = "") -> bool:
-    """Credit the items a successful probe call named. Returns whether
-    anything changed; the caller saves the ledger."""
+def observe(ledger: dict[str, Any], case_root: Path, reads: dict[str, Any], *,
+            tool: str = "", call_id: str = "", content: bool | None = None) -> bool:
+    """Credit the items a successful probe call read or named (``reads``:
+    core.evidence_identity.call_reads): an image item by an in-image name of
+    it (a handle, the readable form, an icat argument list, a mount, the
+    image file or a segment), any other item by a file of it the call
+    named. A copy extracted from an image credits the extraction, not the
+    image (the coverage ledger's rule). Returns whether anything changed;
+    the caller saves the ledger. ``content``: the call read content
+    (core.coverage_ledger.reads_content when not given); a listing, or a
+    file reached only through a folder the call listed, records
+    ``listed_by``, a read ``read_by``."""
+    if content is None:
+        from core.coverage_ledger import reads_content
+        content = reads_content(tool) if tool else True
     items = ledger.get("items")
     if not isinstance(items, dict) or not items or _own_words(tool or ""):
         return False
-    from core.coverage_ledger import _norm_rel, _source_images_for
-    named = {_norm_rel(p).casefold() for p in paths if p} - {""}
-    named |= _source_images_for(case_root, paths)
+    # A folder the call was pointed at is touched as that folder, never as
+    # the files below it (a search over evidence/ examined no item).
+    swept = set(reads.get("folder", ())) - set(reads.get("content", ())) - set(reads.get("processed", ()))
+    named = {str(i).casefold(): True for i in reads.get("images", ())}
+    for key in ("content", "processed", "listed"):
+        for kind, ident in (x[:2] for x in reads.get(key, ()) if len(x) == 2):
+            if kind == "file" and (kind, ident) not in swept:
+                low = str(ident).casefold()
+                named[low] = named.get(low, False) or key != "listed"
+    for f in reads.get("folders", ()):
+        named[str(f).casefold()] = True
     roots = _roots(ledger)
     changed = False
     for n in sorted(named):
         for root, iid in roots:
             if n == root or n.startswith(root + "/"):
-                changed |= _touch(items[iid], n, tool, call_id)
+                changed |= _touch(items[iid], n, tool, call_id, content and named[n])
                 break
     return changed
 
@@ -198,16 +220,23 @@ def observe(ledger: dict[str, Any], case_root: Path, paths: list[str], *,
 def _own_words(tool: str) -> bool:
     """A call whose arguments are the model's own words, by the registry the
     citation judge uses (core.forensic_citation): a finding or a coverage
-    verdict that names a file is no read of it. A job start runs its tool
-    over the evidence it names; the other job tools name only a job id."""
+    verdict that names a file is no read of it. A job's start runs its tool
+    over the evidence it names, and credits it once the job's outcome says
+    the job read it (tools.jobs._credit_collected); the other job tools name
+    only a job id."""
     if tool.startswith("job_"):
         return False
     from core.forensic_citation import own_words_entry
     return own_words_entry({"type": "tool_call", "cmd": f"<py>:{tool}"})
 
 
-def _touch(item: dict[str, Any], path: str, tool: str, call_id: str) -> bool:
+def _touch(item: dict[str, Any], path: str, tool: str, call_id: str, content: bool = True) -> bool:
     changed = False
+    # Listed and read kept apart: the first call of each kind.
+    key = "read_by" if content else "listed_by"
+    if not item.get(key):
+        item[key] = {"call_id": call_id, "tool": tool}
+        changed = True
     touched = item.setdefault("touched", [])
     if path not in touched and len(touched) < MAX_TOUCHED:
         touched.append(path)
@@ -227,9 +256,10 @@ def reset(ledger: dict[str, Any]) -> int:
     """Every item back to unseen, for a cleared run. Returns how many changed."""
     n = 0
     for item in (ledger.get("items") or {}).values():
-        if isinstance(item, dict) and (item.get("status") != "unseen" or item.get("touched")):
+        if isinstance(item, dict) and (item.get("status") != "unseen" or item.get("touched")
+                                       or item.get("read_by") or item.get("listed_by")):
             item.update(status="unseen", touched=[], calls=[], examined_by=None,
-                        examined_at=None, blocked_reason="")
+                        examined_at=None, blocked_reason="", read_by=None, listed_by=None)
             n += 1
     return n
 
@@ -311,7 +341,7 @@ def withheld_test(case_dir: str | os.PathLike) -> Callable[[dict[str, Any]], boo
         st = None
     if not st:
         return lambda item: False
-    roots = hs.device_paths(case_root, st.get("device") or "") if st.get("frame") == "incident" else []
+    roots = hs.device_paths(case_root, st.get("device") or "") if st.get("frame") in hs.HANDOVER_FRAMES else []
 
     def test(item: dict[str, Any]) -> bool:
         p = case_root / str(item.get("path") or "")
@@ -321,11 +351,35 @@ def withheld_test(case_dir: str | os.PathLike) -> Callable[[dict[str, Any]], boo
     return test
 
 
+def _honest() -> bool:
+    from core.deferred_intents import coverage_honesty_on
+    return coverage_honesty_on()
+
+
+def was_read(item: dict[str, Any]) -> bool:
+    """Whether an item counts as examined: under ATLAS_COVERAGE_HONESTY a
+    call read its content (a listing identifies it without reading it);
+    else any probe. An item touched before the split (no read_by or
+    listed_by recorded) keeps its old status."""
+    if item.get("status") != "examined":
+        return False
+    if not _honest() or not (item.get("read_by") or item.get("listed_by")):
+        return True
+    return bool(item.get("read_by"))
+
+
 def counts(item_rows: list[dict[str, Any]]) -> dict[str, int]:
-    c = {"total": len(item_rows), "examined": 0, "blocked": 0, "unseen": 0}
+    c = {"total": len(item_rows), "examined": 0, "blocked": 0, "unseen": 0, "read": 0, "listed_only": 0}
     for r in item_rows:
-        st = r.get("status") if r.get("status") in ("examined", "blocked") else "unseen"
-        c[st] += 1
+        if r.get("status") == "blocked":
+            c["blocked"] += 1
+        elif was_read(r):
+            c["examined"] += 1
+            c["read"] += 1
+        else:
+            c["unseen"] += 1
+            if r.get("status") == "examined":
+                c["listed_only"] += 1
     return c
 
 
@@ -342,7 +396,7 @@ def unseen(case_dir: str | os.PathLike | None, *, limit: int = 40) -> list[str]:
         return []
     out = [str(i["path"]) for i in sorted((i for i in items.values() if isinstance(i, dict)),
                                           key=lambda i: i["path"])
-           if i.get("status") == "unseen" and not withheld(i)]
+           if i.get("status") != "blocked" and not was_read(i) and not withheld(i)]
     return out[:limit]
 
 
@@ -360,6 +414,9 @@ _T = {
         "call": "call {id}",
         "gap_unseen": "- Not examined: {name} ({kind}); no content of it was read.",
         "gap_blocked": "- Blocked: {name} ({kind}): {reason}",
+        "gap_listed": "- Listed only, content never read: {name} ({kind}): {tool} listed it (call {id}); no file inside it was read.",
+        "listed_only": "listed only: {tool} (call {id})", "read": "read: {tool} (call {id})",
+        "inside": "; {read} of {total} high-value files read inside",
         "image": "image", "memory": "memory", "capture": "capture", "archive": "archive",
         "file": "file", "tree": "folder",
     },
@@ -377,6 +434,9 @@ _T = {
         "call": "Aufruf {id}",
         "gap_unseen": "- Nicht ausgewertet: {name} ({kind}); kein Inhalt davon wurde gelesen.",
         "gap_blocked": "- Blockiert: {name} ({kind}): {reason}",
+        "gap_listed": "- Nur aufgelistet, Inhalt nie gelesen: {name} ({kind}): {tool} hat es aufgelistet (Aufruf {id}); keine Datei darin wurde gelesen.",
+        "listed_only": "nur aufgelistet: {tool} (Aufruf {id})", "read": "gelesen: {tool} (Aufruf {id})",
+        "inside": "; {read} von {total} wertvollen Dateien darin gelesen",
         "image": "Abbild", "memory": "Arbeitsspeicher", "capture": "Mitschnitt", "archive": "Archiv",
         "file": "Datei", "tree": "Ordner",
     },
@@ -400,6 +460,10 @@ def _status(row: dict[str, Any], tx: dict[str, str]) -> str:
         return tx["blocked"] + (f": {str(row.get('blocked_reason') or '')[:160]}" if row.get("blocked_reason") else "")
     if st != "examined":
         return tx["unseen"]
+    if _honest() and (row.get("read_by") or row.get("listed_by")):
+        by = row.get("read_by") or row.get("listed_by")
+        return tx["read" if row.get("read_by") else "listed_only"].format(
+            tool=by.get("tool") or "?", id=by.get("call_id") or "?")
     if row.get("files"):
         return (tx["named"].format(n=row.get("named_files", 0), m=row["files"])
                 + (tx["folders"].format(k=row["named_folders"]) if row.get("named_folders") else ""))
@@ -429,13 +493,30 @@ def report_lines(case_dir: str | os.PathLike, findings: list[dict[str, Any]] | N
     withheld = withheld_test(case_dir)
     lines = [f"**{tx['title']}:** " + tx["summary"].format(**counts(item_rows)), "", tx["legend"], "",
              tx["head"], "|---|---|---|---|---|"]
-    order = {"unseen": 0, "blocked": 1, "examined": 2}
-    for row in sorted(item_rows, key=lambda r: (order.get(r.get("status"), 0), r["path"])):
+    def rank(r: dict[str, Any]) -> float:
+        if r.get("status") == "blocked":
+            return 1
+        if r.get("status") == "examined":
+            return 2 if was_read(r) else 0.5          # listed only: after the unseen, before the read
+        return 0
+    inside: dict = {}
+    try:
+        from core.contents_index import index_status_on, inside_counts
+        if index_status_on():
+            inside = inside_counts(case_dir).get("per_image") or {}
+    except Exception:  # noqa: BLE001
+        inside = {}
+    for row in sorted(item_rows, key=lambda r: (rank(r), r["path"])):
         by = row.get("examined_by") or {}
         who = (tx["call"].format(id=by["call_id"]) + f" ({by.get('tool')})") if by.get("call_id") else (by.get("tool") or "—")
         fids = _finding_ids(row, findings or [])
+        status = _status(row, tx)
+        held = inside.get(str(row.get("path") or ""))
+        if held:
+            # An image listed at intake: how much of what it holds was read.
+            status += tx["inside"].format(read=held["read"], total=held["high_value"])
         lines.append(f"| {_name(row, withheld(row), tx)} | {tx.get(row.get('kind'), row.get('kind'))} | "
-                     f"{_status(row, tx)} | {who} | {', '.join(fids) or '—'} |")
+                     f"{status} | {who} | {', '.join(fids) or '—'} |")
     return lines
 
 
@@ -453,4 +534,8 @@ def gap_lines(case_dir: str | os.PathLike, language: str = "en") -> list[str]:
                                                 reason=str(row.get("blocked_reason") or "")[:200]))
         elif row.get("status") != "examined":
             out.append(tx["gap_unseen"].format(name=_name(row, withheld(row), tx), kind=kind))
+        elif not was_read(row):
+            by = row.get("listed_by") or {}
+            out.append(tx["gap_listed"].format(name=_name(row, withheld(row), tx), kind=kind,
+                                               tool=by.get("tool") or "?", id=by.get("call_id") or "?"))
     return out

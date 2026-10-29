@@ -14,9 +14,11 @@ from typing import Any
 
 from fastmcp import FastMCP
 
+from core.state_files import BRAIN_CONSULTED
+
 mcp = FastMCP("brain")
 
-_CONSULT_STATE = "analysis/brain_consulted.json"
+_CONSULT_STATE = f"analysis/{BRAIN_CONSULTED}"
 _DEFAULT_LIMIT = 3
 _MAX_LIMIT = 5
 _SNIPPET_CHARS = 900

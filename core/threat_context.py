@@ -373,7 +373,7 @@ def withdraw(case_dir: str | os.PathLike, *, ids: Iterable[str] = (), source: st
     """Retire rows by id or by source, keeping them with the reason."""
     reason = " ".join(str(reason or "").split())
     if len(reason) < 4:
-        raise IntelError("a withdrawal needs a reason")
+        raise IntelError("a withdrawal needs a reason of at least 4 characters")
     wanted = set(ids)
     data = load(case_dir)
     n = 0
@@ -507,12 +507,27 @@ def sweep(case_dir: str | os.PathLike, ids: Iterable[str] = (), *,
             entries_by_id = log.index().by_call_id or {}
         except Exception:  # noqa: BLE001
             entries_by_id = {}
+    from core.indicators import _sightings_on, printed_text, sightings
     wanted = set(ids or ())
     results: list[dict[str, Any]] = []
     for r in active_rows(case_dir):
         if wanted and r["id"] not in wanted:
             continue
         hits: list[dict[str, Any]] = []
+        if _sightings_on():
+            # Every evidence call of the run, the in-process tools' outputs
+            # included, with the request echo removed and the row test
+            # applied (core.indicators.sightings).
+            for s_ in sightings(r["type"], r["value"], [], case_dir=case_dir, limit=MAX_HITS_PER_ROW):
+                entry = entries_by_id.get(s_["call"]) or {}
+                hits.append({"source_call_id": s_["call"], "tool": s_["tool"],
+                             "cmd": str(entry.get("cmd") or "")[:160],
+                             "excerpt": _excerpt(r["value"], printed_text(entry)) if entry else "",
+                             "host": s_["host"], "first": s_["first"], "last": s_["last"]})
+            results.append({"id": r["id"], "type": r["type"], "value": r["value"],
+                            "source": r["source"]["name"], "result": "hit" if hits else "not_found",
+                            "hits": hits})
+            continue
         for call_id, tool, text in find_windows(_query_core(r["type"], r["value"])):
             if any(h["source_call_id"] == call_id for h in hits):
                 continue
@@ -540,10 +555,11 @@ def sweep(case_dir: str | os.PathLike, ids: Iterable[str] = (), *,
         unread = []
     scope = {"indexed_outputs": st.get("sources", 0), "tools": st.get("tools", {}),
              "unread_items": unread,
-             "note": ("Searched the full-output index, which holds what command-line tools "
-                      "printed. What in-process tools returned (table queries, parsers Atlas runs "
-                      "itself) is not in it, nor is evidence no call has read: a value not found "
-                      "here was not found in those outputs only, never shown to be absent.")}
+             "note": ("Searched the outputs of this run's evidence calls: what command-line tools "
+                      "printed and what in-process tools (table queries, parsers Atlas runs itself) "
+                      "returned, with each call's request echo removed. Evidence no call has read is "
+                      "not in them: a value not found here was not found in those outputs only, never "
+                      "shown to be absent.")}
     data = load(case_dir)
     swept = dict((data.get("sweep") or {}).get("rows") or {})
     swept.update({x["id"]: [h["source_call_id"] for h in x["hits"]] for x in results})

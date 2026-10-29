@@ -19,15 +19,15 @@ mcp = FastMCP("imaging")
 def vmdk_chain_info(path: str) -> dict:
     """Report the VMware snapshot chain for a .vmdk file or a VM directory.
 
-    RUN THIS FIRST for any VMDK evidence, before mmls/fls/mounting. When
-    snapshot deltas (X-000001.vmdk, …) exist, the base/-flat extent is
-    FROZEN at the moment the first snapshot was taken — all later disk
-    writes live only in the delta chain, so analyzing the flat extent
-    silently shows an old system state. The result names the chain-top
-    descriptor to analyze (`analysis_targets[].recommended_descriptor`),
-    snapshot names/creation dates from the .vmsd, and the disk the .vmx
-    actually attaches. Cheap even on network storage: reads descriptor
-    text and stat() only, never extent data.
+    Use it when a VMDK has snapshot deltas (X-000001.vmdk, …): the base/-flat
+    extent is FROZEN at the moment the first snapshot was taken — all later
+    disk writes live only in the delta chain, so analyzing the base silently
+    shows an old system state. The result names the chain-top descriptor to
+    analyze (`analysis_targets[].recommended_descriptor`), snapshot
+    names/creation dates from the .vmsd, and the disk the .vmx actually
+    attaches. tsk.* reads a chain top through its raw view with the chain
+    applied. Cheap even on network storage: reads descriptor text and
+    stat() only, never extent data.
     """
     p = os.path.abspath(os.path.expanduser(path))
     is_file = not os.path.isdir(p)
@@ -42,8 +42,11 @@ def vmdk_chain_info(path: str) -> dict:
         f"Every VMDK in {directory} is reported below — one call covers the "
         "whole directory, a sibling disk needs no second call."
     )
-    # Corroborate with qemu-img (the chain-aware reader on this box);
-    # best-effort — descriptor parsing above is the source of truth.
+    # Corroborate with qemu's own reading of the chain, probed one node at a
+    # time without following a header to anything outside the image's folder
+    # (core.raw_views.probe; qemu-img's own --backing-chain would open what a
+    # hostile header names, network protocols included). Best-effort: the
+    # descriptor parsing above is the source of truth.
     try:
         targets = result.get("analysis_targets") or []
         chosen = None
@@ -60,14 +63,15 @@ def vmdk_chain_info(path: str) -> dict:
                     break
         chosen = chosen or (targets[0] if targets else None)
         if result.get("success") and chosen and shutil.which("qemu-img"):
+            from core.raw_views import probe
             descriptor = chosen["recommended_descriptor"]
-            q = run(["qemu-img", "info", "--backing-chain", "--output=json",
-                     descriptor],
-                    timeout=60, line_cap=None)
-            if q.get("success"):
-                result["qemu_img_backing_chain"] = q["stdout"][:4096]
-                # Always name the disk the corroboration belongs to.
-                result["qemu_img_backing_chain_of"] = descriptor
+            c = probe(descriptor)
+            if c.get("refused"):
+                result["qemu_refused"] = c["refused"]
+            elif c.get("chain"):
+                result["qemu_img_backing_chain"] = json.dumps(c["chain"])[:4096]
+            # Always name the disk the corroboration belongs to.
+            result["qemu_img_backing_chain_of"] = descriptor
     except Exception:
         pass
     return result
@@ -94,29 +98,6 @@ def _sparse_files_supported(directory: str) -> bool:
             pass
 
 
-def _image_sizes(descriptor_path: str) -> tuple[int, int]:
-    """(virtual size, bytes allocated across the whole snapshot chain) of a
-    disk image, 0 where qemu-img does not say."""
-    info = run(["qemu-img", "info", "--output=json", "--backing-chain",
-                descriptor_path], timeout=60, line_cap=None)
-    if not info.get("success"):
-        return 0, 0
-    try:
-        data = json.loads(info["stdout"])
-    except (ValueError, TypeError):
-        return 0, 0
-    chain = data if isinstance(data, list) else [data]
-    chain = [c for c in chain if isinstance(c, dict)]
-    if not chain:
-        return 0, 0
-    try:
-        virtual = int(chain[0].get("virtual-size") or 0)
-        allocated = sum(int(c.get("actual-size") or 0) for c in chain)
-    except (ValueError, TypeError):
-        return 0, 0
-    return virtual, allocated
-
-
 def _open_case_dir() -> str:
     """The case the execution log is open on, or '' outside a run."""
     try:
@@ -134,16 +115,20 @@ def vmdk_export_raw(
     force_frozen_base: bool = False,
     force_reexport: bool = False,
 ) -> dict:
-    """Flatten a VMDK (applying its full snapshot chain) into a local raw image.
+    """Copy a disk container (VMDK, VHD, VHDX, QCOW2 or VDI, its snapshot
+    chain applied) to a local raw image.
 
-    Uses `qemu-img convert` on the given descriptor: all snapshot deltas
-    below it are merged, and the result is a raw image that TSK/mount tools
-    can open (this build's TSK and xmount cannot read VMDK natively). Also
-    the supported way to stage a LOCAL working copy of network-mounted VMDK
-    evidence. Pass the chain-top descriptor from img_vmdk_chain_info — a
-    base descriptor shadowed by deltas is refused unless
-    force_frozen_base=True (pre-snapshot state, deliberate choice only).
-    Long-running on large disks; the timeout scales with the virtual size.
+    Atlas reads containers through a read-only raw view without a copy; this
+    copy is for a host that serves no raw views, or a tool that must run as
+    root (a view refuses root): while a view is up the call is refused
+    unless force_reexport=True. Uses `qemu-img convert` on the chain the
+    container's headers name, checked first (every file inside the image's
+    folder, no network names). Also the supported way to stage a LOCAL
+    working copy of network-mounted evidence. Pass the chain-top descriptor
+    from img_vmdk_chain_info — a base descriptor shadowed by deltas is
+    refused unless force_frozen_base=True (pre-snapshot state, deliberate
+    choice only). Long-running on large disks; the timeout scales with the
+    virtual size.
 
     output_path may be omitted: the image is then written as
     analysis/exports/<descriptor stem>.raw under the open case.
@@ -153,6 +138,30 @@ def vmdk_export_raw(
     next step is tsk.mmls, not another multi-GB convert.
     """
     descriptor_path = os.path.abspath(os.path.expanduser(descriptor_path))
+    from core.raw_views import json_filename, probe
+    container = probe(descriptor_path)
+    if container.get("refused") or container.get("unsupported"):
+        return {"success": False, "gate": "container_refused",
+                "error": (f"{descriptor_path} is not copied: "
+                          f"{container.get('refused') or container.get('unsupported')}.")}
+    if not force_reexport:
+        try:
+            from core.mount_plan import live_raw_view
+            live = live_raw_view(_open_case_dir(), descriptor_path)
+        except Exception:  # noqa: BLE001 - no view known: the copy goes on
+            live = ""
+        if live:
+            return {
+                "success": False,
+                "gate": "raw_view_live",
+                "error": (
+                    f"No copy needed: {descriptor_path} is readable as a raw disk now, through "
+                    f"its read-only raw view {live}. Pass the image (or the view) to tsk.*, "
+                    "plaso or the contents-index tools. force_reexport=True copies it anyway, "
+                    "for a tool that must run as root."),
+                "raw_view": live,
+                "recommended_next_tool": "tsk.mmls",
+            }
     if not output_path:
         case = _open_case_dir()
         if not case:
@@ -204,7 +213,16 @@ def vmdk_export_raw(
                 "recommended_next_tool": "tsk.mmls",
             }
 
-    virtual_size, allocated = _image_sizes(descriptor_path)
+    chain = container.get("chain") or []
+    if chain:
+        virtual_size = int(chain[0].get("virtual_size") or 0)
+        allocated = sum(int(n.get("actual_size") or 0) for n in chain)
+    else:   # raw bytes under the name: a plain copy
+        try:
+            st = os.stat(descriptor_path)
+            virtual_size, allocated = st.st_size, st.st_blocks * 512
+        except OSError:
+            virtual_size, allocated = 0, 0
 
     out_parent = os.path.dirname(os.path.abspath(output_path)) or "."
     os.makedirs(out_parent, exist_ok=True)
@@ -221,12 +239,17 @@ def vmdk_export_raw(
         need = virtual_size
         if allocated and _sparse_files_supported(out_parent):
             need = min(virtual_size, allocated + allocated // 10)
-        if free is not None and free < need:
+        # The copy keeps the case volume's floor free (core.diskguard), so
+        # the run's own writes (trace, index, spills) still fit after it.
+        from core import diskguard
+        floor = int(diskguard.check(out_parent).get("required_bytes") or 0)
+        if free is not None and free < need + floor:
             return {"success": False, "error":
                     f"Insufficient free space for raw export: need up to "
                     f"{need / 1024**3:.1f} GB "
                     f"({virtual_size / 1024**3:.1f} GB virtual, "
-                    f"{allocated / 1024**3:.1f} GB allocated in the source), "
+                    f"{allocated / 1024**3:.1f} GB allocated in the source) "
+                    f"and {floor / 1024**3:.1f} GB the case volume keeps free, "
                     f"{free / 1024**3:.1f} GB free under {out_parent}. "
                     f"Free space or export to another volume."}
 
@@ -237,8 +260,10 @@ def vmdk_export_raw(
     # into analysis/. Running it under sudo would risk a password-prompt hang
     # and leave a root-owned output image — exactly the sudo failure mode the
     # playbook warns against for read-directly tools.
-    result = run(["qemu-img", "convert", "-O", "raw",
-                  descriptor_path, output_path],
+    # The checked chain as an explicit node graph: nothing a header names at
+    # open time adds a file.
+    source = [json_filename(chain)] if chain else ["-f", "raw", descriptor_path]
+    result = run(["qemu-img", "convert", "-O", "raw", *source, output_path],
                  timeout=timeout, output_dir=out_parent)
     if not result.get("success"):
         # A convert that stopped short leaves a raw image that opens and
@@ -367,10 +392,9 @@ def xmount_image(
     xmount input libraries — this build supports ewf/aaff/aewf/aff/raw ONLY).
     output_format: 'raw' (default) — exposes as /mount_point/<image>.dd.
     Useful when a tool doesn't support E01 natively (pass the raw file instead).
-    NOT for VMDK: use img_vmdk_chain_info + img_vmdk_export_raw → tsk.mmls
-    instead — xmount here has no vmdk input support, and a base VMDK with
-    snapshots must be opened chain-aware anyway. Demoted in Triage until
-    TSK orientation (prefer tsk.mmls on exported raw).
+    NOT for VMDK, VHD, VHDX, QCOW2 or VDI: xmount here has no input for them;
+    tsk.* reads them through the raw view Atlas makes (the mount plan names
+    it). Demoted in Triage until TSK orientation (prefer tsk.mmls).
     """
     err = ensure_mount_point(mount_point)
     if err:

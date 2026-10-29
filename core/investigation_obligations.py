@@ -259,7 +259,9 @@ def _artifact_value_obligations(root: Path) -> list[dict[str, Any]]:
 
     * The highest-value artifacts the case knows about must be read before
       the case is called complete. Reading whatever a listing happened to
-      show first is triage by accident.
+      show first is triage by accident. One whose read failed, or for which
+      the run recorded why it is not read, is settled the way a blocked
+      coverage unit is: the report lists it with that reason.
     * A belief may not assert an artifact is absent when the case's own
       index lists it — that is a false finding, and one that suppresses
       further work on exactly the evidence that mattered.
@@ -267,13 +269,14 @@ def _artifact_value_obligations(root: Path) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     try:
         from core.artifact_value import (
-            contradicted_absence_claims, unexamined_high_value,
+            contradicted_absence_claims, high_value_state,
         )
     except Exception:  # noqa: BLE001
         return out
 
     try:
-        clashes = contradicted_absence_claims(root)
+        # A hostless claim in a case of several hosts is a proposal, not a clash.
+        clashes = [c for c in contradicted_absence_claims(root) if not c.get("hostless")]
     except Exception:  # noqa: BLE001
         clashes = []
     if clashes:
@@ -290,9 +293,18 @@ def _artifact_value_obligations(root: Path) -> list[dict[str, Any]]:
         })
 
     try:
-        unread = unexamined_high_value(root)
+        items = high_value_state(root)["items"]
     except Exception:  # noqa: BLE001
-        unread = []
+        items = []
+    # The contents index's rows are pointer and disclosure, never a floor:
+    # an estate's index lists thousands, and the evidence gaps list them.
+    unread = [a for a in items if a["state"] == "open"
+              and not str(a.get("source") or "").startswith("index:")]
+    waived = sum(1 for a in items if a["state"] == "waived")
+    failed = sum(1 for a in items if a["state"] == "failed")
+    settled = ", ".join(part for n, part in (
+        (waived, f"{waived} not opened with a recorded reason"),
+        (failed, f"{failed} whose read failed")) if n)
     if unread:
         out.append({
             "id": "high_value_artifacts_examined",
@@ -302,7 +314,16 @@ def _artifact_value_obligations(root: Path) -> list[dict[str, Any]]:
                 f"{len(unread)} high-value artifact(s) present and never "
                 "opened: "
                 + ", ".join(f"{a['name']}({a['score']})" for a in unread[:6])
+                + (f"; {settled}" if settled else "")
             ),
+        })
+    elif settled:
+        out.append({
+            "id": "high_value_artifacts_examined",
+            "kind": "analysis",
+            "met": True,
+            "detail": (f"no high-value artifact left unread without a reason: {settled}; "
+                       "the report lists each"),
         })
     return out
 
@@ -329,9 +350,9 @@ def _event_log_obligations(root: Path) -> list[dict[str, Any]]:
     # Every event-log channel is *not* a duty. A Windows host ships ~160 of
     # them; many are header-only (nothing written) and few carry the
     # answers. Demanding all of them made
-    # this obligation unsatisfiable, which would have pinned every real run
-    # at incomplete_coverage forever — the same useless signal as the
-    # always-complete bug, inverted.
+    # this obligation unsatisfiable, which would pin every real run at
+    # incomplete_coverage forever — the same useless signal as an
+    # always-complete label, inverted.
     #
     # The duty is the logs an analyst would actually be negligent to skip:
     # non-empty, and high-value under the shared value model. That keeps one

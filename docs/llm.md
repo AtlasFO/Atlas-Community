@@ -1,7 +1,9 @@
 # Models and providers
 
 Atlas talks to any model that serves the OpenAI Chat Completions dialect,
-which every vendor it lists does. The T-Systems LLM Hub is the backend to
+which nearly every vendor it lists does, and speaks Anthropic's own Messages
+API for Claude (see [Anthropic's Messages API](#anthropics-messages-api)).
+The T-Systems LLM Hub is the backend to
 pick when case data has to stay on EU infrastructure (GDPR/DSGVO). Nothing is
 pre-selected: the wizard and the Settings page make you choose a provider
 explicitly, and an unset role is off, not silently the hub. Every backend
@@ -16,8 +18,17 @@ The model roles, and where each is pointed:
 | **DAIR phase director** (`dair.*`) | `DAIR_BACKEND=<provider>` |
 | **Run reviewer** (`atlas train` / `review`) | `ATLAS_REVIEW_PROVIDER=<provider>` |
 | **Report writer** | `ATLAS_REPORT_PROVIDER=<provider>` (else the analyst's) |
+| **Vision** (optional) | `VISION_BACKEND=<provider>`, model id override `VISION_MODEL` |
 
-The wizard and Settings → Providers set these per provider. An explicit
+The wizard and Settings → Providers set the first five per provider. The
+vision role is chosen on purpose and is never assigned by `--role all`:
+`bin/atlas provider use NAME --role vision` (or `VISION_BACKEND`) names a
+provider whose model takes images. It is used only by `images.describe`,
+which describes a case picture (a carved one, for example), and only for a case whose brief states
+`Vision descriptions: on` (a missing row, or any other text, is off): a
+picture then leaves the workstation for that provider. The report's gap lines
+name each picture class no model could identify and why (descriptions off in
+the brief, no vision model, a model that takes no image). An explicit
 `ATLAS_AGENT_MODEL`, `REASON_MODEL`, `DAIR_MODEL` or `ATLAS_REVIEW_MODEL`
 outranks the provider's model; assigning a role on the Settings page clears
 that role's override, and the Providers section warns while one is still set.
@@ -127,19 +138,22 @@ Thinking levels group. Nothing is required: a run starts without any level set.
 
 ## Supported providers
 
-Atlas speaks one wire dialect, Chat Completions (plus the optional Responses
-API for OpenAI). A vendor without an OpenAI-compatible endpoint is reached
-through a gateway that has one: a [LiteLLM proxy](https://docs.litellm.ai/),
+Atlas speaks three wire dialects: Chat Completions, OpenAI's Responses API
+(optional, for OpenAI) and Anthropic's Messages API (the `anthropic`
+profile). A vendor without an endpoint in one of them is reached through a
+gateway that has one: a [LiteLLM proxy](https://docs.litellm.ai/),
 OpenRouter or the LLM Hub. What differs between vendors is a small set of
-request and reply quirks, kept as data in the preset table
-(`core/llm_setup.py`) and learned from replies, never as code per vendor.
+facts and request quirks, kept as data in one provider profile per vendor
+(`provider_profiles/<id>.toml`, see "Provider profiles" below) and learned
+from replies, never as code per vendor.
 
-| Preset | Endpoint | Thinking control | Levels | Verified |
+| Profile | Endpoint | Thinking control | Levels | Verified |
 |---|---|---|---|---|
 | `llmhub` | T-Systems LLM Hub `/v2` | `reasoning_effort` | per model; the hub lists them in its 400 | live |
 | `openai` | `api.openai.com/v1` | `reasoning_effort`, `max_completion_tokens` | none…xhigh | live |
 | `openrouter` | `openrouter.ai/api/v1` | `reasoning: {effort}` | none…xhigh | live |
-| `anthropic` | `api.anthropic.com/v1` | thinking budget (`reasoning_effort` ignored) | budget tokens | vendor docs; test-grade per Anthropic |
+| `anthropic` | `api.anthropic.com/v1`, Messages API, key in `x-api-key` | `output_config: {effort}`; no thinking switch is sent | low…max (minimal and none sent as low); none on Haiku 4.5 and Sonnet 4.5 | vendor docs; prompt caching on |
+| `anthropic-compat` | `api.anthropic.com/v1`, Anthropic's OpenAI-compatible layer | none (the layer ignores `reasoning_effort`) | — | vendor docs; test-grade per Anthropic, no prompt caching |
 | `zai` | `api.z.ai/api/paas/v4` | `thinking: {type}` + level | low, high, max; cannot switch off | vendor docs |
 | `deepseek` | `api.deepseek.com` | `thinking: {type}` | default on | vendor docs |
 | `gemini` | `generativelanguage.googleapis.com/v1beta/openai` | `reasoning_effort` | minimal, low, medium, high | vendor docs |
@@ -148,14 +162,23 @@ request and reply quirks, kept as data in the preset table
 | `meta` | `api.llama.com/compat/v1` | none | — | vendor docs |
 | `mistral` | `api.mistral.ai/v1` | `reasoning_effort` | none, high | live |
 | `ollama` | `localhost:11434/v1` | `reasoning_effort` | none…max; no `tool_choice` | vendor docs |
+| `azure-openai` | your resource's `/openai/v1` (key in `api-key`) | `reasoning_effort` | learned | vendor docs |
+| `groq` | `api.groq.com/openai/v1` | `reasoning_effort` | per model, learned | vendor docs |
+| `together` | `api.together.ai/v1` | `reasoning_effort` | learned | vendor docs |
+| `fireworks` | `api.fireworks.ai/inference/v1` | `reasoning_effort` | learned | vendor docs |
+| `cerebras` | `api.cerebras.ai/v1` | `reasoning_effort` | per model, learned | vendor docs |
+| `lmstudio` | `localhost:1234/v1` | learned | learned | vendor docs |
+| `vllm` | `localhost:8000/v1` | learned | learned | vendor docs |
+| `llamacpp` | `localhost:9931/v1` (llama-server's default port) | learned | learned | vendor docs |
 | `local` | vLLM, LM Studio, llama.cpp, … | learned | learned | — |
 | `custom` | any OpenAI-compatible gateway | learned | learned | — |
 
 In the Verified column, "live" means the preset was checked against a running
 endpoint that serves the vendor's models, and "vendor docs" that it follows the
 vendor's documentation. Every reply shape Atlas reads has a fixture under
-`tests/fixtures/llm/`, written by hand from the documented shape, and the
-parser test asserts what Atlas reads from it. Where a reply is thinking:
+`tests/fixtures/llm/` (the Messages API's events and bodies are in
+`tests/core/test_messages_api.py`), written by hand from the documented
+shape, and the parser test asserts what Atlas reads from it. Where a reply is thinking:
 `reasoning_content` (sglang, DeepSeek, Z.ai, xAI, vLLM with a reasoning
 parser, LiteLLM), `reasoning` (vLLM, OpenRouter, Ollama), `reasoning_details`
 (OpenRouter), `thinking_blocks` (LiteLLM for Claude and Gemini), `thinking`
@@ -163,6 +186,116 @@ chunks inside a content list (Mistral direct), or a leading `<think>…</think>`
 block in the content (a server without a reasoning parser). All are read the
 same way. DeepSeek's direct endpoint requires the thinking sent back on later
 turns once tools are used; that preset does so, no other does.
+
+## Provider profiles
+
+Providers are data; wire formats and auth schemes are code. A profile states
+what Atlas knows about one provider type: its base URL, the header the key
+goes in, static headers, how a thinking level is spelled, the levels the
+vendor takes, reply fields to send back, whether a temperature is refused,
+whether its input rate limit counts cache reads, and how its model list
+pages (`[connection] models_paging`: `after_id` reads Anthropic's list to
+its end). It chooses a wire format (`dialect`: OpenAI Chat Completions,
+OpenAI Responses or Anthropic Messages) and never adds one; anything else
+goes through a gateway or a small code change. Rules under
+`[models."<glob>"]` change `request` and `reasoning` for the model ids the
+glob matches (a more specific glob after a less specific one; a rule's
+`levels` change or add to the map, key by key). A configured provider (an instance in `.env`) binds
+to a profile by `ATLAS_PROVIDER_<NAME>_PRESET` (the wizard and the Settings
+page write it for every provider they save, except one on `custom`), else by its name in any letter
+case (a provider named `OpenRouter` gets OpenRouter's request shape), else to
+`custom`. Three rules keep a binding from happening by accident:
+
+- A `_PRESET` that names no profile makes the provider unusable, with the
+  reason and the known ids; it is never ignored.
+- A provider is never matched to a profile by its host. One registered as
+  "Other" at `api.anthropic.com` stays on `custom` (Chat Completions, no
+  Anthropic headers) until `ATLAS_PROVIDER_<NAME>_PRESET=anthropic` binds it.
+- A provider named like a profile that is not Chat Completions (`anthropic`)
+  binds to it by name only while its base URL is that profile's own host; a
+  gateway that merely carries the name stays on `custom`.
+
+**When "Other" is enough.** The Other profile (`custom`) serves any
+OpenAI-compatible gateway: a base URL, a key, a model, and, for a gateway
+that wants the key in another header or after another word, the Auth header
+and Auth prefix fields (Settings, or the wizard's questions for Other). A
+profile file is needed for static headers, how a thinking level is spelled,
+the levels a vendor takes, rules for some models, another dialect, or a
+bare key in `Authorization`.
+
+**What a profile does not decide.** Its `base_url` only prefills the form;
+the URL a provider uses is the one saved with it. Its `[reasoning] levels`
+decide which levels a provider can be pinned to: the wizard and Settings
+offer only those (Auto always), and a save refuses another.
+
+`[reasoning] control` says how a level goes on the wire:
+
+| control | sent |
+|---|---|
+| `reasoning_effort` | `"reasoning_effort": "<value>"` |
+| `reasoning_object` | `"reasoning": {"effort": "<value>"}` |
+| `thinking_type` | `"thinking": {"type": "enabled"}` and `"reasoning_effort": "<value>"`; `none` sends `{"type": "disabled"}` |
+| `enable_thinking` | `"enable_thinking": true`, or `false` for `none` |
+| `output_config` | `"output_config": {"effort": "<value>"}` (Messages dialect) |
+| `none` | nothing |
+
+`<value>` is the level's entry in `levels` (`high = "high"` sends `high`).
+
+- Shipped profiles: `provider_profiles/<id>.toml`, checked against
+  `provider_profiles/schema.json` (editors with JSON Schema support for TOML
+  can use it: each shipped file names it on its first line, `#:schema`).
+  Every key in a shipped file has a comment saying what it does.
+- Your own: `provider_profiles.local/<id>.toml` in the Atlas folder (ignored
+  by git, like `.env`), or the folder `ATLAS_PROVIDER_PROFILES_DIR` names
+  (`~` is expanded; a relative folder is taken under the Atlas folder).
+  A file with a shipped id changes only what it names and keeps every later
+  shipped fix; a new id adds a provider; `disabled = true` hides one. Files
+  are never read from a case folder. No schema lies beside your files: point
+  your editor at `provider_profiles/schema.json` in the Atlas folder.
+- `bin/atlas provider profile init <id>` copies a shipped profile, with its
+  comments, into your folder (its `#:schema` line pointing at the shipped
+  schema); delete the lines you do not change, so later shipped fixes to
+  them still reach you. `bin/atlas provider profile path` prints both
+  folders.
+- Three things make a first edit fail: the `id` must equal the file name
+  (without `.toml`); a user file may not set `[env]` or `implicit`; and a
+  file named `custom.toml` is not read (the fallback cannot be changed).
+
+```toml
+# provider_profiles.local/acme.toml: a gateway that wants its key in X-Acme-Key
+schema = 1
+id = "acme"
+order = 5                                # position in the menu; shipped ones start at 10
+label = "Acme gateway"
+description = "llm.example.com, the in-house gateway."
+dialect = "chat"
+
+[connection]
+base_url = "https://llm.example.com/v1"
+
+[auth]
+header = "X-Acme-Key"
+prefix = ""
+```
+
+Then register it like any provider (Settings → Providers, or `bin/atlas
+provider setup`) with that profile chosen. A file that fails the checks (an
+unknown key, a wrong type, plain `http` to a public host, a credential
+header in `[headers]`) makes the providers bound to it unusable with the
+file, the key and the reason: `bin/atlas doctor`, Test connection and the
+start of a run show it. Every other profile keeps working. A user file for
+the fallback profile `custom` is not read at all (doctor lists it as
+ignored): every provider no other profile claims binds to it. A run reads
+the profiles once, at its start.
+
+`bin/atlas doctor` shows what the binding came to: where the profiles are read
+from (the shipped folder, and the ids your own folder holds), every profile
+that cannot be used with its reason, and for each provider the profile it
+binds to, by which rule (`preset`, `name` or `fallback`), the file or files
+behind it, and where its base URL comes from (a variable, or a shipped, user
+or merged profile file). A provider on `custom` at the host of a shipped
+profile gets a note naming the `_PRESET` setting that would bind it.
+`bin/atlas provider test NAME` prints the same binding before its calls.
 
 ## Adding a model Atlas has never seen
 
@@ -175,9 +308,18 @@ turns once tools are used; that preset does so, no other does.
    (the analyst role needs that), thinks and in which field, and takes a
    level. How large a tool list the model can answer is not tested here:
    that depends on the whole request, not on the list alone, so only a run can
-   tell, and a run does (see "When no function call arrives" above).
-3. Leave Thinking on Auto and **Save provider**. Then give each role the
-   report allows this provider under *Roles in a run* and **Save roles**.
+   tell, and a run does (see "When no function call arrives" above). The test
+   speaks with the chosen profile's own auth header and headers (`x-api-key`
+   and `anthropic-version` for Anthropic, `api-key` for Azure OpenAI).
+3. Leave Thinking on Auto and **Save provider**. A save with an API key checks
+   the model list first and is refused only when the list does not vouch for
+   the model (the request failed, or the list names other models and not this
+   one) *and* the model does not answer either; that second check runs the
+   Test connection calls (up to three short model calls). A vendor whose list
+   is missing, paged or in another dialect therefore does not block a model
+   that answers. *Save without testing* skips both checks. Then give each role
+   the report allows this provider under *Roles in a run* and **Save roles**.
+   The terminal wizard keeps its own flow.
 
 The same check from the terminal:
 
@@ -200,11 +342,14 @@ register that as "Other".
 bin/atlas provider setup
 ```
 
-Walks you through picking a backend — Telekom LLM Hub, OpenAI, a local/
-self-hosted OpenAI-compatible server (vLLM, Ollama, LM Studio, ...), or any
-other gateway — collects the base URL/model/key, optionally tests the
-connection live before saving, and points every model role (analyst,
-reviewer, report, `reason.*`, `dair.*`) at it. Re-run it anytime to register
+Walks you through picking a provider profile from the menu (one entry per
+shipped profile in the table above and per profile of your own: the Telekom
+LLM Hub, OpenAI, OpenRouter, Anthropic, a local or self-hosted server, or
+"Other" for any OpenAI-compatible gateway), collects the base URL/model/key,
+optionally tests the connection live before saving, records the profile as
+`ATLAS_PROVIDER_<NAME>_PRESET`, and points every model role (analyst,
+reviewer, report, `reason.*`, `dair.*`) at it. The connection test sends the
+chosen profile's own auth header. Re-run it anytime to register
 another backend or reconfigure. Its logic lives in `core/llm_setup.py`,
 kept free of any interactive I/O specifically so a future browser dashboard
 can drive the same registration/probe/role-assignment calls from a form
@@ -212,7 +357,10 @@ instead of a terminal prompt — see that module's docstring.
 
 `bin/atlas provider list` shows what's registered and which role uses what;
 `bin/atlas provider use NAME --role ROLE --model ID` repoints an
-already-registered provider without the full wizard.
+already-registered provider without the full wizard (`ROLE` is `all`,
+`analyst`, `reviewer`, `report`, `reason`, `dair` or `vision`; `all` leaves
+`vision` alone). It checks the provider's model list, read to its last page,
+before it writes anything.
 
 **Recommended pairing:** the wizard marks the Telekom LLM Hub with
 **z.ai GLM-5.2** as recommended (`core/llmhub.py`'s default model id), since
@@ -247,6 +395,57 @@ a second gateway), see `core/providers.py`'s module docstring for the full
 `ATLAS_PROVIDERS`/`ATLAS_PROVIDER_<NAME>_*` var reference — or just use the
 wizard, which writes exactly these vars for you.
 
+## Anthropic's Messages API
+
+The `anthropic` profile speaks Anthropic's own API (`POST /v1/messages`,
+streamed). Atlas builds each request in the Chat Completions shape every role
+uses and translates it just before it goes on the wire; the reply comes back
+through the same transport (retries, deadlines, stream guards, the 400
+adaptation, the token ledger). What the translation does:
+
+- **Prompt caching.** Three 5-minute cache entries: the system prompt (with
+  the tool list, which comes before it), the case brief, and the history up to
+  the block before the trailing user text (the per-turn steering stays outside
+  the cached part). Only the leading system message becomes the top-level
+  `system`; a later one is sent as user text, so the cached part never moves.
+  The usage page counts cache writes and reads into a call's input; the cached
+  share is what was read.
+- **Thinking.** A level goes out as `output_config.effort` (`low`, `medium`,
+  `high`, `xhigh`, `max`); `minimal` and `none` are sent as `low`, and no
+  `thinking` field is sent, so current models think adaptively. Claude Haiku
+  4.5 and Sonnet 4.5 get no level (they take thinking only as a token budget,
+  which Atlas does not send); Opus 4.6 to 4.8 and Sonnet 4.6 think only when a
+  request asks, which this profile does not. Thinking is not sent back on
+  later turns: Atlas edits its history in place (nudge stubs, compaction), and
+  replayed thinking after such an edit is refused on accounts the
+  history-editing check covers.
+- **Always a completion cap** (`max_tokens`, 65536 unless set): the API
+  requires one. A model with a lower maximum (64000 on the 4.5 models) is told
+  apart by its first 400, which names the maximum: Atlas sends that and
+  remembers it, as it does for any provider whose 400 names one. No
+  `temperature` (current models refuse a non-default one) and no
+  `response_format`.
+- **Forced tool use** (`tool_choice` required) is sent as `auto` on the models
+  that refuse it (Sonnet 5.5, Opus 5.5, Fable 5.1, Mythos 5.1).
+- **Refusals.** When Anthropic's safety classifiers decline a request
+  (`stop_reason: refusal`), the turn ends there without a retry: the run's
+  trace shows the category and explanation, the token ledger records the call
+  as `refused`, and any partial output is dropped. The next request carries
+  one line, "The provider declined the last request (category: ...).
+  Continue the analysis with a different approach or other evidence.";
+  three declines in a row end the run with stop reason `model_refusal`. The
+  chat shows the decline instead of an answer and does not ask again. A
+  Chat Completions `content_filter` finish is treated the same.
+
+The OpenAI-compatible layer stays available as `anthropic-compat`
+(`ATLAS_PROVIDER_<NAME>_PRESET=anthropic-compat`). Anthropic calls it
+test-grade; it supports no prompt caching and ignores the thinking level, so
+no thinking budget is sent (current Claude models refuse one). It sends the
+`anthropic-version` header on every request, its chat calls included, since
+Anthropic's model list refuses a request without it. A
+provider saved with `_PRESET=anthropic` uses the Messages API from its next
+call on; shapes Atlas learned for it on the compatible layer are not reused.
+
 ## API dialect (hub vs OpenAI)
 
 Atlas’s default chat dialect is the **Telekom / T-Systems LLM Hub** style:
@@ -273,6 +472,7 @@ Optional env:
 | `ATLAS_LLM_COMPAT_SOFT_HINTS=0` | Disable first-guess GPT-5-style hints |
 | `ATLAS_LLM_COMPAT_CACHE` | Override cache path |
 | `ATLAS_LLM_MAX_COMPLETION_TOKENS=1\|0` | Force limit field globally |
+| `ATLAS_LLM_ALLOW_TEMPERATURE=1\|0` | Always send a temperature, or never |
 
 ## Running an investigation
 
@@ -299,7 +499,7 @@ which command when, worked examples, exit codes, and remote SIFT execution
 
 ## Tool namespaces are lazy-loaded
 
-The MCP server exposes ~270 tools; shipping every schema each turn would waste
+The MCP server exposes hundreds of tools; shipping every schema each turn would waste
 most of the model's context. The agent exposes a core set (`misc`, `reason`,
 `dair`, `hash`, `ewf`, `coverage`) plus meta-tools:
 
@@ -312,8 +512,23 @@ list spells every name as the playbook's dotted name with an underscore
 writes after reading the playbook, and an endpoint drops a function call
 whose name is not in the list. The dotted form and the MCP name with its
 doubled namespace (`vol_vol_pslist`) are still accepted on execution.
-`--all-tools` exposes everything up front (~36k tokens of schemas) for
-large-context models.
+`--all-tools` loads tool namespaces up front until the schema budget is full
+(it follows the model's context window; `ATLAS_AGENT_MAX_OPENAI_TOOLS` or the
+provider profile's `max_tools` can change it); the rest still load on demand.
+
+**A stable list where the window allows it.** A provider caches the tool list
+ahead of everything else, so a list that changes forces the cached prompt to
+be sent (and on Anthropic written to the cache at the cache-write price) again.
+A provider profile says how many tools one request may carry (`[request]
+max_tools`, set for Anthropic) and the model's window bounds it at one schema
+per 2,000 tokens. An analysis run on a model whose window holds every schema
+lists every Atlas tool from its first turn, and the list never changes; the
+run's stderr says `atlas: tool list: stable, N schemas`, or why the namespace
+mode applies instead. A 200K-window model keeps 128 tools and the namespace
+switching, and so does a chat. In the namespace mode the schema array still
+changes only when the model loads a namespace: namespaces are listed in the
+order they were loaded and a preload only fills free room
+(`ATLAS_TOOL_ARRAY_STABLE`, on by default).
 
 ## Rate limits
 
@@ -325,23 +540,74 @@ handles this two ways:
 - **Proactive pacing** — the client tracks its own trailing-minute input-token
   spend and sleeps before a request that would exceed
   `ATLAS_AGENT_INPUT_TPM` (default 400000; `0` disables). Set it a little
-  under your key's input quota.
+  under your key's input quota. It counts what the provider's limit counts:
+  every input token, unless the provider profile says its limit leaves cache
+  reads out (`[request] rate_limit_counts_cache_reads = false`, set for
+  Anthropic, whose input limit counts uncached input and cache writes only).
 - **Patient 429 handling** — a rate-limited response is retried after the wait
   the provider itself suggests (`Retry-After` header or the "try again in N
   seconds" hint in the body), without consuming regular retry attempts, up to
   a total of `ATLAS_AGENT_RATE_LIMIT_WAIT` seconds (default 600).
 
+A provider that answers "rate limited" without saying how long to wait is
+asked again after 2, 4, 8, 16 and then 30 seconds; a stated wait still wins.
+An HTTP 529 (overloaded; Anthropic's `overloaded_error`) is retried with the
+backoff a 503 gets.
+
 If you still hit the cap constantly, lower `ATLAS_AGENT_CONTEXT_CHARS`
 (derived from the probed window; ~3 000 000 chars for a 1M-token model)
 so each turn sends less context.
 
+## When a model call is lost
+
+A reply the provider or the connection cut is a failed reply, never the
+model's words. Once the analyst has answered in a run, a lost call does not
+end or wrap up the run: the turn is asked again after a pause (60 seconds,
+doubling to 5 minutes), and what it asks changes with each loss. First the
+same request once after a quick loss, then one thinking level lower, then a
+short progress question without tools, then the same question over a
+shortened history. The summary the model gives is followed by one request with
+the tools back that asks for the next step as one call. The run carries on by
+itself when the provider answers again. A provider error event inside a stream
+counts as a failure, not as the model's reply. A run whose provider never
+answered at all stops with the error after two paused re-asks, since that is a
+configuration problem.
+
+The run log shows every loss and every recovery, also in quiet mode, and the
+dashboard's Overview names what the run does next; after
+`ATLAS_ESCAPE_ALERT_SECONDS` (default 30 minutes) of failing calls it shows an
+alert. The alert is attention, not a limit: the run keeps waiting.
+`ATLAS_MODEL_CALL_ESCAPE=0` restores the earlier retries and wrap-up.
+
+**When a provider declines on safety grounds** (Anthropic's `refusal` stop
+reason, a `content_filter` finish elsewhere) the turn ends without a retry, as
+described under [Anthropic's Messages API](#anthropics-messages-api).
+
+**Single-answer calls are bounded in what they may write.** The answer
+composer, the question planner, the director, the reason tools, the reviewers
+and the report sections each want one reply. Each is asked under an output
+allowance of 64,000 tokens (`ATLAS_ONE_ANSWER_MAX_TOKENS`; the switch is
+`ATLAS_ONE_ANSWER_ALLOWANCE`). A reply that runs past it is asked again once at
+a lower thinking level and then falls back, so one runaway reply cannot burn a
+whole completion window. A helper whose reply was cut is not sent the same
+request again in the same run until a later call of that tool answers, and a
+helper that gives no usable answer to three requests in a row becomes a
+documented limitation in the report, not a blocker.
+
 ## Model context auto-probe (LLM check)
 
 At the start of every `atlas run` / `train` / `chat` session Atlas issues a short
-`GET /models` against the configured provider, finds the active model id, and
+`GET /models` against the configured provider (with the provider's own
+headers, so Anthropic's model list answers), finds the active model id, and
 reads a context-window field from the live JSON (`context_length`,
-`max_model_len`, nested `top_provider.context_length`, …). There is **no**
-local model catalogue. The recommended / default window is **1 000 000 tokens**
+`max_model_len`, `max_input_tokens`, nested `top_provider.context_length`,
+…). A field that states the window is read before `max_tokens`, which next to
+one is the output cap (Anthropic lists both), so each model gets its full
+window. A model list that comes in pages is read to its end wherever Atlas
+reads it (this probe, `atlas models`, `atlas doctor --probe`,
+`atlas provider use`, Test connection), so a model past the first page is
+found, and a model set by an alias (`claude-haiku-4-5`) matches the newest
+dated snapshot the list holds for it. There is **no** local model catalogue. The recommended / default window is **1 000 000 tokens**
 (GLM-5.2). Below **32 000 tokens** Atlas switches to compact / disk-first
 mode (parse on disk, summaries in chat).
 
@@ -361,8 +627,8 @@ mode (parse on disk, summaries in chat).
 - `ATLAS_MODEL_CONTEXT_TOKENS` remains a hard operator override.
 - `ATLAS_MODEL_CONTEXT_PROBE=0` disables the network call; a short disk cache
   under `~/.atlas/model_context_cache.json` is used only if the live probe fails.
-  On network failure Atlas still installs the 1M recommended window — set
-  `ATLAS_MODEL_CONTEXT_TOKENS` if the model is smaller.
+  With no probe and no cached window Atlas installs a conservative 128 000
+  token window — set `ATLAS_MODEL_CONTEXT_TOKENS` to the model's real size.
 - `atlas doctor --probe` prints the discovered context for the configured model
   when the provider exposes it.
 
@@ -392,3 +658,5 @@ mode (parse on disk, summaries in chat).
   (`ATLAS_PROVIDER_<NAME>_API=responses`). Atlas never infers it from a
   model id and never assumes an OpenAI-compatible URL speaks Responses.
   Unset / unknown stays on Completions so existing `.env` files keep working.
+  Anthropic's Messages API is the `anthropic` profile's own dialect, chosen by
+  the profile and never by a model id.

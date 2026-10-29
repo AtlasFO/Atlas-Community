@@ -127,7 +127,7 @@ def test_section_context_from_graph_not_markdown(tmp_path: Path):
 
 
 def test_deterministic_resilient_projection(tmp_path: Path):
-    """Phase 7 reliability: project without LLM via deterministic fallback."""
+    """Reliability: project without LLM via deterministic fallback."""
     from core.investigation_state import project_report_from_state
     from core.report_projection import deterministic_section_generator
 
@@ -244,6 +244,7 @@ class _Provider:
     name = "stub"
     model = "stub-model"
     api_key = "k"
+    key_missing = False
     base_url = "http://stub.invalid/v1"
 
     def chat_url(self):
@@ -361,3 +362,73 @@ def test_section_call_success_leaves_a_trace(tmp_path: Path, monkeypatch):
     kinds = [(e["type"], e.get("tool") or e.get("cmd")) for e in log._entries]
     assert ("call_initiated", "report_section:exec_summary") in kinds
     assert ("tool_call", "<py>:report_section:exec_summary") in kinds
+
+
+def test_the_engagement_block_states_only_what_the_brief_states(tmp_path: Path):
+    """A bare brief yields no engagement line at all (an unstated frame is
+    the invention the summary must not make); a stated engagement, owner
+    and question reach the block and its prompt lines."""
+    import json
+    from core.report_projection import engagement_block, engagement_lines
+    case = _case(tmp_path)
+    assert engagement_block(case) == {"engagement": "", "system_owner": "", "question": "", "requests": []}
+    bare = engagement_lines(engagement_block(case))
+    assert "Engagement: the brief states none; name none" in bare
+    assert "System owner: the brief states none" in bare
+    (case / "CASE.md").write_text(
+        "**Case ID** ProjTest\n**Engagement:** examination\n**System owner:** victim\n", encoding="utf-8")
+    (case / ".atlas").mkdir(exist_ok=True)
+    (case / ".atlas" / "investigation_tasks.json").write_text(json.dumps({"schema_version": "1.0", "tasks": [
+        {"id": "task-0001", "text": "What happened on CORP-WS01?", "status": "open", "parts_whole": True},
+        {"id": "task-0002", "text": "Which account stored the files?", "status": "open"}]}), encoding="utf-8")
+    block = engagement_block(case)
+    assert block["engagement"] == "examination" and block["system_owner"] == "victim"
+    assert block["question"] == "What happened on CORP-WS01?"
+    assert block["requests"] == ["Which account stored the files?"]
+    lines = engagement_lines(block)
+    assert "Engagement, as the brief states it: examination." in lines
+    assert "System owner, as the brief states it: victim." in lines
+    assert "The brief's question: What happened on CORP-WS01?" in lines
+    assert "states none" not in lines
+    # A question beside no engagement: the frame line still says none,
+    # field by field, and a long request is cut to 300 characters.
+    (case / "CASE.md").write_text("**Case ID** ProjTest\n", encoding="utf-8")
+    (case / ".atlas" / "investigation_tasks.json").write_text(json.dumps({"schema_version": "1.0", "tasks": [
+        {"id": "task-0001", "text": "What happened on CORP-WS01?", "status": "open", "parts_whole": True},
+        {"id": "task-0002", "text": "Which account stored the files? " + "x" * 400, "status": "open"}]}),
+        encoding="utf-8")
+    block = engagement_block(case)
+    assert block["question"] == "What happened on CORP-WS01?" and len(block["requests"][0]) == 300
+    lines = engagement_lines(block)
+    assert "Engagement: the brief states none; name none" in lines
+    assert "System owner: the brief states none" in lines
+    assert "The brief's question: What happened on CORP-WS01?" in lines
+
+
+def test_the_exec_summary_prompt_carries_the_stated_frame_and_no_next_steps(tmp_path: Path, monkeypatch):
+    """The management summary's prompt frames the case as the brief does, or
+    tells the model the brief states no frame, and never asks for next steps
+    (code renders them from the response plan)."""
+    import httpx
+    from core.report_projection import default_llm_section_generator, section_context
+    ctx, sec, log = _section_setup(tmp_path, monkeypatch)
+    seen: list[dict] = []
+
+    def capture(url, json=None, headers=None, timeout=None):
+        seen.append(json or {})
+        return _HttpxReply("A short account.")
+
+    monkeypatch.setattr(httpx, "post", capture)
+    default_llm_section_generator(ctx, sec)
+    user = seen[-1]["messages"][-1]["content"]
+    assert "Engagement: the brief states none; name none" in user
+    assert "System owner: the brief states none" in user
+    assert "Write no next steps" in user and "most important next steps" not in user
+    case = Path(ctx["case_dir"])
+    (case / "CASE.md").write_text("**Case ID** ProjTest\n**Engagement:** examination\n", encoding="utf-8")
+    ctx = section_context(case, "exec_summary")
+    default_llm_section_generator(ctx, sec)
+    user = seen[-1]["messages"][-1]["content"]
+    assert "Engagement, as the brief states it: examination." in user
+    assert "Engagement: the brief states none" not in user
+    assert "System owner: the brief states none" in user      # still unstated: still said per field

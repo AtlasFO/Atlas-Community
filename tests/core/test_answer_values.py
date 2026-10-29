@@ -35,75 +35,75 @@ class TestTypeWords:
 
 class TestRecognisers:
     def test_bare_hostnames_and_known_hosts(self):
-        text = "DC01 and DESKTOP-SDN1RPT and N-1A9ODN6ZXK4LQ; claim C0009; CVE-2021-1234; T1059.001; citadel"
-        got = {v for v, _ in av.values(text, "host", known_hosts=["Citadel"])}
-        assert {"DC01", "DESKTOP-SDN1RPT", "N-1A9ODN6ZXK4LQ", "citadel"} <= got
+        text = "DC01 and DESKTOP-K4Q7Z2M and N-3B8RTW2PL6XQ9; claim C0009; CVE-2021-1234; T1059.001; bastion"
+        got = {v for v, _ in av.values(text, "host", known_hosts=["Bastion"])}
+        assert {"DC01", "DESKTOP-K4Q7Z2M", "N-3B8RTW2PL6XQ9", "bastion"} <= got
         assert not {"C0009", "CVE-2021", "T1059"} & got
 
     def test_accounts_in_their_written_forms(self):
         text = ("The only real user profile is 'Mr. Smith'; local account jsmith; CORP\\a.roe; "
-                "S-1-5-21-1-2-3-1002; account creation by Administrator; Greg Schardt (RID 1003)")
+                "S-1-5-21-1-2-3-1002; account creation by Administrator; John Roe (RID 1003)")
         got = {v for v, _ in av.values(text, "account")}
         # a bare lower-case word after "account" is prose unless the statement
         # writes it as a principal somewhere ("named X" does)
-        assert {"Mr. Smith", "CORP\\a.roe", "S-1-5-21-1-2-3-1002", "Administrator", "Greg Schardt"} <= got
+        assert {"Mr. Smith", "CORP\\a.roe", "S-1-5-21-1-2-3-1002", "Administrator", "John Roe"} <= got
         assert "jsmith" not in got
         assert "jsmith" in {v for v, _ in av.values("the local account named jsmith owns the laptop", "account")}
         assert "creation" not in got
 
     def test_dates_with_and_without_a_time_and_word_dates(self):
-        text = "installed 2004-08-19; window 2018-03-27 to 2018-04-06; on 22 March 2015 and March 22, 2015 08:00; 22. März 2015"
+        text = "installed 2031-08-19; window 2031-03-27 to 2031-04-06; on 22 March 2031 and March 22, 2031 08:00; 22. März 2031"
         got = [v for v, _ in av.values(text, "datetime")]
-        assert got[:3] == ["2004-08-19", "2018-03-27", "2018-04-06"]
-        assert "22 March 2015" in got and "March 22, 2015" in got and "22. März 2015" in got
+        assert got[:3] == ["2031-08-19", "2031-03-27", "2031-04-06"]
+        assert "22 March 2031" in got and "March 22, 2031" in got and "22. März 2031" in got
 
     def test_domains_and_urls_but_not_file_names(self):
-        got = {v for v, _ in av.values("beacons to c2.example.com and http://evil.local/x; file example.exe; C137.LOCAL", "domain")}
-        assert {"c2.example.com", "http://evil.local/x", "C137.LOCAL"} <= got
+        got = {v for v, _ in av.values("beacons to c2.example.com and http://evil.local/x; file example.exe; CORP01.LOCAL", "domain")}
+        assert {"c2.example.com", "http://evil.local/x", "CORP01.LOCAL"} <= got
         assert "example.exe" not in got
 
     def test_macs_zones_os_and_identifiers(self):
-        assert [v for v, _ in av.values("NIC MAC 0010a4933e09 (00:10:A4:93:3E:09) build 6.3.9600.17031", "mac")] == ["0010a4933e09", "00:10:A4:93:3E:09"]
+        assert [v for v, _ in av.values("NIC MAC 00005e005301 (00:00:5E:00:53:01) build 6.3.9600.17031", "mac")] == ["00005e005301", "00:00:5E:00:53:01"]
         assert [v for v, _ in av.values("Eastern Standard Time, Bias 300, UTC-5", "zone")] == ["Eastern Standard Time", "Bias 300", "UTC-5"]
         assert av.values("runs Windows XP Professional SP1; Windows Server 2012 R2 (build 6.3.9600.17031)", "os")[0][0] == "Windows XP Professional SP1"
-        got = {v for v, _ in av.values("RM#1 serial 4C530012450531101593, volume serial 1A2B-3C4D, {12345678-1234-1234-1234-123456789abc}", "identifier")}
-        assert {"4C530012450531101593", "1A2B-3C4D", "{12345678-1234-1234-1234-123456789abc}"} <= got
+        got = {v for v, _ in av.values("USB#1 serial 7A210098760543212345, volume serial 1A2B-3C4D, {12345678-1234-1234-1234-123456789abc}", "identifier")}
+        assert {"7A210098760543212345", "1A2B-3C4D", "{12345678-1234-1234-1234-123456789abc}"} <= got
 
     def test_a_count_is_the_number_beside_the_counted_noun(self):
         assert av.bind("how many accounts were created", "count",
-                       "On 2015-03-22 the user created 3 new local accounts on informant-PC (EID 4720).")[0] == "3"
+                       "On 2031-03-22 the user created 3 new local accounts on CORP-WS01 (EID 4720).")[0] == "3"
         assert av.bind("how many accounts were created", "count",
-                       "On 2015-03-22 accounts were reviewed; the record 4720 shows nothing.")[0] is None
+                       "On 2031-03-22 accounts were reviewed; the record 4720 shows nothing.")[0] is None
 
 
 class TestBinding:
-    NET = "Network: delivery IP is 194.61.24.102 (external, attacker host 'kali'); C2 IP is 10.90.90.90 (internal)"
-    NIC = "Network identity of the notebook during the Look@LAN setup: IP address 192.168.1.111, NIC MAC 0010a4933e09 on the Xircom card"
+    NET = "Network: delivery IP is 203.0.113.44 (external, attacker host 'attacker-vm'); C2 IP is 10.0.0.90 (internal)"
+    NIC = "Network identity of the notebook during the scanner setup: IP address 10.0.0.111, NIC MAC 00005e005301 on the PCMCIA card"
 
     def test_each_part_takes_the_value_of_its_own_clause(self):
-        assert av.bind("the delivery IP", "ip", self.NET)[0] == "194.61.24.102"
-        assert av.bind("the C2 IP", "ip", self.NET)[0] == "10.90.90.90"
+        assert av.bind("the delivery IP", "ip", self.NET)[0] == "203.0.113.44"
+        assert av.bind("the C2 IP", "ip", self.NET)[0] == "10.0.0.90"
 
     def test_the_nearest_value_in_a_comma_joined_clause(self):
-        assert av.bind("IP", "ip", self.NIC)[0] == "192.168.1.111"
-        assert av.bind("MAC", "mac", self.NIC)[0] == "0010a4933e09"
+        assert av.bind("IP", "ip", self.NIC)[0] == "10.0.0.111"
+        assert av.bind("MAC", "mac", self.NIC)[0] == "00005e005301"
 
     def test_a_part_without_a_qualifier_reads_the_first_sentence_only(self):
-        st = ("Initial access to DC01 via RDP brute force from external IP 194.61.24.102 at 2020-09-19 02:19:13 UTC. "
-              "Later at 2020-09-20 01:00 UTC more.")
-        assert av.bind("with timestamp", "datetime", st)[0] == "2020-09-19 02:19:13 UTC"
-        assert av.bind("operating system", "os", "The Dell CPi notebook runs Windows XP (NTFS volume, offset sector 63).")[0] == "Windows XP"
+        st = ("Initial access to DC01 via RDP brute force from external IP 203.0.113.44 at 2031-03-01 04:12:30 UTC. "
+              "Later at 2031-03-02 01:00 UTC more.")
+        assert av.bind("with timestamp", "datetime", st)[0] == "2031-03-01 04:12:30 UTC"
+        assert av.bind("operating system", "os", "The Acme NB7 notebook runs Windows XP (NTFS volume, offset sector 63).")[0] == "Windows XP"
 
     def test_a_value_of_the_right_kind_in_the_wrong_clause_does_not_answer(self):
         st = ("Device and system baseline: the seized evidence is an EnCase image of the notebook. "
-              "Acquired 2004-09-20 10:00 UTC by the examiner.")
+              "Acquired 2031-09-20 10:00 UTC by the examiner.")
         assert av.bind("install date", "datetime", st) == (None, "")
         assert av.bind("install date", "datetime",
-                       "Windows XP was installed on 2004-08-19 22:48:27 UTC (SOFTWARE InstallDate).")[0] == "2004-08-19 22:48:27 UTC"
+                       "Windows XP was installed on 2031-08-19 21:05:40 UTC (SOFTWARE InstallDate).")[0] == "2031-08-19 21:05:40 UTC"
 
     def test_qualifiers_match_by_stem_and_short_tokens_count(self):
-        assert av.bind("computer name", "host", "The computer name is N-1A9ODN6ZXK4LQ and the primary domain is unknown.")[0] == "N-1A9ODN6ZXK4LQ"
-        assert av.bind("timezone", "zone", "The notebook's time zone is Central Standard Time (Bias 360).")[0] == "Central Standard Time"
+        assert av.bind("computer name", "host", "The computer name is N-3B8RTW2PL6XQ9 and the primary domain is unknown.")[0] == "N-3B8RTW2PL6XQ9"
+        assert av.bind("timezone", "zone", "The notebook's time zone is Pacific Standard Time (Bias 480).")[0] == "Pacific Standard Time"
 
     def test_non_value_kinds_bind_nothing(self):
         assert av.bind("whether it is recoverable", "yes_no", "Yes, the files are recoverable.") == (None, "")
@@ -116,41 +116,41 @@ class TestPrintedValuePrecision:
     sibling part's own value."""
 
     def test_file_names_with_spaces_are_taken_whole(self):
-        text = ('The Desktop holds "The Long Memo.docx" (816KB), "Planning.docx" and "Operation Second '
-                'Draft.pptx"; the recipe at C:\\Share\\Secret\\Family Recipe.txt (512 bytes) and Board_Notes.txt')
+        text = ('The Desktop holds "The Short Note.docx" (816KB), "Plans.docx" and "Quarterly Plan '
+                'Draft.pptx"; the menu at C:\\Share\\Team\\Family Menu.txt (512 bytes) and Desk_Notes.txt')
         got = [v for v, _ in av.values(text, "path")]
-        assert got == ["The Long Memo.docx", "Planning.docx", "Operation Second Draft.pptx",
-                       "C:\\Share\\Secret\\Family Recipe.txt", "Board_Notes.txt"]
-        unquoted = "The Desktop holds The Long Memo.docx, Planning.docx, Operation Second Draft.pptx and TRAVEL NOTES.docx."
+        assert got == ["The Short Note.docx", "Plans.docx", "Quarterly Plan Draft.pptx",
+                       "C:\\Share\\Team\\Family Menu.txt", "Desk_Notes.txt"]
+        unquoted = "The Desktop holds The Short Note.docx, Plans.docx, Quarterly Plan Draft.pptx and TRIP LIST.docx."
         assert [v for v, _ in av.values(unquoted, "path")] == [
-            "The Long Memo.docx", "Planning.docx", "Operation Second Draft.pptx", "TRAVEL NOTES.docx"]
-        assert av.bind("the recipe file", "path", "Data theft: the recipe file C:\\Share\\Secret\\Family Recipe.txt was opened at 09:15 UTC.")[0] == "C:\\Share\\Secret\\Family Recipe.txt"
+            "The Short Note.docx", "Plans.docx", "Quarterly Plan Draft.pptx", "TRIP LIST.docx"]
+        assert av.bind("the menu file", "path", "Data theft: the menu file C:\\Share\\Team\\Family Menu.txt was opened at 09:15 UTC.")[0] == "C:\\Share\\Team\\Family Menu.txt"
 
     def test_a_time_keeps_its_zone_and_utc_wins(self):
-        text = "Lateral movement at 2020-09-19 03:36:22 DC01 time (~02:36 UTC, 1h VM clock skew); logon 2020-09-19 02:19:13 UTC"
+        text = "Lateral movement at 2031-03-01 05:27:44 DC01 time (~04:27 UTC, 1h VM clock skew); logon 2031-03-01 04:12:30 UTC"
         got = [v for v, _ in av.values(text, "datetime")]
-        assert got[0] == "2020-09-19 02:19:13 UTC" and "2020-09-19 03:36:22 DC01 time" in got
-        assert av.bind("when", "datetime", "The attacker moved to the desktop at 2020-09-19 03:36:22 DC01 time (~02:36 UTC).")[0] == "2020-09-19 03:36:22 DC01 time"
+        assert got[0] == "2031-03-01 04:12:30 UTC" and "2031-03-01 05:27:44 DC01 time" in got
+        assert av.bind("when", "datetime", "The attacker moved to the desktop at 2031-03-01 05:27:44 DC01 time (~04:27 UTC).")[0] == "2031-03-01 05:27:44 DC01 time"
 
     def test_a_host_label_is_the_computer_name_only_when_named_so(self):
-        assert av.bind("computer name", "host", "The Dell CPi notebook runs Windows XP (NTFS volume).", known_hosts=["CPi"]) == (None, "")
-        assert av.bind("computer name", "host", "The computer name of the CPi notebook is N-1A9ODN6ZXK4LQ.", known_hosts=["CPi"])[0] == "N-1A9ODN6ZXK4LQ"
-        assert av.values("host CPi was imaged; computer name CPi", "host", known_hosts=["CPi"], name_part=True)[0][0] == "CPi"
-        assert av.values("host CPi was imaged", "host", known_hosts=["CPi"], name_part=True) == []
+        assert av.bind("computer name", "host", "The Acme NB7 notebook runs Windows XP (NTFS volume).", known_hosts=["NB7"]) == (None, "")
+        assert av.bind("computer name", "host", "The computer name of the NB7 notebook is N-3B8RTW2PL6XQ9.", known_hosts=["NB7"])[0] == "N-3B8RTW2PL6XQ9"
+        assert av.values("host NB7 was imaged; computer name NB7", "host", known_hosts=["NB7"], name_part=True)[0][0] == "NB7"
+        assert av.values("host NB7 was imaged", "host", known_hosts=["NB7"], name_part=True) == []
 
     def test_sibling_parts_keep_their_sub_kind_words(self):
         assert av.qualifier("SMTP address") == {"smtp"} and av.qualifier("web-mail address") == {"web-mail"}
-        assert av.bind("web-mail address", "email", "The user's web-mail address is 7a4o0f8osgs2u@yahoo.com, from the Yahoo cookie.")[0] == "7a4o0f8osgs2u@yahoo.com"
-        assert av.bind("web-mail address", "email", "SMTP email address whoknowsme@sbcglobal.net, SMTP server smtp.sbcglobal.net.") == (None, "")
-        assert av.bind("SMTP address", "email", "SMTP email address whoknowsme@sbcglobal.net, SMTP server smtp.sbcglobal.net.")[0] == "whoknowsme@sbcglobal.net"
+        assert av.bind("web-mail address", "email", "The user's web-mail address is x7k2q9m4p1@webmail.example.com, from the web-mail cookie.")[0] == "x7k2q9m4p1@webmail.example.com"
+        assert av.bind("web-mail address", "email", "SMTP email address jane.doe@mail.example.net, SMTP server smtp.mail.example.net.") == (None, "")
+        assert av.bind("SMTP address", "email", "SMTP email address jane.doe@mail.example.net, SMTP server smtp.mail.example.net.")[0] == "jane.doe@mail.example.net"
 
     def test_a_shortcut_never_wins_over_the_file_it_points_to(self):
-        st = ("Data theft on FILESRV01: the recipe file at C:\\Share\\Secret\\Family Recipe.txt (512 bytes) was opened at "
-              "09:15 UTC; a Recent Items shortcut (C:\\Users\\admin\\AppData\\Roaming\\Microsoft\\Windows\\Recent\\Family Recipe.lnk, "
+        st = ("Data theft on FILESRV01: the menu file at C:\\Share\\Team\\Family Menu.txt (512 bytes) was opened at "
+              "09:15 UTC; a Recent Items shortcut (C:\\Users\\admin\\AppData\\Roaming\\Microsoft\\Windows\\Recent\\Family Menu.lnk, "
               "MFT 9021) records the open.")
-        assert av.bind("the recipe file", "path", st)[0] == "C:\\Share\\Secret\\Family Recipe.txt"
-        assert av.bind("the recipe file", "path", st, explicit=True)[0] == "C:\\Share\\Secret\\Family Recipe.txt"
-        assert av.bind("the file", "path", "Only the shortcut C:\\Users\\admin\\Recent\\Family Recipe.lnk survives.")[0].endswith(".lnk")
+        assert av.bind("the menu file", "path", st)[0] == "C:\\Share\\Team\\Family Menu.txt"
+        assert av.bind("the menu file", "path", st, explicit=True)[0] == "C:\\Share\\Team\\Family Menu.txt"
+        assert av.bind("the file", "path", "Only the shortcut C:\\Users\\admin\\Recent\\Family Menu.lnk survives.")[0].endswith(".lnk")
 
 
 def test_a_value_carrying_the_qualifier_word_wins_over_the_next_value_in_a_list():
@@ -159,9 +159,9 @@ def test_a_value_carrying_the_qualifier_word_wins_over_the_next_value_in_a_list(
     list. The word is the value's own, so the value wins on both paths."""
     from core.answer_values import bind
     clause = ("Recent-items shortcuts on the workstation point at four documents "
-              "on the share: Secret Recipe.txt, Board_Notes.txt, Roadmap.txt, Budget.txt.")
-    assert bind("the recipe file", "path", clause)[0] == "Secret Recipe.txt"
-    assert bind("the recipe file", "path", clause, explicit=True)[0] == "Secret Recipe.txt"
+              "on the share: Weekly Menu.txt, Desk_Notes.txt, Roadmap.txt, Budget.txt.")
+    assert bind("the menu file", "path", clause)[0] == "Weekly Menu.txt"
+    assert bind("the menu file", "path", clause, explicit=True)[0] == "Weekly Menu.txt"
     # a qualifier that names a later value still binds that value
     assert bind("the roadmap file", "path", clause)[0] == "Roadmap.txt"
 
@@ -170,9 +170,9 @@ def test_the_fuller_form_wins_when_both_forms_carry_the_qualifier_word():
     """A conclusion names a file twice, bare and as its full path; both carry
     the qualifier word, and the full path is the more useful answer."""
     from core.answer_values import bind
-    clause = "Secret Recipe.txt (C:\\Share\\Secret\\Secret Recipe.txt, 512 bytes, inode 4242) was opened at 09:15 UTC."
-    assert bind("the recipe file", "path", clause)[0] == "C:\\Share\\Secret\\Secret Recipe.txt"
-    assert bind("the recipe file", "path", clause, explicit=True)[0] == "C:\\Share\\Secret\\Secret Recipe.txt"
+    clause = "Weekly Menu.txt (C:\\Share\\Team\\Weekly Menu.txt, 512 bytes, inode 4242) was opened at 09:15 UTC."
+    assert bind("the menu file", "path", clause)[0] == "C:\\Share\\Team\\Weekly Menu.txt"
+    assert bind("the menu file", "path", clause, explicit=True)[0] == "C:\\Share\\Team\\Weekly Menu.txt"
 
 
 def test_a_stop_after_a_title_or_initial_does_not_end_a_clause():
@@ -199,8 +199,8 @@ def test_an_account_named_after_a_copula_binds(statement, want):
 
 def test_a_spaced_file_name_is_kept_whole_before_a_sentence_final_stop():
     from core.answer_values import bind
-    assert bind("the recipe file", "path", "The stolen file was C:\\Share\\Secret\\Family Recipe.txt.")[0] == \
-        "C:\\Share\\Secret\\Family Recipe.txt"
+    assert bind("the menu file", "path", "The stolen file was C:\\Share\\Team\\Family Menu.txt.")[0] == \
+        "C:\\Share\\Team\\Family Menu.txt"
 
 
 def test_a_registered_owner_is_a_name_and_a_netbios_domain_counts_after_its_cue():
@@ -231,8 +231,8 @@ def test_a_bare_principal_at_a_sentence_end_keeps_no_stop():
 
 @pytest.mark.parametrize("part, kind, text, want", [
     # a plan file, never the notes beside it
-    ("the plan documents", "path", "The folder holds Planning.docx, notes.txt and plan_final.pdf.", {"Planning.docx", "plan_final.pdf"}),
-    ("the plan documents", "path", "The folder holds Planning.docx, meeting_notes_final_version.txt and plan_final.pdf.", {"Planning.docx", "plan_final.pdf"}),
+    ("the plan documents", "path", "The folder holds Plans.docx, notes.txt and plan_final.pdf.", {"Plans.docx", "plan_final.pdf"}),
+    ("the plan documents", "path", "The folder holds Plans.docx, meeting_notes_final_version.txt and plan_final.pdf.", {"Plans.docx", "plan_final.pdf"}),
     ("registered owner", "name", "The registered owner in the SOFTWARE hive is Jane Roe (RegisteredOrganization N/A).", {"Jane Roe"}),
 ])
 def test_a_stem_of_the_qualifier_inside_a_value_ranks_behind_a_whole_word_and_ahead_of_neighbours(part, kind, text, want):
@@ -248,16 +248,16 @@ def test_a_label_before_a_colon_binds_the_value_that_follows():
 
 def test_a_label_that_denies_the_value_binds_nothing():
     from core.answer_values import bind
-    assert bind("install date", "datetime", "Install date not recorded: the only timestamp is 2015-03-25 10:33:22 UTC (last shutdown).")[0] is None
-    assert bind("last logon of admin11", "datetime", "Last logon of admin11: not recorded, the account was created on 2015-03-22 15:51:54 UTC.")[0] is None
-    assert bind("last logon of admin11", "datetime", "Last logon of admin11: 2015-03-22 15:57:02 UTC.")[0] == "2015-03-22 15:57:02 UTC"
+    assert bind("install date", "datetime", "Install date not recorded: the only timestamp is 2031-03-25 11:41:37 UTC (last shutdown).")[0] is None
+    assert bind("last logon of admin7", "datetime", "Last logon of admin7: not recorded, the account was created on 2031-03-22 16:02:11 UTC.")[0] is None
+    assert bind("last logon of admin7", "datetime", "Last logon of admin7: 2031-03-22 16:08:45 UTC.")[0] == "2031-03-22 16:08:45 UTC"
 
 
 def test_a_compound_label_with_a_foreign_tail_is_not_the_parts_word():
     from core.answer_values import bind
     assert bind("registered owner", "name", "Registered owner: not set; RegisteredOrganization reads Acme Ltd.")[0] is None
     assert bind("registered owner", "name", "RegisteredOwner: Jane Roe")[0] == "Jane Roe"
-    assert bind("install date", "datetime", "InstallDate: 2015-03-22 14:34:26 UTC")[0] == "2015-03-22 14:34:26 UTC"
+    assert bind("install date", "datetime", "InstallDate: 2031-03-22 13:20:05 UTC")[0] == "2031-03-22 13:20:05 UTC"
 
 
 class TestRecogniserPrecision:
@@ -451,6 +451,28 @@ class TestAFileClassNamedByThePart:
             "/usr/local/bin/tool"
         assert av.bind("an executable", "path", "Only C:\\Temp\\example3.log was written.") == (None, "")
 
+    def test_a_value_of_the_class_is_preferred_and_no_other_value_is_lost(self):
+        # A value of the named class wins over one of no class in the same
+        # text; alone, a staging or masquerading name still answers.
+        st = "The FTP session to 203.0.113.9 carried photo1.jpg and tool.exe."
+        assert av.bind("an executable", "path", st)[0] == "tool.exe"
+        assert av.bind("an executable", "path", st, explicit=True)[0] == "tool.exe"
+        assert av.bind("an executable", "path", "It dropped C:\\Users\\jane.doe\\AppData\\Local\\Temp\\update.tmp.",
+                       explicit=True)[0].endswith("update.tmp")
+        assert av.bind("an executable", "path", "The loader ran holiday.jpg from the share.")[0] == "holiday.jpg"
+        assert av.bind("the binary", "path", "It wrote /tmp/payload.bin and ran it.")[0] == "/tmp/payload.bin"
+
+    def test_the_class_is_preferred_across_clauses_when_the_belief_is_named_for_the_part(self):
+        # The value of the class sits in a later clause; a belief the analyst
+        # named for the part (explicit) must still answer with it, as a
+        # linked belief already did, never with the first clause's picture.
+        st = ("jane.doe's account stored pic1.jpg, pic3.jpg and notes.zip on CORP-WS01; "
+              "tool.exe and the pictures were requested from the web directory.")
+        assert av.bind("an executable", "path", st, explicit=True)[0] == "tool.exe"
+        assert av.bind("an executable", "path", st)[0] == "tool.exe"
+        # Alone, a no-class name in the first clause still answers.
+        assert av.bind("an executable", "path", "It stored stage.tmp; pic1.jpg was requested later.",
+                       explicit=True)[0] == "stage.tmp"
 
 class TestWordsMatchByTheirStems:
     @pytest.mark.parametrize("a, b", [("key", "keys"), ("log", "logs"), ("wiping", "wiped"),

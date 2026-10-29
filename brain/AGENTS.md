@@ -115,7 +115,7 @@ solved errors, open loops, research findings, security notes.
 After each finished investigation, **background learning**
 (`core/brain/learn.py`) analyses the claim graph, memory, findings, reports,
 tasks, corrections, and reviewer output (when present), then stages a **small**
-set of high-confidence reusable lessons for Dashboard Brain Review.
+set of high-confidence reusable lessons for the dashboard's Brain page (Inbox tab).
 
 **Daily command:** `atlas run` (learning is automatic). Use `atlas train` for
 lab cases that need an independent reviewer. See `docs/architecture-brain.md`.

@@ -38,6 +38,9 @@ _PHASE_ORDER = {
     # follow-ups its findings open come first, lessons for the owner last,
     # whatever the frame.
     "examination": ("investigate", "escalate", "recover", "harden", "eradicate", "contain"),
+    # No owner named: what to examine and preserve comes first; a step an
+    # owner would take comes last.
+    "neutral": ("investigate", "escalate", "recover", "harden", "eradicate", "contain"),
 }
 _PHASE_RANK = {f: {p: i for i, p in enumerate(order)} for f, order in _PHASE_ORDER.items()}
 
@@ -216,15 +219,15 @@ def render_markdown(catalog: dict[str, Any], language: str = "en", *,
         # person under investigation.
         lines.append(f"*{t('response_suspect_note', language)}*")
         lines.append("")
-    else:
-        if catalog.get("engagement") == "examination":
-            # Examined after the fact, the owner's duties remain: the note
-            # says each step applies to systems still in service.
-            lines.append(f"*{t('response_examination_note', language)}*")
-            lines.append("")
-        if owner == "unknown":
-            lines.append(f"*{t('response_owner_assumption', language)}*")
-            lines.append("")
+    elif catalog.get("frame") == "neutral":
+        # No owner named: no side is assumed and no step is an owner's.
+        lines.append(f"*{t('response_neutral_note', language)}*")
+        lines.append("")
+    elif catalog.get("engagement") == "examination":
+        # Examined after the fact, the owner's duties remain: the note
+        # says each step applies to systems still in service.
+        lines.append(f"*{t('response_examination_note', language)}*")
+        lines.append("")
     if not rows:
         lines.append(t("response_none", language))
         lines.append("")
@@ -367,6 +370,8 @@ _SELECTORS: dict[str, dict[str, Any]] = {
     "hunt": {"uses": ("hunt",)},
     "hosts": {"types": ("host",), "sides": ("victim",), "claim_host": True},
     "credentials": {"types": ("account",), "sides": ("victim", "attacker")},
+    # Accounts the finding itself states as administrative or privileged.
+    "privileged": {"types": ("account",), "sides": ("victim", "attacker"), "privileged": True},
     "subject": {"types": ("account", "email", "host"), "sides": ("subject",)},
     "persistence": {"types": ("registry", "service", "task", "path", "file"), "sides": ("attacker",)},
     "preserve": {"claim_host": True},
@@ -376,6 +381,7 @@ _SELECTOR_NOUNS = {
     "hunt": "hashes, files or paths on the attacker side",
     "hosts": "victim hosts",
     "credentials": "accounts",
+    "privileged": "accounts the finding states as privileged",
     "subject": "subject accounts, mailboxes or hosts",
     "persistence": "registry keys, services, tasks or paths on the attacker side",
     "preserve": "host",
@@ -433,11 +439,13 @@ def _is_own(assets: dict[str, Any] | None, value: str, kind: str) -> bool:
 
 
 def objects_for(selector: str | None, claim: dict[str, Any], *, frame: str,
-                assets: dict[str, Any] | None = None, claim_host: bool = True) -> list[str]:
+                assets: dict[str, Any] | None = None, claim_host: bool = True,
+                graph: dict[str, Any] | None = None) -> list[str]:
     """The objects a selector finds on the claim: typed rows by use (the
     use table of the frame) or by type and side, and, for a step that acts
     on the claim's host (contain, preserve), that host; a hardening row
-    takes typed rows only."""
+    takes typed rows only. The privileged selector reads the current
+    beliefs of ``graph`` besides the claim (stated_privileged)."""
     spec = _SELECTORS.get(selector or "")
     if not spec:
         return []
@@ -456,9 +464,46 @@ def objects_for(selector: str | None, claim: dict[str, Any], *, frame: str,
                 continue
         elif kind not in spec.get("types", ()) or side not in spec.get("sides", ()):
             continue
+        if kind == "account":
+            from core.indicators import account_is_a_file
+            if account_is_a_file(value):
+                continue            # a row recorded before the account shape held
+        if spec.get("privileged") and not stated_privileged(value, claim, graph):
+            continue
         if value not in out:
             out.append(value)
     return out
+
+
+# How a statement says an account holds administrative rights: the words of
+# the role itself (English and German), the language of an account's
+# privilege, not a list of accounts or groups of any case.
+_PRIVILEGE_RE = _re.compile(r"(?i)\b(?:admin\w*|administrat\w*|privileg\w*|superuser)\b")
+
+
+def stated_privileged(account: str, claim: dict[str, Any],
+                      graph: dict[str, Any] | None = None) -> bool:
+    """Whether a statement says this account is administrative or
+    privileged: a privilege word in a sentence that names the account, in
+    the claim or in any current belief of ``graph``. The account's own name
+    is never read as a statement of its rights (ATLAS_PRIVILEGED_OBJECTS;
+    off: every account)."""
+    from core.envfile import env_flag
+    if not env_flag("ATLAS_PRIVILEGED_OBJECTS", True):
+        return True
+    from core.claim_graph import is_current_belief
+    low = account.lower()
+    user = low.replace("/", "\\").rsplit("\\", 1)[-1].split("@", 1)[0]
+    texts = [str(claim.get("statement") or "")]
+    for node in ((graph or {}).get("nodes") or {}).values():
+        if isinstance(node, dict) and node.get("kind") in ("claim", "conclusion") \
+                and node is not claim and is_current_belief(node):
+            texts.append(str(node.get("statement") or ""))
+    for sentence in (s for text in texts for s in _re.split(r"(?<=[.;!?])\s+", text)):
+        if (low in sentence.lower() or _re.search(rf"(?i)(?<![\w.-]){_re.escape(user)}(?![\w-])", sentence)) \
+                and _PRIVILEGE_RE.search(sentence):
+            return True
+    return False
 
 
 def techniques_in(text: str) -> list[str]:
@@ -499,7 +544,7 @@ def derive_from_claim(case_dir: str | os.PathLike, claim_id: str, *,
     frame, assets = _frame_and_assets(case_dir)
     if frame != "incident":
         return {"claim_id": claim_id, "techniques": tids, "recorded": [], "folded": [],
-                "skipped": "subject frame: no hardening row"}
+                "skipped": f"{frame} frame: no hardening row"}
     language = get_report_language(case_dir)
     recorded, folded = [], []
     # One row per technique, and only with objects the finding names: the
@@ -511,7 +556,8 @@ def derive_from_claim(case_dir: str | os.PathLike, claim_id: str, *,
             if mit["id"] in _SKIP_MITIGATIONS:
                 continue
             _phase, _urgency, _scope, selector = _phase_for(mit["name"])
-            objects = objects_for(selector, claim, frame=frame, assets=assets, claim_host=False) if selector else []
+            objects = objects_for(selector, claim, frame=frame, assets=assets, claim_host=False,
+                                  graph=graph) if selector else []
             if not objects:
                 continue
             noun = _HARDEN_NOUNS[selector][language if language in ("en", "de") else "en"]
@@ -564,6 +610,33 @@ def hardening_references(case_dir: str | os.PathLike, language: str = "en") -> l
     return [f"*{_tx('hardening_refs', language)}:* " + "; ".join(items) + ".", ""]
 
 
+def _finding_techniques(claim: dict) -> list[str] | None:
+    """The validated ATT&CK ids of the finding a claim was recorded from
+    (its validated_techniques, less those marked relevance=unsupported), or
+    None when the finding is not in this process's trace: the caller then
+    keeps the prose reading."""
+    cid = claim.get("source_finding_call_id")
+    if not cid:
+        return None
+    try:
+        from core.execution_log import log
+        entry = next((e for e in reversed(log._entries)
+                      if e.get("type") == "finding" and e.get("call_id") == cid), None)
+    except Exception:  # noqa: BLE001 — no trace, no techniques
+        return None
+    if entry is None:
+        return None
+    out = []
+    for vt in entry.get("validated_techniques") or []:
+        if isinstance(vt, dict):
+            if str(vt.get("relevance") or "").lower() == "unsupported":
+                continue
+            vt = vt.get("technique_id")
+        if vt:
+            out.append(str(vt).upper())
+    return out
+
+
 def derive_from_finding_text(case_dir: str | os.PathLike, claim_id: str, statement: str,
                              *, host: str = "", language: str = "en") -> dict[str, Any]:
     """Record the canned first-hour precautions a finding's own wording
@@ -582,7 +655,7 @@ def derive_from_finding_text(case_dir: str | os.PathLike, claim_id: str, stateme
     """
     from core.case_config import is_suspect_device
     from core.claim_graph import add_recommendation, get_node
-    from core.ir_playbook import MANDATORY_RATIONALE_PREFIX, baseline_steps, classify
+    from core.ir_playbook import CLASSES, MANDATORY_RATIONALE_PREFIX, baseline_steps, classify
 
     classes = classify(statement or "", asserted=True)
     if not classes:
@@ -592,6 +665,14 @@ def derive_from_finding_text(case_dir: str | os.PathLike, claim_id: str, stateme
     if not claim or claim.get("kind") not in ("claim", "conclusion"):
         return {"claim_id": claim_id, "classes": [], "recorded": [], "folded": [],
                 "error": "not a claim"}
+    # A class with a defining technique reads the finding's validated
+    # techniques (ir_playbook._class_spans): looked up only when one fired.
+    techniques = (_finding_techniques(claim)
+                  if any(CLASSES[c].get("technique") for c in classes) else None)
+    if techniques:
+        classes = classify(statement or "", asserted=True, techniques=techniques)
+        if not classes:
+            return {"claim_id": claim_id, "classes": [], "recorded": [], "folded": []}
     suspect = is_suspect_device(case_dir)
     # A finding that asserts a class whose material must not be handled
     # puts the case under a handling stop (the affected device is the
@@ -605,7 +686,8 @@ def derive_from_finding_text(case_dir: str | os.PathLike, claim_id: str, stateme
         pass
     hosts = [host] if host else ([claim["host"]] if claim.get("host") else None)
     estate = claim.get("scope") == "estate"
-    steps = [s for s in baseline_steps(statement or "", language, asserted=True, subject=suspect)
+    steps = [s for s in baseline_steps(statement or "", language, asserted=True, subject=suspect,
+                                       techniques=techniques)
              if s["class"] != "universal"]
     recorded, folded = [], []
     # A mandatory escalation rests on the finding whatever the owner: it
@@ -634,7 +716,7 @@ def derive_from_finding_text(case_dir: str | os.PathLike, claim_id: str, stateme
     for step in class_steps[:MAX_DERIVED_PER_CLAIM]:
         scope = step["scope"] if (step["scope"] != "estate" or estate) else "host"
         selector = step.get("objects")
-        objects = objects_for(selector, claim, frame=frame, assets=assets) if selector else []
+        objects = objects_for(selector, claim, frame=frame, assets=assets, graph=graph) if selector else []
         urgency = step["urgency"]
         rationale = (f"precaution for a suspected {step['class'].replace('_', ' ')} "
                      f"incident, indicated by {claim_id}")

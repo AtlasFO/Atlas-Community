@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+from contextlib import contextmanager
 import signal
 import subprocess
 import sys
@@ -62,6 +63,10 @@ class RunSession:
         # The dashboard user who pressed Start: only they or an admin stop it.
         self.started_by = (started_by or "").strip()
         self.started_at = time.time()
+        # Who pressed Stop, and when: the run strip says "stopped" from these
+        # even when the child ends before it can record why.
+        self.stop_requested_by = ""
+        self.stop_requested_at: Optional[float] = None
         self._lock = threading.Lock()
 
         env = dict(os.environ)
@@ -151,11 +156,13 @@ class RunSession:
     def status(self) -> dict:
         run_status_path = Path(self.case_dir) / ".atlas" / "run_status.json"
         on_disk: dict = {}
-        if run_status_path.is_file():
-            try:
+        # Only a status this run wrote: a file left by an earlier run (this
+        # one stopped before writing its own) would lend it that run's end.
+        try:
+            if run_status_path.stat().st_mtime >= self.started_at - 1:
                 on_disk = json.loads(run_status_path.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                pass
+        except (OSError, ValueError):
+            pass
         with self._lock:
             tail = list(self.stdout_tail[-20:])
         status = {
@@ -167,20 +174,41 @@ class RunSession:
         # The run's status file carries the child's copy of the start; the
         # session's own stamp is the one Start set, and it stands.
         status["started_at"] = self.started_at_utc()
+        # Whether the run reached one of the loop's endings, by the rule the
+        # exit code and the report use (a completion finish_status, or the
+        # loop's own finished/closed_out). A requested stop or a crash also
+        # writes a finish_status ("interrupted", "error"), so "has a
+        # finish_status" is not this; the page reads this flag, not the set.
+        # A run that stopped with content classes undecided (STOPPED_UNDECIDED)
+        # ended at one of those endings without reaching it: a stop, never a
+        # finish, whatever its stopped_reason; the page says which.
+        from core.investigation_exit import STOPPED_UNDECIDED, ended_through_a_completion_path
+        finish_status = str(on_disk.get("finish_status") or "")
+        status["undecided_end"] = finish_status == STOPPED_UNDECIDED
+        status["finished_itself"] = bool(
+            ended_through_a_completion_path(finish_status)
+            or (not status["undecided_end"]
+                and str(on_disk.get("stopped_reason") or "") in ("finished", "closed_out")))
+        if self.stop_requested_at is not None:
+            status["stop_requested_by"] = self.stop_requested_by
+            status["stop_requested_at"] = time.strftime(
+                "%Y-%m-%dT%H:%M:%SZ", time.gmtime(self.stop_requested_at))
         return status
 
     def started_at_utc(self) -> str:
         return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self.started_at))
 
-    def stop(self) -> dict:
+    def stop(self, actor: str = "") -> dict:
         if not self.alive:
             return {"success": True, "already_stopped": True}
+        self.stop_requested_by = (actor or "").strip()
+        self.stop_requested_at = time.time()
         return _graceful_stop(self.proc)
 
 
 # A stopped run still writes its report on the way out, which takes minutes
-# when narrative sections are generated. Ten seconds to SIGKILL threw that
-# report away; now the request returns at once and a watcher kills the
+# when narrative sections are generated. A short SIGKILL timeout would throw
+# that report away, so the request returns at once and a watcher kills the
 # process only if it has not finished within the grace period.
 STOP_GRACE_SECONDS = float(os.environ.get("ATLAS_DASHBOARD_STOP_GRACE") or "900")
 
@@ -243,43 +271,18 @@ class RunManager:
     def start(self, cases_root: str, case_name: str, mode: str = "run",
              options: Optional[dict] = None,
              notify_email: str = "", started_by: str = "") -> RunSession:
+        # A case is a folder name under the cases root, never a path: the
+        # routes check it, and so does the manager for any other caller.
+        if (not case_name or case_name.startswith(".") or "/" in case_name or "\\" in case_name
+                or os.sep in case_name):
+            raise RunError(f"invalid case name: {case_name!r}")
         with self._lock:
-            existing = self._sessions.get(case_name)
-            if existing is not None and existing.alive:
-                raise RunError(
-                    f"a run is already in progress for {case_name!r}")
             case_dir = os.path.join(cases_root, case_name)
+            busy = self._busy(case_dir, case_name)
+            if busy:
+                raise RunError(busy)
             if not os.path.isdir(case_dir):
                 raise RunError(f"no such case: {case_name!r}")
-            # The disabled Start button in the UI is a courtesy, not the
-            # actual guard — without this check, a direct POST (or a stale
-            # page whose button wasn't yet re-disabled) would spawn a
-            # second `atlas run` racing an already-running CLI-started one
-            # over the same case's evidence/analysis/claim graph. This
-            # session has no Popen handle for that external process (that's
-            # the whole reason it isn't in self._sessions), but the pid
-            # agent/loop.py records in run_status.json is enough to detect
-            # it's still alive.
-            from dashboard.read_models import run_process_alive
-            if run_process_alive(case_dir):
-                raise RunError(
-                    f"a run is already in progress for {case_name!r} "
-                    f"(started outside this dashboard — stop it the same way)")
-            # run_process_alive() above only catches a run that has already
-            # written its pid to run_status.json — there is a real window
-            # between an externally-started `atlas run`/`rerun` spawning and
-            # its first status write. core.run_lock is held by that process
-            # for its whole lifetime regardless of when it writes status, so
-            # probing it here closes that window (the authoritative guard is
-            # still the child process's own run_lock.acquire() in
-            # agent/cli.py — this is just a fast, friendly precondition
-            # check so the dashboard doesn't spawn a process doomed to lose
-            # that race).
-            from core import run_lock
-            if run_lock.is_locked(case_dir):
-                raise RunError(
-                    f"a run is already in progress for {case_name!r} "
-                    f"(started outside this dashboard — stop it the same way)")
             try:
                 extra_args = run_options.build_argv(mode, options)
                 local = run_options.local_options(mode, options)
@@ -304,6 +307,42 @@ class RunManager:
             self._sessions[case_name] = sess
             return sess
 
+    def _busy(self, case_dir: str, case_name: str) -> str:
+        """Why the case has a live run, or "" when it has none. The caller
+        holds self._lock.
+
+        Three signs, because each covers a window the others miss: this
+        manager's own session (alive from the spawn on, before the child has
+        written anything or taken a lock); the pid a run records in
+        run_status.json (a run started from the command line, which this
+        manager has no handle for); and core.run_lock, which such a run
+        holds from its start, before its first status write. The child's
+        own run_lock.acquire() in agent/cli.py stays the authoritative
+        guard against two runs; this is the fast check that keeps the
+        dashboard from spawning one doomed to lose that race, and from
+        moving a case folder out from under a run."""
+        existing = self._sessions.get(case_name)
+        if existing is not None and existing.alive:
+            return f"a run is already in progress for {case_name!r}"
+        if not os.path.isdir(case_dir):
+            return ""   # run_lock's probe would create the folder
+        from dashboard.read_models import run_process_alive
+        from core import run_lock
+        if run_process_alive(case_dir) or run_lock.is_locked(case_dir):
+            return (f"a run is already in progress for {case_name!r} "
+                    f"(started outside this dashboard — stop it the same way)")
+        return ""
+
+    @contextmanager
+    def held(self, cases_root: str, case_name: str):
+        """Hold this manager's lock for a change to the case folder itself
+        (a rename, a move to .deleted/): yields why the case has a live run,
+        or "" when it has none, and no run of this dashboard can start until
+        the block ends. Keep the block short: every status read waits on
+        this lock."""
+        with self._lock:
+            yield self._busy(os.path.join(cases_root, case_name), case_name)
+
     def get(self, case_name: str) -> Optional[RunSession]:
         with self._lock:
             return self._sessions.get(case_name)
@@ -327,7 +366,7 @@ class RunManager:
                 and not role_at_least(actor_role or "", "admin")):
             raise RunForbidden(
                 f"only {sess.started_by} or an administrator can stop this run")
-        return sess.stop()
+        return sess.stop(actor)
 
     def close_all(self) -> None:
         with self._lock:

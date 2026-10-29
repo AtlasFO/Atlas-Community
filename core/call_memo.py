@@ -43,9 +43,19 @@ _TRACE_CALL_ID_RE = re.compile(r'"(?:_atlas_)?call_id"\s*:\s*"?(\d+)')
 _ATLAS_CALL_ID_RE = re.compile(r'"_atlas_call_id"\s*:\s*"?(\d+)')
 
 
+# The stamp as a result's first key (agent.toolbox stamps every dict result
+# so), after at most a short note line Atlas puts before a result (a replay,
+# a copy, a tool error): it outranks any call_id of the result's own content.
+_HEAD_STAMP_RE = re.compile(r'\A[^{]{0,400}?\{\s*"_atlas_call_id"\s*:\s*"?(\d+)')
+
+
 def trace_call_id_of(result: str) -> str:
-    """The trace call id stamped on a rendered tool result, "" when none."""
-    found = _ATLAS_CALL_ID_RE.search(result[-600:]) if result else None
+    """The trace call id stamped on a rendered tool result, "" when none:
+    the stamp at the result's head, else Atlas's stamp near its end (an
+    executor result whose stdout leads), else a call_id near its head."""
+    found = _HEAD_STAMP_RE.search(result) if result else None
+    if found is None:
+        found = _ATLAS_CALL_ID_RE.search(result[-600:]) if result else None
     if found is None:
         found = _TRACE_CALL_ID_RE.search(result[:800] if result else "")
     return found.group(1) if found else ""

@@ -262,20 +262,104 @@ def ledger_status() -> dict:
         coverage_stats, load_ledger, open_unit_paths, ready_for_degraded_exit,
     )
     ledger = load_ledger(case_dir)
+    # An extracted output is no unit of the floor: what was read in it is
+    # the trace's answer, each file class with the count read.
     units = [
         {"path": u.get("path"), "status": u.get("status"),
          "kind": u.get("kind"), "reason": u.get("reason"),
          "note": u.get("note") or ""}
         for u in (ledger.get("units") or {}).values()
-        if isinstance(u, dict)
+        if isinstance(u, dict) and u.get("kind") != "derived"
     ]
-    return {
+    out = {
         "success": True,
         "stats": coverage_stats(ledger),
         "unseen": open_unit_paths(case_dir, limit=20),
         "units": sorted(units, key=lambda u: (u["status"], u["path"] or "")),
         "ready_for_degraded_exit": bool(ready_for_degraded_exit(case_dir)),
     }
+    try:
+        from core.evidence_depth import unit_host
+        from core.evidence_disposition import undecided_by_host, undecided_classes, undecided_items
+        und, und_items = undecided_classes(ledger), undecided_items(ledger)
+        if und or und_items:
+            items = ledger.get("items") or {}
+            out["classes_without_reason"] = {"count": len(und) + len(und_items), "by_host": undecided_by_host(ledger),
+                                             "classes": ([f"{unit_host(c, items)}: {c.get('label')} ({c.get('files')})"
+                                                          for c in und]
+                                                         + [f"{unit_host(i, items)}: {i.get('path')} (no content classes)"
+                                                            for i in und_items])[:200]}
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from core.coverage_ledger import extracted_outputs
+        extracted = {o["path"]: {k: f"{n} of {m} read"
+                                 + (f", left: {o['left'][k]['kind']}" if k in (o.get("left") or {}) else "")
+                                 for k, (n, m) in o["classes"].items()}
+                     for o in extracted_outputs(case_dir)}
+    except Exception:  # noqa: BLE001
+        extracted = {}
+    if extracted:
+        out["extracted_outputs"] = extracted
+    from core.deferred_intents import coverage_honesty_on
+    if coverage_honesty_on():
+        # Listed and read apart: a listing identifies a container, a read
+        # of a file inside it (or a plugin over memory) reads it.
+        raw = [u for u in (ledger.get("units") or {}).values() if isinstance(u, dict) and u.get("kind") != "derived"]
+        out["read"] = sorted(str(u.get("path")) for u in raw if u.get("read_by"))
+        out["listed_only"] = sorted(str(u.get("path")) for u in raw if u.get("listed_by") and not u.get("read_by"))
+    return out
+
+
+def _disposition_tool_on() -> bool:
+    try:
+        from core.evidence_disposition import disposition_on
+        return disposition_on()
+    except Exception:  # noqa: BLE001
+        return False
+
+
+if _disposition_tool_on():
+    @mcp.tool()
+    @output_safe
+    def set_evidence_disposition(unit: str, state: str, reason: str, reason_kind: str = "",
+                                 proof: list[str] | None = None, hosts: list[str] | None = None) -> dict:
+        """
+        Record what was decided about one evidence item, one content class,
+        or one class label on every host. Every item and class starts
+        pending and must end read, partial or left; the run cannot end
+        while a class has neither a read nor a reason.
+        unit: an item's path, a class id, or a class label as the open-work
+            list prints it (the head before the dash, for example "event log
+            channel"): a label leaves that class on every host that holds it,
+            or on hosts= only, and the answer says per host left or refused.
+        state: relevant (to be read) or left; read and partial follow from
+            the reads themselves.
+        reason_kind (for left): unlikely_to_help (the reason is an observation
+            from a read on the same host that makes the class unlikely to
+            help, for example what the host's security log shows in the
+            window; proof cites that read; a question being answered is
+            never the reason, and every value the reason names must show
+            in the read's rows), outside_window (its data ends before the incident's earliest
+            stated start), other_scope (its host is in no finding or work
+            item and shares no account with one that is), duplicate_of
+            (proof: the other item's path), unreadable (proof: two failed
+            calls of readers that take its format), unrelated_content (no reader parses any of its classes). A leave
+            is refused while a current attacker entity shows in its listing
+            or its own exports (unreadable is left, the hit noted for a
+            person).
+        reason: why, in words (at least 20 characters; "not needed" or
+            "n/a" alone is refused; one reason fits one label).
+        proof: call numbers (5, or "call 5"), or for duplicate_of the other
+            item's path.
+        hosts: the hosts a label applies to; every host when left out.
+        """
+        case_dir = _ledger_case_dir()
+        if not case_dir:
+            return {"success": False, "error": "no active case (start_execution_log first)"}
+        from core.evidence_leave import set_disposition
+        return set_disposition(case_dir, unit, state, reason_kind, reason, list(proof or []),
+                               hosts=[str(h) for h in (hosts or []) if str(h).strip()] or None)
 
 
 @mcp.tool()

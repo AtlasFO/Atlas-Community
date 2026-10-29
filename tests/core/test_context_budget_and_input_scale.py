@@ -22,7 +22,8 @@ def test_context_budget_compact_for_small_window(tmp_path, monkeypatch):
     assert (tmp_path / ".atlas" / "context_budget.json").is_file()
 
 
-def test_input_scale_refuses_winevt_directory(tmp_path):
+def test_input_scale_refuses_winevt_directory(tmp_path, monkeypatch):
+    monkeypatch.setenv("ATLAS_SHARD_ORDER_NEUTRAL", "0")   # the affinity rules' path
     from core.input_scale import check
 
     logs = tmp_path / "winevt" / "logs"
@@ -89,7 +90,8 @@ def test_input_scale_huge_file_disk_first_not_refused(tmp_path):
     ) is False
 
 
-def test_affinity_rdp_prefers_terminal_services(tmp_path):
+def test_affinity_rdp_prefers_terminal_services(tmp_path, monkeypatch):
+    monkeypatch.setenv("ATLAS_SHARD_ORDER_NEUTRAL", "0")   # the affinity rules' path
     from core.input_scale import rank_shards
 
     d = tmp_path / "logs"
@@ -149,7 +151,7 @@ def test_artifact_ready_raw_disk_does_not_advertise_table(tmp_path):
     from core.tool_result_view import compact_if_artifact_ready
 
     raw = tmp_path / "host.raw"
-    # Binary-ish payload with newlines — previously counted as "data rows".
+    # Binary-ish payload with newlines — must not count as "data rows".
     raw.write_bytes(b"\x00\x01\nNOT_A_CSV\n" + b"\xff" * 64)
     data = {
         "success": True,
@@ -355,7 +357,7 @@ def test_scores_are_flat_and_llm_reorder():
     assert reordered[0]["ranking_source"] == "llm"
 
     class _FakeClient:
-        def chat(self, messages, tools=None, max_tokens=256, temperature=0.0):
+        def chat(self, messages, tools=None, max_tokens=None, temperature=0.0, role="agent"):
             return ChatResponse(content="[3,1,0,2]")
 
     refined = llm_refine_ranking(
@@ -494,3 +496,39 @@ def test_a_detector_keeps_its_verdict_when_it_only_read_the_csv(tmp_path):
     # whichever key names the artifact.
     truncated = dict(verdict, truncated=True)
     assert compact_if_artifact_ready(truncated) is not None
+
+
+def test_llm_rerank_is_off_unless_asked_and_runs_under_its_own_role(tmp_path, monkeypatch):
+    """The orchestrator's LLM re-ranking runs only when the operator asks for
+    it; when it runs, the call carries its own role, so a starved ranking
+    call can never teach the thinking ladder a level for the analyst."""
+    from core.investigation_orchestrator import maybe_llm_refine_ranking
+
+    (tmp_path / ".atlas").mkdir()
+    flat = [{"path": f"/a/{i}.evtx", "score": 10.0, "status": "ready",
+             "tool_hint": "ez.evtxecmd", "capability_id": "windows_event_logs"} for i in range(4)]
+    plan = {"candidates": flat, "resources": {}}
+
+    class _Boom:
+        def chat(self, *a, **k):
+            raise AssertionError("the client must not be called when ranking is off")
+
+    monkeypatch.delenv("ATLAS_ORCH_LLM_RANK", raising=False)
+    out, applied = maybe_llm_refine_ranking(plan, case_dir=tmp_path, llm_client=_Boom(), turn=7)
+    assert applied is False and out["candidates"][0]["path"].endswith("0.evtx")
+
+    seen = {}
+
+    class _Ranks:
+        def chat(self, messages, tools=None, temperature=0.0, max_tokens=None, role="agent"):
+            seen["role"] = role
+            seen["max_tokens"] = max_tokens
+            from agent.llm import ChatResponse
+            return ChatResponse(content="[3,1,0,2]")
+
+    monkeypatch.setenv("ATLAS_ORCH_LLM_RANK", "on")
+    out, applied = maybe_llm_refine_ranking(plan, case_dir=tmp_path, llm_client=_Ranks(), turn=7)
+    assert applied is True and out["candidates"][0]["path"].endswith("3.evtx")
+    # One answer: the rank asks under the one-answer allowance (agent/llm.py).
+    from agent.llm import ONE_ANSWER_MAX_TOKENS
+    assert seen["role"] == "orchestrator_rank" and seen["max_tokens"] == ONE_ANSWER_MAX_TOKENS

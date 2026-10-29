@@ -1,4 +1,5 @@
-"""Winevt listing prioritises Security.evtx over side channels."""
+"""list_evidence_dir lists in name order and pages: no file is put first
+and none hides behind the page bound."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -6,27 +7,21 @@ from pathlib import Path
 from tools.misc import list_evidence_dir
 
 
-def test_winevt_list_puts_security_first(tmp_path: Path, monkeypatch):
+def test_the_listing_is_in_name_order_and_pages(tmp_path: Path, monkeypatch):
     logs = tmp_path / "evidence" / "host" / "Windows" / "System32" / "winevt" / "logs"
     logs.mkdir(parents=True)
-    for name in (
-        "Microsoft-Windows-Security-Mitigations%4KernelMode.evtx",
-        "Microsoft-Windows-Security-Adminless%4Operational.evtx",
-        "Security.evtx",
-        "System.evtx",
-        "Application.evtx",
-    ):
+    names = ["Application.evtx", "Microsoft-Windows-Security-Mitigations%4KernelMode.evtx",
+             "Security.evtx", "System.evtx", "Microsoft-Windows-Sysmon%4Operational.evtx"]
+    for name in names:
         (logs / name).write_bytes(b"ElfFile\x00")
-
     monkeypatch.chdir(tmp_path)
-    # No active case — path contains /evidence/ so list allows it
-    out = list_evidence_dir(str(logs), limit=10)
-    assert out["success"]
-    names = [e["name"] for e in out["entries"]]
-    assert names[0] == "Security.evtx"
-    assert "recommended_first" in out
-    assert "Security.evtx" in out["recommended_first"]
-    assert "priority_hint" in out
+    out = list_evidence_dir(str(logs), limit=2)
+    assert out["success"] and out["total"] == 5 and out["truncated"] is True
+    assert [e["name"] for e in out["entries"]] == sorted(names)[:2]
+    assert out["more"] == "+3 more entries: list_evidence_dir(path, glob, offset=2)"
+    assert "priority_hint" not in out and "recommended_first" not in out
+    last = list_evidence_dir(str(logs), limit=2, offset=4)
+    assert [e["name"] for e in last["entries"]] == sorted(names)[4:] and "more" not in last
 
 
 def test_list_evidence_dir_without_a_path_lists_the_open_cases_evidence(tmp_path, monkeypatch):

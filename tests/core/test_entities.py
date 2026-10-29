@@ -1,11 +1,13 @@
 """Tests for core/entities.py — canonical forensic entity extraction."""
+import pytest
+
 from core.entities import DISCRIMINATIVE_TYPES, discriminative, extract
 
 
 class TestExtractionBasics:
     def test_ipv4_canonical_strips_port_and_leading_zeros(self):
-        assert "ip:10.11.11.128" in extract("beacon to 10.11.11.128:443")
-        assert "ip:10.11.11.128" in extract("connects to 10.011.011.128")
+        assert "ip:10.0.12.128" in extract("beacon to 10.0.12.128:443")
+        assert "ip:10.0.12.128" in extract("connects to 10.000.012.128")
 
     def test_invalid_ipv4_octet_rejected(self):
         assert not any(e.startswith("ip:") for e in extract("version 999.1.2.3"))
@@ -31,8 +33,8 @@ class TestExtractionBasics:
         assert "file:toolx.exe" in ents
 
     def test_unc_path_yields_host_entity(self):
-        ents = extract(r"staged to \\10.11.11.128\secured_drive\out.zip")
-        assert "host:10.11.11.128" in ents
+        ents = extract(r"staged to \\10.0.12.128\share\out.zip")
+        assert "host:10.0.12.128" in ents
         assert "file:out.zip" in ents
 
     def test_unix_path(self):
@@ -45,8 +47,8 @@ class TestExtractionBasics:
         assert any(e.startswith("reg:hklm/software/") for e in ents)
 
     def test_email_and_url(self):
-        ents = extract("mail from spy.conspirator@NIST.gov see http://Evil.example/p.php.")
-        assert "email:spy.conspirator@nist.gov" in ents
+        ents = extract("mail from jane.doe@EXAMPLE.org see http://Evil.example/p.php.")
+        assert "email:jane.doe@example.org" in ents
         assert "url:http://evil.example/p.php" in ents
 
     def test_cve_and_mitre_case_insensitive(self):
@@ -141,14 +143,18 @@ class TestReadingATraceExcerpt:
         from core.entities import scan_text
         assert scan_text('"just a string"') == '"just a string"'
 
-    def test_an_excerpt_cut_by_the_length_cap_still_decodes(self):
+    def test_a_cut_escaped_excerpt_gives_no_false_account(self):
         """An excerpt is kept only up to a cap, so it usually arrives cut
         mid-string and never parses. Two encoded line breaks around a file
-        format's magic string otherwise read as one name with a separator
-        in it, and are reported as an account no evidence ever named."""
+        format's magic string must not read as one name with a separator in
+        it, an account no evidence ever named: neither raw (the pair follows
+        the escape's backslash) nor decoded (scan_text). Decoding itself is
+        pinned by the other scan_text tests."""
         from core.entities import scan_text
         cut = '{"stdout": "binary blob \\njfif\\nphotoshop 3.0 \\nsome'
-        assert "account:njfif/nphotoshop" in extract(cut)
+        # The pair follows a backslash (the escape's), so the account
+        # pattern's separator lookbehind refuses it even undecoded.
+        assert not [e for e in extract(cut) if e.startswith("account:")]
         assert not [e for e in extract(scan_text(cut))
                     if e.startswith("account:")]
         # Before a capitalised word the escape is read as one without decoding.
@@ -242,9 +248,9 @@ class TestFormatNamespaceUrls:
 
 def test_a_time_range_is_not_read_as_an_offset():
     from core.entities import extract
-    assert {e for e in extract("FTP session 2004-04-26 22:21-22:26 from the host") if e.startswith("ts:")} == {"ts:2004-04-26T22:21"}
-    assert "ts:2004-04-27T03:21" in extract("logged at 2004-04-26T22:21-05:00")
-    assert "ts:2004-04-26T21:21" in extract("logged at 2004-04-26 22:21+0100")
+    assert {e for e in extract("FTP session 2031-04-26 21:10-21:15 from the host") if e.startswith("ts:")} == {"ts:2031-04-26T21:10"}
+    assert "ts:2031-04-27T02:10" in extract("logged at 2031-04-26T21:10:00-05:00")
+    assert "ts:2031-04-26T20:10" in extract("logged at 2031-04-26 21:10+0100")
 
 
 def test_one_extension_list_and_domains_on_request():
@@ -297,3 +303,174 @@ class TestDelimitersAroundAPath:
     def test_artifact_tokens_name_the_bare_file(self):
         from core.entities import artifact_tokens
         assert "b.exe" in artifact_tokens("Ran (C:\\Temp\\b.exe) once.")
+
+
+def test_an_early_hour_range_is_not_read_as_a_negative_offset():
+    """A negative offset counts only after seconds: "10:16-10:48" is a range
+    whose second half would otherwise pass as the offset -10:48."""
+    from core.entities import extract
+    times = {e for e in extract("ran 2031-03-04 10:16-10:48 UTC on CORP-WS01") if e.startswith("ts:")}
+    assert times == {"ts:2031-03-04T10:16"}
+    assert {e for e in extract("logged 2031-03-04T10:16:00-05:00") if e.startswith("ts:")} == {"ts:2031-03-04T15:16"}
+    assert {e for e in extract("logged 2031-03-04 10:16+02:00") if e.startswith("ts:")} == {"ts:2031-03-04T08:16"}
+    assert {e for e in extract("logged 2031-03-04T10:16Z") if e.startswith("ts:")} == {"ts:2031-03-04T10:16"}
+    # A seconds range: an offset is never followed by ":" or a digit.
+    assert {e for e in extract("ran 2031-03-04 10:16:00-10:48:00 UTC") if e.startswith("ts:")} == {"ts:2031-03-04T10:16"}
+    assert {e for e in extract("logged 2031-03-04T10:16:00-0500 on CORP-WS01") if e.startswith("ts:")} == {"ts:2031-03-04T15:16"}
+
+
+class TestAPathFollowedByProse:
+    """A spaced segment ends before a file-name-shaped token that whitespace
+    follows, so the prose after a path keeps its own entities."""
+
+    def test_the_file_and_the_account_behind_it_survive(self):
+        ents = extract("C:\\Users\\jane.doe\\Downloads\\dropper.exe was run by CORP\\jane.doe")
+        assert "path:c:/users/jane.doe/downloads/dropper.exe" in ents
+        assert "file:dropper.exe" in ents
+        assert "account:corp/jane.doe" in ents
+        assert not any(" " in e for e in ents)
+
+    def test_a_registry_key_behind_a_path_is_its_own_entity(self):
+        ents = extract("C:\\Temp\\x.exe set HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Run")
+        assert "path:c:/temp/x.exe" in ents
+        assert "reg:hklm/software/microsoft/windows/currentversion/run" in ents
+
+    def test_a_unc_path_followed_by_prose(self):
+        ents = extract("\\\\CORP-DC01\\share\\notes.txt was copied by CORP\\jane.doe")
+        assert "path://corp-dc01/share/notes.txt" in ents
+        assert "host:corp-dc01" in ents
+        assert "account:corp/jane.doe" in ents
+
+    def test_spaced_system_directories_stay_segments(self):
+        ents = extract("C:\\Documents and Settings\\jane.doe\\Local Settings\\Temp\\dropper.exe was run")
+        assert "path:c:/documents and settings/jane.doe/local settings/temp/dropper.exe" in ents
+        ents = extract("C:\\Program Files (x86)\\Vendor Tool\\tool.exe started")
+        assert "path:c:/program files (x86)/vendor tool/tool.exe" in ents
+
+    def test_a_dotted_directory_name_without_a_known_extension_stays_a_segment(self):
+        ents = extract("C:\\Program Files (x86)\\Vendor ASP.NET\\ASP.NET Web Pages\\v1.0\\x.dll loaded")
+        assert "path:c:/program files (x86)/vendor asp.net/asp.net web pages/v1.0/x.dll" in ents
+        assert "file:asp.net" not in ents
+        ents = extract("C:\\Data\\Build v1.2 files\\x.dll loaded")
+        assert "path:c:/data/build v1.2 files/x.dll" in ents
+
+    def test_a_known_extension_ends_the_segment_case_insensitively(self):
+        ents = extract("C:\\Users\\jane.doe\\Downloads\\DROPPER.EXE was run by CORP\\jane.doe")
+        assert "path:c:/users/jane.doe/downloads/dropper.exe" in ents
+        assert "account:corp/jane.doe" in ents
+
+    def test_ceiling_a_directory_named_like_a_file_before_a_space(self):
+        """The remaining ceiling: a directory whose name holds a token ending
+        in a known extension before a space is read as the path's end."""
+        ents = extract("C:\\Program Files\\vendor\\Tool.js Kit\\x.dll loaded")
+        assert "path:c:/program files/vendor/tool.js" in ents
+
+    def test_a_registry_key_with_a_spaced_dotted_segment(self):
+        ents = extract("HKLM\\SOFTWARE\\Vendor\\Uninstall\\Tool v2.1 x64\\DisplayName was set")
+        assert "reg:hklm/software/vendor/uninstall/tool v2.1 x64/displayname" in ents
+        assert not any(e.startswith("account:") for e in ents)
+
+    def test_a_registry_key_ends_before_a_file_named_in_its_prose(self):
+        ents = extract("HKCU\\Software\\Vendor\\Run Keys\\Updater set by x.exe for CORP\\jane.doe")
+        assert "reg:hkcu/software/vendor/run keys/updater" in ents
+        assert {"file:x.exe", "account:corp/jane.doe"} <= ents
+
+
+# ── the names comparison (names_in, NamePool, unstated) ─────────────────
+#
+# One restatement check for the answer composer's sentence check and the
+# conclusion door's basis rule: does a sentence restate only names its
+# cited texts (and the question) state? Invented beliefs: a run of a tool
+# on CORP-WS01, an archive on FILESRV, logons on CORP-WS02.
+
+_BELIEFS = {
+    "C0001": ("On 2031-03-02 10:15:22 UTC, jane.doe ran tool.exe on CORP-WS01 from "
+              "C:\\\\Users\\\\jane.doe\\\\AppData\\\\Local\\\\Temp\\\\tool.exe (48,512 bytes).\nCORP-WS01\n"
+              "Prefetch TOOL.EXE-1A2B3C4D.pf run count 3; downloaded from http://203.0.113.7/a/tool.exe "
+              "at 10:11-10:14 UTC"),
+    "C0002": ("An archive staged.7z was written to \\\\FILESRV\\share\\staged.7z by svc-backup; "
+              "hosts CORP-WS01, CORP-WS02 and FILESRV connected.\nFILESRV"),
+    "C0003": "Logons by jane.doe at 23:10 UTC and again at 23:15 UTC on 2031-03-04 and on 2031-03-05 on CORP-WS02.",
+}
+_QUESTION = "Who ran the tool on CORP-WS01, and when?"
+_LEXICON = frozenset({"jane.doe", "svc-backup", "filesrv", "corp-ws01", "corp-ws02"})
+
+
+def _restates_only_cited(text: str, cited: list[str]) -> bool:
+    from core.entities import NamePool, unstated
+    pool = NamePool.from_texts([_QUESTION] + [_BELIEFS[c] for c in cited])
+    return unstated(text, pool, _LEXICON) == []
+
+
+@pytest.mark.parametrize("text, cited, expected", [
+    ("jane.doe ran tool.exe on CORP-WS01 at 10:15 UTC on 2031-03-02.", ["C0001"], True),
+    ("The Prefetch entry shows a run count of 3.", ["C0001"], True),
+    ("jane.doe ran tool.exe on CORP-WS02.", ["C0001"], False),            # a host the belief does not state
+    ("The tool ran 4 times.", ["C0001"], False),                          # a number not stated
+    ("jane.doe also wrote staged.7z.", ["C0001"], False),                 # a name from another belief
+    ("jane.doe wrote staged.7z to FILESRV.", ["C0002"], False),           # an account the belief does not state
+    ("The archive staged.7z was written on FILESRV.", ["C0002"], True),
+    ("Whether data left CORP-WS01 is not established.", [], True),        # the question names the host
+    ("Whether data left FILESRV is not established.", [], False),
+    # recorded statements carry doubled backslashes; slashes either way; a directory
+    ("It ran from C:\\Users\\jane.doe\\AppData\\Local\\Temp\\tool.exe.", ["C0001"], True),
+    ("It ran from C:/Users/jane.doe/AppData/Local/Temp/tool.exe.", ["C0001"], True),
+    ("The folder C:\\Users\\jane.doe held the tool.", ["C0001"], True),
+    ("It was downloaded from 203.0.113.7.", ["C0001"], True),             # an address inside a URL
+    ("The file is 48,512 bytes.", ["C0001"], True),                       # a thousands separator
+    ("The file is 48512 bytes.", ["C0001"], True),
+    ("The download ran from 10:11 to 10:14 UTC.", ["C0001"], True),       # a stated time range
+    ("Hosts CORP-WS01/CORP-WS02/FILESRV connected.", ["C0002"], True),    # a slash-joined list
+    ("On 2031-03-02T10:15 jane.doe ran it.", ["C0001"], True),            # a date and a shortened time joined
+    ("Movement followed a CORP-WS01-centered path.", ["C0001"], True),    # a compound judged by its pieces
+    ("Movement followed a CORP-WS09-centered path.", ["C0001"], False),
+    ("The tool did a copy/delete of files.", ["C0001"], True),
+    ("Security event 4688 recorded the run.", ["C0001"], False),          # an invented event id
+    ("svc-backup ran tool.exe.", ["C0001"], False),                       # an account borrowed
+    ("It ran from C:\\Users\\jane.doe\\Desktop\\tool.exe.", ["C0001"], False),   # a wrong directory
+    ("It was downloaded from 203.0.113.9.", ["C0001"], False),            # a wrong address
+    ("The file is 48,513 bytes.", ["C0001"], False),
+    # a range is judged by its endpoints, whichever dash joins them
+    ("The logons ran 23:10-23:15 UTC.", ["C0003"], True),
+    ("The logons ran 23:10\u201323:15 UTC.", ["C0003"], True),
+    ("The logons spanned 2031-03-04-2031-03-05.", ["C0003"], True),
+    ("The logons spanned 2031-03-04\u20132031-03-05.", ["C0003"], True),
+    ("The logons ran 23:10-23:20 UTC.", ["C0003"], False),                # an endpoint not stated
+])
+def test_unstated_holds_a_sentence_to_its_cited_texts(text, cited, expected):
+    assert _restates_only_cited(text, cited) is expected
+
+
+def test_names_in_reads_the_shapes_and_the_lexicon():
+    from core.entities import names_in
+    names = names_in("jane.doe copied 2 files to 203.0.113.7 at 10:15 from FILESRV", _LEXICON)
+    assert {"jane.doe", "2", "10:15", "filesrv", "ip=203.0.113.7"} <= names
+    assert "files" not in names and "copied" not in names
+    assert names_in("The logons ran 23:10-23:15 UTC.", _LEXICON) >= {"23:10", "23:15"}
+
+
+# A clock with a stated zone keeps it: two zoned values compare as instants,
+# a zoned value and a bare clock by the written clock (the bare side states
+# no zone). Invented moments in 2031.
+@pytest.mark.parametrize("name, basis, expected", [
+    ("10:16Z", "The upload ended 2031-03-04T10:16Z.", True),           # the zone letter of an ISO moment
+    ("10:16 UTC", "The upload ended 2031-03-04T10:16:40Z.", True),     # seconds cover minutes
+    ("12:16+02:00", "The upload ended 2031-03-04T10:16Z.", True),      # the same instant
+    ("10:16+02:00", "The upload ended 2031-03-04T10:16Z.", False),     # two hours apart
+    ("10:16:40Z", "The upload ended 2031-03-04T10:16Z.", False),       # more precise than the basis
+    ("10:16Z", "The row reads 2031-03-04 10:16:40.", True),            # the basis states no zone
+    ("10:16", "The upload ended 2031-03-04T10:16Z.", True),            # the name states no zone
+    ("2031-03-04T05:16:40-05:00", "The upload ended 2031-03-04T10:16:40Z.", True),
+    ("2031-03-05T10:16Z", "The upload ended 2031-03-04T10:16Z.", False),   # another day
+    ("10:17Z", "The upload ended 2031-03-04T10:16Z.", False),
+])
+def test_a_zoned_clock_is_compared_with_its_zone(name, basis, expected):
+    from core.entities import NamePool, names_in
+    pool = NamePool.from_texts([basis])
+    assert all(pool.covers(n) for n in names_in(f"It ended at {name}.")) is expected
+
+
+def test_a_dash_between_two_clocks_stays_a_range():
+    from core.entities import names_in
+    assert names_in("between 10:16-12:00") >= {"10:16", "12:00"}
+    assert "10:16:00-05:00" in names_in("at 10:16:00-05:00")

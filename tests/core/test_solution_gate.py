@@ -109,13 +109,26 @@ class TestMiddlewareSolutionGate:
                 {"file_path": str(evidence), "pattern": "solution"}))
         assert call_next.await_count == 1
 
-    def test_accuracy_grader_is_exempt(self, tmp_path):
+    def test_accuracy_grader_is_exempt(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ATLAS_HIDE_GRADER", "0")    # the old path
         mw, l = self._mw(tmp_path, "SOL-005")
         with patch("core.execution_log.log", l):
             result, call_next = asyncio.run(_run_middleware(
                 mw, "accuracy_accuracy_compare",
                 {"ground_truth_path": "cases/x/Solution/answers.json"}))
         assert call_next.await_count == 1
+
+    def test_hidden_grader_is_refused_the_answer_key(self, tmp_path, monkeypatch):
+        """ATLAS_HIDE_GRADER: no tool is exempt, so a grader call reaching the
+        server by any path is refused the answer key like any other tool."""
+        from fastmcp.exceptions import ToolError
+        monkeypatch.delenv("ATLAS_HIDE_GRADER", raising=False)
+        mw, l = self._mw(tmp_path, "SOL-006")
+        with patch("core.execution_log.log", l):
+            with pytest.raises(ToolError, match="solution material"):
+                asyncio.run(_run_middleware(
+                    mw, "accuracy_accuracy_compare",
+                    {"ground_truth_path": "cases/x/Solution/answers.json"}))
 
 
 class TestExecutorSolutionGate:
@@ -317,8 +330,10 @@ class TestPositiveIdentifierGate:
                     mw, "strings_strings_grep",
                     {"file_path": str(link), "pattern": "flag"}))
 
-    def test_accuracy_grader_still_exempt(self, clean_gate, tmp_path):
-        """The grader legitimately reads the registered key server-side."""
+    def test_accuracy_grader_still_exempt(self, clean_gate, tmp_path, monkeypatch):
+        """The grader legitimately reads the registered key server-side
+        (only with ATLAS_HIDE_GRADER off: the old path)."""
+        monkeypatch.setenv("ATLAS_HIDE_GRADER", "0")
         from core import paths
         from core.execution_log import ExecutionLog
         from core.evidence_inventory_gate import mark_inventory_complete
@@ -431,25 +446,25 @@ class TestDetectCaseId:
 
     def test_bold_colon_inside_markers(self, tmp_path):
         from core.paths import detect_case_id
-        (tmp_path / "CASE.md").write_text("**Case ID:** NITROBA-2008\n")
-        assert detect_case_id(tmp_path) == "NITROBA-2008"
+        (tmp_path / "CASE.md").write_text("**Case ID:** CASE-2031\n")
+        assert detect_case_id(tmp_path) == "CASE-2031"
 
     def test_dir_basename_fallback(self, tmp_path):
         from core.paths import detect_case_id
-        case = tmp_path / "cfreds-leak"
+        case = tmp_path / "case-a"
         case.mkdir()
-        assert detect_case_id(case) == "cfreds-leak"
+        assert detect_case_id(case) == "case-a"
 
     def test_colon_inside_bold(self, tmp_path):
         # `**Case ID:** X` is what hand-written and model-written briefs use;
-        # three committed demo briefs ship it. It used to miss both patterns and
-        # degrade to the directory basename — silently, which is the expensive
-        # part: the case dir is lowercase, so nothing looked broken.
+        # three committed demo briefs ship it. Missing both patterns degrades
+        # to the directory basename — silently, which is the expensive part:
+        # the case dir is lowercase, so nothing looks broken.
         from core.paths import detect_case_id
-        case = tmp_path / "nitroba"
+        case = tmp_path / "case-b"
         case.mkdir()
-        (case / "CASE.md").write_text("**Case ID:** NITROBA-2008  \n")
-        assert detect_case_id(case) == "NITROBA-2008"
+        (case / "CASE.md").write_text("**Case ID:** CASE-2031  \n")
+        assert detect_case_id(case) == "CASE-2031"
 
     def test_colon_outside_bold(self, tmp_path):
         from core.paths import detect_case_id

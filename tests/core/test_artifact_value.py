@@ -321,19 +321,12 @@ class TestPayloadIsNotEvidence:
         assert av.artifact_score("Microsoft-Windows-SmbClient%4Security.evtx")[0] == 68
         assert av.artifact_score("Microsoft-Windows-Windows Defender%4Operational.evtx")[0] == 70
 
-    def test_a_blocked_unit_is_owed_no_longer(self, tmp_path):
-        from core.coverage_ledger import save_ledger
-        case = _case(tmp_path, listing=[("h1", "Security.evtx", "20971520"),
-                                        ("h1", "System.evtx", "5000000")])
-        save_ledger(case, {"units": {"u1": {"path": "evidence/h1/Windows/System32/winevt/Logs/System.evtx",
-                                             "status": "blocked", "reason": "parser rejects the file"}}})
-        names = [a["name"] for a in av.unexamined_high_value(case)]
-        assert "Security.evtx" in names and "System.evtx" not in names
 
 
-class TestQuestionNamedArtifactsComeFirst:
-    """What the case's own questions name outranks the value table: the
-    author pointed at it, whatever kind of artifact it is."""
+class TestQuestionNamedArtifactsRankByValue:
+    """A file the case's questions name ranks by the value table like any
+    other: a question may name a file to exclude it, and what the analyst
+    already knows is not unread high value."""
 
     def _with_question(self, tmp_path, question, listing):
         from core.investigation_tasks import reconcile_case_md
@@ -343,14 +336,13 @@ class TestQuestionNamedArtifactsComeFirst:
         reconcile_case_md(case, persist=True)
         return case
 
-    def test_a_named_database_the_value_table_ignores_is_owed_first(self, tmp_path):
+    def test_a_named_file_is_not_lifted_above_the_value_table(self, tmp_path):
         case = self._with_question(
-            tmp_path, "By which channel: Google Drive (sync DB, snapshot.db cloud_entry table) or USB",
-            [("h1", "Security.evtx", "20971520"), ("h1", "snapshot.db", "204800")])
+            tmp_path, "Which tool other than syncbeam.exe copied the archive to the share?",
+            [("h1", "Security.evtx", "20971520"), ("h1", "syncbeam.exe", "204800")])
         owed = av.unexamined_high_value(case)
-        assert [a["name"] for a in owed][:2] == ["snapshot.db", "Security.evtx"]
-        assert owed[0]["why"] == "named in the case's own questions"
-        assert av.question_named_artifacts(case) == {"snapshot.db"}
+        assert [a["name"] for a in owed][:1] == ["Security.evtx"]
+        assert all(a.get("why") != "named in the case's own questions" for a in owed)
 
     def test_a_named_artifact_the_run_read_is_not_owed(self, tmp_path):
         case = self._with_question(
@@ -363,7 +355,6 @@ class TestQuestionNamedArtifactsComeFirst:
     def test_a_question_naming_no_file_changes_nothing(self, tmp_path):
         case = self._with_question(tmp_path, "Who used the machine and when?",
                                    [("h1", "Security.evtx", "20971520")])
-        assert av.question_named_artifacts(case) == set()
         assert [a["name"] for a in av.unexamined_high_value(case)] == ["Security.evtx"]
 
 
@@ -449,7 +440,8 @@ class TestWiderValueTable:
         case = _win10_case(tmp_path)
         owed = {a["name"].lower() for a in av.unexamined_high_value(case)}
         assert "burn" not in owed
-        assert {"recent", "automaticdestinations", "history", "$iabcdef.docx",
+        # the Recycle Bin's records are read as the bin
+        assert {"recent", "automaticdestinations", "history", "$recycle.bin",
                 "setupapi.dev.log", "sam"} <= owed
 
     def test_a_folder_parse_credits_the_family(self, tmp_path):
@@ -459,15 +451,18 @@ class TestWiderValueTable:
             "ez_lecmd -d mnt/host/fs/Users/bob/AppData/Roaming/Microsoft/Windows/Recent/",
         ])
         owed = {a["name"].lower() for a in av.unexamined_high_value(case)}
-        assert "$iabcdef.docx" not in owed
-        assert not any(n.endswith(".pf") for n in owed)
+        assert "$recycle.bin" not in owed and "prefetch" not in owed
+        assert not any(n.endswith(".pf") or n.startswith("$i") for n in owed)
         assert "recent" not in owed
-        # a member read on its own credits only itself
-        case = _win10_case(tmp_path / "b", pf_files=2, trace_cmds=[
+        # the family is one thing to read per volume, owed as its folder
+        # with its members counted, and a read of a member reads it
+        case = _win10_case(tmp_path / "b", pf_files=2)
+        pf = [a for a in av.unexamined_high_value(case, limit=50) if a["name"] == "Prefetch"]
+        assert len(pf) == 1 and pf[0]["size"] == 2 and pf[0]["kind"] == "directory"
+        assert pf[0]["score"] == 78 and pf[0]["path"] == "mnt/host/fs/Windows/Prefetch"
+        case = _win10_case(tmp_path / "c", pf_files=2, trace_cmds=[
             "tsk_icat image 77 mnt/host/fs/Windows/Prefetch/PROGRAM0000.EXE-00000000.pf"])
-        owed = {a["name"] for a in av.unexamined_high_value(case)}
-        assert "PROGRAM0000.EXE-00000000.pf" not in owed
-        assert "PROGRAM0001.EXE-00000001.pf" in owed
+        assert "Prefetch" not in {a["name"] for a in av.unexamined_high_value(case, limit=50)}
 
     def test_a_listing_of_the_folder_does_not_credit_a_singleton(self, tmp_path):
         case = _win10_case(tmp_path, trace_cmds=[
@@ -605,7 +600,7 @@ class TestWiderValueTable:
         graph({"host": "WS02", "statement": "No Amcache.hve is present on WS02"})
         assert av.contradicted_absence_claims(case)
 
-    def test_a_question_lifts_every_artifact_of_that_name(self, tmp_path):
+    def test_a_question_naming_a_file_does_not_lift_it(self, tmp_path):
         from core.investigation_tasks import load_tasks, save_tasks
         from core.mount_plan import save_mount_plan
         case = _case(tmp_path)
@@ -627,7 +622,8 @@ class TestWiderValueTable:
         (case / "analysis" / "mft_rows.csv").write_text(
             "_host,FileName,FileSize\nh1,Windows.edb,9000000\n", encoding="utf-8")
         owed = [a for a in av.unexamined_high_value(case, limit=50) if a["name"] == "Windows.edb"]
-        assert len(owed) == 2 and all(a["score"] == 100 and a["path"] for a in owed)
+        # ranked by the value table like any other file: never lifted to 100
+        assert all(a["score"] < 100 and a.get("why") != "named in the case's own questions" for a in owed)
 
 
 
@@ -749,3 +745,299 @@ class TestListingRowsByHostAndPath:
         text = av.format_value_nudge(av.unexamined_high_value(case, limit=50))
         assert "at Users/john.roe/NTUSER.DAT [CORP-WS01]" in text
         assert "at Users/jane.doe/NTUSER.DAT [CORP-WS02]" in text
+
+
+LOGS = (".\\Windows\\System32\\winevt\\Logs", ".\\Windows\\System32\\config")
+TWO_HOSTS = {
+    "ws01_mft.csv": [(LOGS[0], "Security.evtx", 20_971_520), (LOGS[0], "System.evtx", 5_242_880),
+                     (LOGS[1], "SECURITY", 262_144)],
+    "ws02_mft.csv": [(LOGS[0], "Security.evtx", 20_971_520), (LOGS[0], "System.evtx", 5_242_880)],
+}
+
+
+def _trace(case, *entries):
+    (case / "analysis" / "CASE_trace.json").write_text(json.dumps(list(entries)), encoding="utf-8")
+
+
+def _call(cid, cmd, tool="ez_evtxecmd", **kw):
+    return {"call_id": cid, "type": "tool_call", "mcp_tool": tool, "cmd": cmd, "success": True, **kw}
+
+
+def _synthesis(cid, text):
+    """A reason.synthesize entry whose input carries the analyst's text."""
+    return {"call_id": cid, "type": "reason_call", "tool": "reason_synthesize", "success": True,
+            "conclusion": "BLOCKERS: None", "inputs": {"user_message": f"FINDINGS:\n{text}"}}
+
+
+def _states(case):
+    return {(a["host"], a["name"]): a for a in av.high_value_state(case)["items"]}
+
+
+@pytest.mark.usefixtures("todays_report_check")
+class TestWhatSettlesAnArtifact:
+    """A high-value artifact is settled by a read, by a read that failed, or
+    by a recorded reason, each on the hosts it names; the report lists every
+    one not read with what stands for it."""
+
+    def test_a_read_settles_the_copy_of_the_host_it_names(self, tmp_path):
+        case = _hosts_case(tmp_path, TWO_HOSTS)
+        _trace(case, _call(5, "EvtxECmd -f exports/CORP-WS01/Security.evtx --csv analysis/out"))
+        state = av.high_value_state(case)
+        items = {(a["host"], a["name"]): a for a in state["items"]}
+        assert ("CORP-WS01", "Security.evtx") not in items and state["read"] == 1
+        assert items[("CORP-WS02", "Security.evtx")]["state"] == "open"
+
+    def test_a_failed_read_is_recorded_and_a_refusal_or_a_stop_is_not(self, tmp_path):
+        from core.coverage_ledger import save_ledger
+        case = _hosts_case(tmp_path, TWO_HOSTS)
+        save_ledger(case, {"units": {"u1": {
+            "path": "evidence/CORP-WS02/Windows/System32/winevt/Logs/System.evtx",
+            "status": "blocked", "reason": "parser rejects the file"}}})
+        _trace(case,
+               _call(7, "EvtxECmd -f exports/CORP-WS01/System.evtx", success=False,
+                     failure_class="tool_error", stderr="Invalid EVTX header signature"),
+               _call(8, "EvtxECmd -f exports/CORP-WS02/System.evtx", success=False,
+                     failure_class="gate_refusal", stderr="refused"),
+               _call(9, "EvtxECmd -f exports/CORP-WS02/Security.evtx", success=False,
+                     interrupted=True, stderr="stopped"))
+        items = _states(case)
+        failed = items[("CORP-WS01", "System.evtx")]
+        assert failed["state"] == "failed" and failed["call_id"] == 7
+        assert "Invalid EVTX header" in failed["reason"]
+        # a blocked unit alone, a refusal and a stopped call settle nothing
+        assert items[("CORP-WS02", "System.evtx")]["state"] == "open"
+        assert items[("CORP-WS02", "Security.evtx")]["state"] == "open"
+
+    def test_a_waiver_settles_what_it_names_on_the_hosts_it_names(self, tmp_path):
+        case = _hosts_case(tmp_path, TWO_HOSTS)
+        _trace(case, _synthesis(11, (
+            "UNRESOLVABLE: System.evtx on CORP-WS02 — the collection holds a zero-filled "
+            "placeholder for this channel, there is nothing to parse\n"
+            "- UNRESOLVABLE: Security.evtx — each host forwarded this channel to the collector "
+            "whose export was searched in full")))
+        items = _states(case)
+        assert items[("CORP-WS02", "System.evtx")]["state"] == "waived"
+        assert "zero-filled placeholder" in items[("CORP-WS02", "System.evtx")]["reason"]
+        assert items[("CORP-WS01", "System.evtx")]["state"] == "open"
+        assert {items[(h, "Security.evtx")]["state"] for h in ("CORP-WS01", "CORP-WS02")} == {"waived"}
+        # naming the log does not name the registry hive of the same word
+        assert items[("CORP-WS01", "SECURITY")]["state"] == "open"
+        assert [a["name"] for a in av.unexamined_high_value(case)] == ["System.evtx", "SECURITY"]
+
+    def test_a_reason_too_short_does_not_count_and_is_named(self, tmp_path):
+        case = _hosts_case(tmp_path, TWO_HOSTS)
+        _trace(case, _synthesis(11, "UNRESOLVABLE: System.evtx — not needed here"))
+        state = av.high_value_state(case)
+        assert all(a["state"] == "open" for a in state["items"])
+        assert state["short_waivers"] == ["System.evtx — not needed here"]
+
+    def test_a_listed_family_is_one_folder_per_host(self, tmp_path):
+        pf = ".\\Windows\\Prefetch"
+        case = _hosts_case(tmp_path, {
+            "ws01_mft.csv": [(pf, f"TOOL{i}.EXE-0000000{i}.pf", 30_000) for i in range(3)]
+            + [(".\\Users\\jane.doe\\Desktop", "COPY.EXE-12345678.pf", 30_000)],
+            "ws02_mft.csv": [(pf, f"TOOL{i}.EXE-0000000{i}.pf", 30_000) for i in range(2)]})
+        owed = av.unexamined_high_value(case, limit=50)
+        units = sorted((a["host"], a["name"], a["size"], a["lpath"]) for a in owed if a["kind"] == "directory")
+        assert units == [("CORP-WS01", "Prefetch", 3, "Windows/Prefetch"),
+                         ("CORP-WS02", "Prefetch", 2, "Windows/Prefetch")]
+        # a member kept in a folder of another name is a copy, read on its own
+        assert any(a["name"] == "COPY.EXE-12345678.pf" for a in owed)
+        _trace(case, _call(3, "PECmd -d exports/CORP-WS01/Windows/Prefetch --csv analysis/pf", tool="ez_pecmd"),
+               _synthesis(4, "UNRESOLVABLE: Prefetch on CORP-WS02 — the collection profile of this "
+                             "host excluded the folder entirely"))
+        items = _states(case)
+        assert ("CORP-WS01", "Prefetch") not in items
+        assert items[("CORP-WS02", "Prefetch")]["state"] == "waived"
+
+    def test_the_report_lists_each_unread_artifact_with_what_stands_for_it(self, tmp_path):
+        case = _hosts_case(tmp_path, TWO_HOSTS)
+        _trace(case,
+               _call(7, "EvtxECmd -f exports/CORP-WS01/System.evtx", success=False,
+                     failure_class="tool_error", stderr="Invalid EVTX header signature"),
+               _synthesis(11, "UNRESOLVABLE: Security.evtx — each host forwarded this channel to the "
+                              "collector whose export was searched in full"))
+        lines = av.gap_lines(case)
+        assert ("- Not opened: `Security.evtx` at `Windows/System32/winevt/Logs/Security.evtx` on "
+                "CORP-WS01, CORP-WS02: each host forwarded this channel to the collector whose "
+                "export was searched in full") in lines
+        assert ("- Not opened: `System.evtx` at `Windows/System32/winevt/Logs/System.evtx` on "
+                "CORP-WS01: the read failed (call 7: Invalid EVTX header signature)") in lines
+        assert ("- Not opened: `System.evtx` at `Windows/System32/winevt/Logs/System.evtx` on "
+                "CORP-WS02: no read was attempted and no reason was recorded.") in lines
+        assert any(l.startswith("- Nicht geöffnet: `SECURITY` unter ") and "weder ein Leseversuch" in l
+                   for l in av.gap_lines(case, "de"))
+        # a host's report lists that host's artifacts
+        assert not any("CORP-WS01" in l for l in av.gap_lines(case, host="CORP-WS02"))
+
+    def test_the_obligation_is_met_once_every_artifact_is_settled(self, tmp_path):
+        from core.investigation_obligations import list_obligations
+        case = _hosts_case(tmp_path, {"ws01_mft.csv": [(LOGS[0], "System.evtx", 5_242_880),
+                                                       (LOGS[0], "Security.evtx", 20_971_520)]})
+        _trace(case,
+               _call(7, "EvtxECmd -f exports/CORP-WS01/System.evtx", success=False,
+                     failure_class="tool_error", stderr="Invalid EVTX header signature"))
+        ob = next(o for o in list_obligations(case) if o["id"] == "high_value_artifacts_examined")
+        assert not ob["met"] and "1 whose read failed" in ob["detail"]
+        _trace(case,
+               _call(7, "EvtxECmd -f exports/CORP-WS01/System.evtx", success=False,
+                     failure_class="tool_error", stderr="Invalid EVTX header signature"),
+               _synthesis(9, "UNRESOLVABLE: Security.evtx — the channel was cleared before "
+                             "collection; the clearing event is the finding"))
+        ob = next(o for o in list_obligations(case) if o["id"] == "high_value_artifacts_examined")
+        assert ob["met"] and "1 not opened with a recorded reason, 1 whose read failed" in ob["detail"]
+
+
+@pytest.mark.usefixtures("todays_report_check")
+class TestWhatIsNoReason:
+    """A to-do list is no recorded reason: a negated or empty UNRESOLVABLE
+    statement settles nothing, and one that names no listed artifact is
+    said back."""
+
+    def test_negated_and_empty_statements_settle_nothing(self, tmp_path):
+        case = _hosts_case(tmp_path, TWO_HOSTS)
+        _trace(case, {
+            "call_id": 4, "type": "reason_call", "tool": "reason_synthesize", "success": True,
+            "conclusion": (
+                "UNRESOLVABLE: none - every blocker is actionable: System.evtx on CORP-WS01 and "
+                "CORP-WS02 must still be parsed with EvtxECmd\n"
+                "BLOCKERS: Security.evtx on CORP-WS01 and CORP-WS02 not yet parsed; not "
+                "unresolvable - extract each copy and parse it before the report"),
+            "inputs": {"user_message": "System.evtx on CORP-WS02 could not be parsed yet - this "
+                                       "is not unresolvable, a second export should work"}})
+        state = av.high_value_state(case)
+        assert {a["state"] for a in state["items"]} == {"open"}
+        assert state["short_waivers"] == [] and state["unmatched_waivers"] == []
+
+    def test_a_reason_that_names_no_listed_artifact_is_said_back(self, tmp_path):
+        case = _hosts_case(tmp_path, TWO_HOSTS)
+        _trace(case, _synthesis(4, "UNRESOLVABLE: the System hive on CORP-WS01 — the exported copy "
+                                   "is cut short at 4 KB and the parser rejects it"))
+        state = av.high_value_state(case)
+        assert _states(case)[("CORP-WS01", "SECURITY")]["state"] == "open"
+        assert state["unmatched_waivers"] == [
+            "the System hive on CORP-WS01 — the exported copy is cut short at 4 KB and the parser rejects it"]
+
+    def test_a_host_named_in_the_reason_does_not_widen_the_waiver(self, tmp_path):
+        case = _hosts_case(tmp_path, TWO_HOSTS)
+        _trace(case, _synthesis(4, "UNRESOLVABLE: System.evtx on CORP-WS02 — the placeholder is "
+                                   "zero-filled here, unlike CORP-WS01 whose copy still has to be parsed"))
+        items = _states(case)
+        assert items[("CORP-WS02", "System.evtx")]["state"] == "waived"
+        assert items[("CORP-WS01", "System.evtx")]["state"] == "open"
+
+    def test_a_negation_in_an_earlier_clause_does_not_void_the_statement(self, tmp_path):
+        case = _hosts_case(tmp_path, TWO_HOSTS)
+        _trace(case, _synthesis(4, "The SECURITY hive is not recoverable; UNRESOLVABLE: SECURITY on "
+                                   "CORP-WS01 — the exported hive is cut short at 4 KB and the parser "
+                                   "rejects it"))
+        assert _states(case)[("CORP-WS01", "SECURITY")]["state"] == "waived"
+
+    def test_a_folder_on_a_volume_is_waived_by_its_name(self, tmp_path):
+        case = _win10_case(tmp_path, pf_files=3)
+        _trace(case, _synthesis(4, "UNRESOLVABLE: Prefetch — prefetching is switched off in this "
+                                   "build and the folder holds only stale entries"))
+        pf = next(a for a in av.high_value_state(case)["items"] if a["name"] == "Prefetch")
+        assert pf["state"] == "waived" and pf["path"] == "mnt/host/fs/Windows/Prefetch"
+
+
+class TestWhichHostACallRead:
+    """A call that says nothing of its host reads every host's copy; one
+    whose image the Evidence Links tie to a host, or that parses a copy
+    extracted from that host's image, reads that host's."""
+
+    def _linked_case(self, tmp_path, name="case"):
+        case = _hosts_case(tmp_path / name, TWO_HOSTS)
+        (case / ".atlas" / "evidence_links.json").write_text(json.dumps({
+            "schema_version": "1.0", "entries": [
+                {"label": "CORP-WS01", "kind": "disk", "path": "evidence/img01.raw"},
+                {"label": "CORP-WS02", "kind": "disk", "path": "evidence/img02.raw"}]}),
+            encoding="utf-8")
+        return case
+
+    def test_a_parse_of_a_copy_reads_the_host_it_was_extracted_from(self, tmp_path):
+        case = self._linked_case(tmp_path)
+        _trace(case,
+               _call(3, f"icat -o 2048 {case}/evidence/img02.raw 4711", tool="tsk_icat",
+                     evidence_ref="evidence/img02.raw",
+                     stdout_excerpt=f"Output written to {case}/exports/Security.evtx"),
+               _call(4, f"EvtxECmd -f {case}/exports/Security.evtx --csv {case}/analysis/sec"))
+        items = _states(case)
+        assert ("CORP-WS02", "Security.evtx") not in items
+        assert items[("CORP-WS01", "Security.evtx")]["state"] == "open"
+
+    def test_a_relative_case_directory_keeps_the_copys_host(self, tmp_path, monkeypatch):
+        case = self._linked_case(tmp_path)
+        _trace(case,
+               _call(3, "icat -o 2048 evidence/img02.raw 4711", tool="tsk_icat",
+                     evidence_ref="evidence/img02.raw",
+                     stdout_excerpt="Output written to exports/Security.evtx"),
+               _call(4, "EvtxECmd -f exports/Security.evtx --csv analysis/sec"))
+        monkeypatch.chdir(case)
+        items = {(a["host"], a["name"]) for a in av.high_value_state(".")["items"]}
+        assert ("CORP-WS02", "Security.evtx") not in items and ("CORP-WS01", "Security.evtx") in items
+
+    def test_a_copy_that_says_nothing_of_its_host_reads_every_hosts(self, tmp_path):
+        case = self._linked_case(tmp_path)
+        _trace(case, _call(4, "EvtxECmd -f exports/Security.evtx --csv analysis/sec"))
+        assert not any(name == "Security.evtx" for _, name in _states(case))
+
+    def test_a_case_directory_named_after_a_host_does_not_scope_every_call(self, tmp_path):
+        case = self._linked_case(tmp_path, name="CORP-WS01_intrusion")
+        _trace(case, _call(4, f"EvtxECmd -f {case}/exports/CORP-WS02/System.evtx --csv {case}/analysis/s"))
+        items = _states(case)
+        assert ("CORP-WS02", "System.evtx") not in items
+        assert items[("CORP-WS01", "System.evtx")]["state"] == "open"
+
+    def test_report_lines_leave_out_a_delivered_file_the_item_lines_name(self, tmp_path):
+        case = _case(tmp_path, files=[("evidence/CORP-WS01/Security.evtx", 4096)])
+        assert any("`Security.evtx`" in line for line in av.gap_lines(case))
+        named = "- Not examined: `evidence/CORP-WS01/Security.evtx` (file); no content of it was read."
+        assert not any("`Security.evtx`" in line for line in av.gap_lines(case, named=named))
+
+
+def test_an_image_a_read_reached_is_not_called_untouched(tmp_path, monkeypatch):
+    """The gaps' "no file inside it was read" line asks the read rule, not the
+    ranked items: an image whose index lists only low-value entries, read by
+    a grep of the image itself, is not called untouched; with only a listing
+    in the trace it is."""
+    import json
+    from core.artifact_value import _GAP_T, _index_gap_lines
+    from core.contents_index import _connect, _meta_set
+    from core.execution_log import ExecutionLog
+    from core.provenance import reset_cache
+    root = tmp_path / "CASE-A"
+    for sub in ("analysis", "evidence", ".atlas"):
+        (root / sub).mkdir(parents=True)
+    (root / "evidence" / "corp-ws01.raw").write_bytes(b"\0")
+    con = _connect(root, create=True)
+    _meta_set(con, "image:evidence/corp-ws01.raw",
+              {"listed": True, "host": "", "entries": 2, "complete": True})
+    con.commit()
+    con.close()
+    log = ExecutionLog()
+    log.configure("CASE-A", str(root / "analysis" / "CASE-A_trace.json"), save_session=False)
+    monkeypatch.setattr("core.execution_log.log", log)
+    reset_cache()
+    tx = _GAP_T["en"]
+    cid = log.record_tool_call("<py>:tsk_fls", True, False, 0, 0, stdout_excerpt="r/r 4: a.txt")
+    log.annotate_tool_call(cid, args=json.dumps({"image_path": "evidence/corp-ws01.raw"}), mcp_tool="tsk_fls")
+    assert any("no file inside it was read" in ln for ln in _index_gap_lines([], [], root, tx, ""))
+    cid = log.record_tool_call("<py>:strings_strings_grep", True, False, 0, 0, stdout_excerpt="a hit")
+    log.annotate_tool_call(cid, args=json.dumps({"file_path": "evidence/corp-ws01.raw", "pattern": "a"}),
+                           mcp_tool="strings_strings_grep")
+    reset_cache()
+    assert not any("no file inside it was read" in ln for ln in _index_gap_lines([], [], root, tx, ""))
+
+
+def test_the_srum_class_is_the_store_in_its_own_folder_not_a_binary_named_like_it():
+    """The usage store and its logs sit in the service's folder; a library or
+    a service binary with "srum" in its name holds no usage data and must
+    not count as the class's files (it would gate the end and skew the
+    yield order)."""
+    srum = "per-process network byte counts — data volume moved"
+    assert av.artifact_score("Windows/System32/sru/SRUDB.dat", 4096)[1] == srum
+    assert av.artifact_score("Windows/System32/sru/SRU00001.log", 4096)[1] == srum
+    assert av.artifact_score("SRUDB.dat", 4096)[1] == srum
+    for binary in ("Windows/System32/srumsvc.dll", "Windows/System32/srumapi.dll", "srumsvc.dll"):
+        assert av.artifact_score(binary, 4096)[1] != srum, binary

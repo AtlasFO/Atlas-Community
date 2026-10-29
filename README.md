@@ -12,7 +12,7 @@
 <p align="center">
   <img alt="Python 3.11 or newer" src="https://img.shields.io/badge/python-3.11%2B-3776AB">
   <img alt="Runs on Ubuntu 24.04 and Debian 12" src="https://img.shields.io/badge/runs%20on-Ubuntu%2024.04%20%7C%20Debian%2012-E95420">
-  <img alt="Works with any OpenAI-compatible model" src="https://img.shields.io/badge/models-any%20OpenAI--compatible-0EA5E9">
+  <img alt="Works with any OpenAI-compatible model and with Anthropic's Messages API" src="https://img.shields.io/badge/models-OpenAI--compatible%20%7C%20Anthropic-0EA5E9">
   <img alt="License: PolyForm Noncommercial 1.0.0 or PolyForm Free Trial 1.0.0" src="https://img.shields.io/badge/license-PolyForm%20Noncommercial%20%7C%20Free%20Trial-6B7280">
 </p>
 
@@ -28,7 +28,7 @@
 
 ![The Atlas dashboard: the Overview of a finished investigation with all four questions answered, fifteen findings, eighteen indicators and the findings placed along the run](docs/media/dashboard-overview.png)
 
-Atlas is a Digital Forensics and Incident Response (DFIR) agent for malware analysis and rogue-actor attribution. Point it at disk images, memory dumps or log exports and it runs the whole investigation on its own (disk triage, memory forensics, Windows artifact parsing, IOC enrichment, YARA hunting, timeline building) without asking for confirmation at each step. It hands back a structured report and a click-through audit trail: every finding links to the tool call that produced it, and every answer lists the evidence behind it.
+Atlas is a Digital Forensics and Incident Response (DFIR) agent. Point it at disk images, memory dumps or log exports and it runs the whole investigation on its own (disk triage, memory forensics, Windows artifact parsing, IOC enrichment, YARA hunting, timeline building) without asking for confirmation at each step. It hands back a structured report and a click-through audit trail: every finding links to the tool call that produced it, and every answer lists the evidence behind it.
 
 > In Greek myth, Atlas was the Titan tasked with bearing the weight of the sky so it would not fall. This one bears the weight of the investigation.
 
@@ -51,11 +51,12 @@ The first visit creates your admin account. Then pick **RHINO-HUNT**: a complete
 ## What Atlas does
 
 - **Investigates end to end.** Triage, collection, analysis and report run as phases, with no prompt for confirmation between steps.
-- **Challenges its own conclusions.** Five model roles share the work. The analyst drives the investigation, a phase director decides what comes next from the evidence so far, an adversarial reviewer challenges every conclusion before it reaches the report, a report writer drafts the report, and a run reviewer grades runs for `atlas train`.
+- **Challenges its own conclusions.** Five model roles share the work. The analyst drives the investigation, a phase director decides what comes next from the evidence so far, an adversarial reviewer challenges every conclusion before it reaches the report, a report writer drafts the report, and a run reviewer grades runs for `atlas train`. An optional vision model describes a case picture (a carved one, for example) when the brief turns it on; the picture is then sent to the vision provider.
 - **Shows its work.** Every finding links back to the exact tool call that produced it, every answer lists the claims and evidence behind it, and the Process view lays out the whole run in time.
 - **Writes the report.** Answers to the case's questions, findings, indicators and a response plan, in English or German (chosen per case), as Markdown, HTML or PDF.
-- **Works with your model.** Any OpenAI-compatible backend: OpenAI, a local or self-hosted server, any gateway, or the Telekom LLM Hub, which keeps case data on EU infrastructure. Nothing is pre-selected.
+- **Works with your model.** Any OpenAI-compatible backend (OpenAI, OpenRouter, a local or self-hosted server, any gateway), Anthropic's own Messages API for Claude with prompt caching, or the Telekom LLM Hub, which keeps case data on EU infrastructure. What Atlas knows about each provider is one editable file. Nothing is pre-selected.
 - **Uses your detection rules.** Drop a `.yar` file into `rules/`, in any sub-folder, and the next scan uses it ([details](docs/yara-rules.md)).
+- **Accounts for its coverage.** Disk containers (VMDK, VHD, VHDX, QCOW2, VDI) are read in place through read-only views, every disk image is listed once at intake, and a ledger tracks what was read, partly read, left (with a reason) or is still open. A run cannot finish while a content class has neither a read nor a checked reason. The report says what was not analysed and how deep the run went on each host, and the dashboard's Coverage tab shows both.
 - **Answers follow-up questions.** *Ask Atlas* in the dashboard discusses the open case and runs forensic tools when it needs to.
 
 ## Install
@@ -66,6 +67,8 @@ Pick one of two ways:
 2. **SIFT Workstation**: provision a SANS SIFT Workstation first, then run the same `install.sh` on top. It detects SIFT and installs only what SIFT did not already provide. Choose this if you want SIFT's full desktop toolkit (GUI tools, a broader manual-forensics workflow) alongside Atlas, or already run SIFT for other work.
 
 Atlas needs **Python 3.11 or newer**. Ubuntu 24.04 and Debian 12 ship it; the `python3` of Ubuntu 22.04 is 3.10, so that release needs a newer one first.
+
+`install.sh` needs the network: the distribution's package mirrors, GitHub, and **`pypi.org` and `files.pythonhosted.org`** for the Python packages. Without the two PyPI hosts the Python packages cannot be installed. Details: [INSTALL_INSTRUCTIONS.md](INSTALL_INSTRUCTIONS.md#0-get-a-host).
 
 **Minimum host:** 4 CPU cores (8 or more recommended), 8 GB RAM (32 GB or more recommended; Volatility 3 and Plaso are the memory-hungry tools), and 10 GB of disk for the install itself (the tools and Python packages take about 2 GB; the rest is headroom for distribution packages and .NET), plus room for your evidence: a single disk image is commonly 30 to 500 GB or more. Full breakdown: [INSTALL_INSTRUCTIONS.md](INSTALL_INSTRUCTIONS.md#0-get-a-host).
 
@@ -109,16 +112,17 @@ sudo cast install teamdfir/sift-saltstack
 
 ## Configure an LLM backend
 
-Atlas needs a language model for its five roles. `install.sh` offers to set one up; to add or change one later:
+Atlas needs a language model for its five text roles plus an optional vision role (its model must take images). `install.sh` offers to set one up; to add or change one later:
 
 ```bash
 bin/atlas provider setup
 ```
 
-The wizard covers the Telekom LLM Hub, OpenAI, a local or self-hosted server (vLLM, Ollama, LM Studio, ...) and any other OpenAI-compatible endpoint, and it tests the connection before saving. The same setup lives in the dashboard under **Settings → Providers**, where the *Roles in a run* table gives each role its provider.
+The wizard offers one entry per provider profile (the Telekom LLM Hub, OpenAI, OpenRouter, Anthropic, Groq, Together AI, Fireworks AI, Cerebras, Azure OpenAI, a local or self-hosted server such as vLLM, Ollama, LM Studio or llama.cpp, and "Other" for any OpenAI-compatible endpoint), and it tests the connection before saving. A profile is a small TOML file under `provider_profiles/`; add your own, or change a shipped one, under `provider_profiles.local/`. The same setup lives in the dashboard under **Settings → Providers**, where the *Roles in a run* table gives each role its provider.
 
 - **Use a large-context model.** Atlas is tuned for a 1 000 000-token context window. It probes the live model, scales every budget to its window and compresses the conversation before a request would overflow; below 32 000 tokens it runs in a compact, disk-first mode. Set `ATLAS_MODEL_CONTEXT_TOKENS` if the probe is wrong. Small-context and budget models tend to produce incomplete analysis and unexpected failures, and are not recommended.
 - **Thinking models need no special setup.** Atlas reads the thinking from whichever field the provider uses and never mistakes it for the answer. Each provider has one Thinking setting; on Auto, a bounded level is learned the first time a reply comes back empty. *Test connection* reports what a model does before you give it a role.
+- **Claude runs on Anthropic's own API.** The `anthropic` profile speaks the Messages API with prompt caching and the thinking level as `effort`; the OpenAI-compatible layer stays available as `anthropic-compat`.
 - **Expect vendor dialects.** "OpenAI-compatible" is a family of dialects. Atlas adapts at runtime: it learns from a rejection that names the offending field, drops that field for the model and sends the request again. An unusual or very new model may still need a small adjustment; start with `core/llmhub.py` and `agent/llm.py`.
 
 Everything in detail: [docs/llm.md](docs/llm.md).
@@ -180,7 +184,7 @@ Full command list: [docs/cli-reference.md](docs/cli-reference.md), or `atlas --h
   </tr>
 </table>
 
-Per case: **Overview** (one status band: run state, questions, findings, indicators, response, conflicts, evidence, plus the live activity line), **Questions**, **Case Findings** (every recorded belief by confidence and host), **IoCs**, **Response** (what to do about it, ordered by urgency and evidence), **Process** (the trace), **Report**, **Brief** (the case file) and, when the timeline addon is on, **Timeline**. **Settings** holds the model providers and their roles, token spend and prices, users, session limits and the activity log, cases, enrichment keys, the MITRE ATT&CK tables, tool health, plugins, the network share and mail, each in its own section. Full tour: [docs/dashboard.md](docs/dashboard.md).
+Per case: **Overview** (one status band: run state, questions, findings, indicators, response, conflicts, evidence, plus the live activity line), **Questions**, **Case Findings** (every recorded belief by confidence and host, as a list, or day by day), **Coverage** (what was read, partly read, left with a reason or is still open, per evidence item), **IoCs**, **Response** (what to do about it, ordered by urgency and evidence), **Process** (the trace), **Report**, **Brief** (the case file) and, when the timeline addon is on, **Timeline**. **Settings** holds the model providers and their roles, token spend and prices, users, session limits and the activity log, cases, enrichment keys, the MITRE ATT&CK tables, tool health, plugins, the network share and mail, each in its own section. Full tour: [docs/dashboard.md](docs/dashboard.md).
 
 ## Documentation
 
@@ -191,7 +195,8 @@ Per case: **Overview** (one status band: run state, questions, findings, indicat
 | [Docker](docs/docker.md) | [LLM backends](docs/llm.md) | [Directory layout](docs/directory-layout.md) |
 | [Other distributions](docs/other-distros.md) | [Your own YARA rules](docs/yara-rules.md) | [Writing addons](docs/addons.md) |
 | [xmount alongside GIFT's Plaso](docs/xmount-manual-install.md) | [Network share (SMB evidence intake)](docs/network-share.md) | [Bundled datasets](docs/datasets.md) |
-| [Proxmox LXC container](docs/proxmox-lxc.md) | [Multi-user VM](docs/multi-user.md) | |
+| [Proxmox LXC container](docs/proxmox-lxc.md) | [Multi-user VM](docs/multi-user.md) | [Investigation architecture](docs/architecture-investigation.md) |
+| | | [Case-driven architecture](docs/architecture-case-driven.md) |
 
 ## License
 

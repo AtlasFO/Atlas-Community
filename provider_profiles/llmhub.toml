@@ -1,0 +1,46 @@
+#:schema ./schema.json
+# Atlas provider profile: what Atlas knows about one kind of LLM provider.
+# Every field: docs/llm.md, "Provider profiles", and provider_profiles/schema.json.
+# To change a field, put a file of the same name in provider_profiles.local/
+# (`atlas provider profile init <id>` copies this one there) and keep only the
+# lines you change: the rest, and later fixes to them, come from this file.
+# A file there fails when its id is not its file name, when it sets [env] or
+# implicit, or when it is named custom.toml (the fallback cannot be changed).
+# Format version of this file; leave it at 1.
+schema = 1
+# Must equal the file name without .toml.
+id = "llmhub"
+# Position in the setup menu; lower comes first.
+order = 10
+# Name shown in the setup menu and on the Settings page.
+label = "Telekom LLM Hub"
+# One line shown under the label in the menu.
+description = "T-Systems LLM Hub — api key from the Hub portal."
+# Shown when this profile is chosen: what to know before saving.
+notes = """\
+Atlas was developed and is most tested against z.ai GLM-5.2 served through this hub; every other \
+backend here is fully supported and equally maintained."""
+# How these facts were checked: "live", "docs" (vendor documentation only) or "" (no fixed endpoint).
+evidence = "live"
+# Wire format: "chat" (Chat Completions), "responses" (OpenAI Responses) or "messages" (Anthropic Messages).
+dialect = "chat"
+# Selectable as "llmhub" without ATLAS_PROVIDERS, configured through the variables in [env].
+implicit = true
+
+[connection]
+# Prefills the base URL field; a provider uses the URL saved with it.
+base_url = "https://llm-server.llmhub.t-systems.net/v2"
+# Prefills the model field.
+default_model = "GLM-5.2"
+
+[env]
+# Variable that holds this instance's base URL.
+base_url = "LLMHUB_BASE_URL"
+# Variable that holds this instance's model id.
+model = "LLMHUB_MODEL"
+# Variables that hold the key, the first one set wins.
+api_key = ["LLMHUB_API_KEY", "TSYSTEMS_API_KEY"]
+# Variable that pins this instance's thinking level.
+thinking = "LLMHUB_THINKING"
+# Variable that overrides the dialect for this instance.
+api = "LLMHUB_API"

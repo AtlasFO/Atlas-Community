@@ -11,10 +11,13 @@ from core import ir_playbook
 from core.recommendations import build_catalog, report_readiness_advisories
 
 
-def _case(tmp_path, intake: str | None, language: str = "en"):
+def _case(tmp_path, intake: str | None, language: str = "en", owner: str = "victim"):
     d = tmp_path / "CASE"
     (d / ".atlas").mkdir(parents=True)
-    body = "# Case: CASE\n\n**Case ID:** CASE\n\n## Investigation Requests\n- What happened?\n"
+    # The owner the brief states (the incident frame by default here; ""
+    # for a brief that names none, the neutral frame).
+    body = ("# Case: CASE\n\n**Case ID:** CASE\n" + (f"**System owner:** {owner}\n" if owner else "")
+            + "\n## Investigation Requests\n- What happened?\n")
     if intake is not None:
         body += f"\n## What you already know\n{intake}\n"
     (d / "CASE.md").write_text(body, encoding="utf-8")
@@ -137,7 +140,7 @@ class TestAssertedClassification:
     itself); a mention alone earns no precaution."""
 
     def test_a_password_tool_in_a_listing_is_not_a_credential_compromise(self):
-        s = "12 shortcuts to attack tools: Cain v2.5 (password recovery), CuteFTP, Ethereal"
+        s = "12 shortcuts to attack tools: PassCrack v2.5 (password recovery), FTPClient, SniffKit"
         assert "credential_compromise" in ir_playbook.classify(s)
         assert ir_playbook.classify(s, asserted=True) == []
 
@@ -169,7 +172,7 @@ class TestAssertedClassification:
         assert ir_playbook.classify("The driver has a memory leak", asserted=True) == []
 
     def test_a_detection_is_still_malware(self):
-        assert ir_playbook.classify("ClamAV detected Win.Trojan.Cain-9 in Abel.dll", asserted=True) == ["malware"]
+        assert ir_playbook.classify("ClamAV detected Win.Trojan.Example-9 in helper.dll", asserted=True) == ["malware"]
 
     def test_intake_reading_is_unchanged(self):
         assert "credential_compromise" in ir_playbook.classify("the attacker had the admin password")
@@ -313,7 +316,7 @@ _ESCALATION_CASES = [
     ("No weapons were found on the laptop, but the chats show he planned a shooting at the school.",
      ["violence"]),
     ("He did not hide his plans for a shooting at the school.", ["violence"]),
-    ("The manifesto describes the planned bombing of the station.", ["violence"]),
+    ("The letter describes the planned bombing of the station.", ["violence"]),
     ("The user threatened to shoot his manager.", ["violence"]),
     ("Er plant einen Anschlag auf die Schule.", ["violence"]),
     ("Er plante einen Anschlag auf die Schule.", ["violence"]),
@@ -555,3 +558,47 @@ class TestReviewedEscalationMechanics:
         node = cg.get_node(cg.load_graph(d), plain)
         assert node["mandatory"] is True
         assert not cg.set_recommendation_state(d, plain, "dismissed")["success"]
+
+
+class TestNeutralFrame:
+    def test_no_owner_named_seeds_no_first_hour_precaution(self, tmp_path):
+        """No owner named: a first-hour precaution protects an owner's live
+        estate the brief does not name, so none is seeded."""
+        from core.indicators import frame_for
+        d = _case(tmp_path, "Files on a workstation were encrypted.", owner="")
+        assert frame_for(d) == "neutral"
+        out = ir_playbook.seed_from_intake(d)
+        assert "no system owner named" in out.get("skipped", "")
+        recs = [n for n in (cg.load_graph(d).get("nodes") or {}).values() if n.get("kind") == "recommendation"
+                and n.get("response_state") == "open" and not n.get("mandatory")]
+        assert recs == []
+
+
+class TestDefiningTechnique:
+    """A finding's validated techniques decide the weak (encrypt-near-object)
+    form of a class with a defining technique; the explicit words and the
+    other classes read unchanged; a finding without techniques keeps the
+    prose reading."""
+
+    ARCHIVE = "The recovered archive is an encrypted (password-protected) archive; its password is in the notes"
+
+    def test_an_encrypted_archive_with_other_techniques_is_not_ransomware(self):
+        assert "ransomware" not in ir_playbook.classify(
+            self.ARCHIVE, asserted=True, techniques=["T1041", "T1005"])
+
+    def test_without_techniques_the_prose_reading_stands(self):
+        # Known ceiling: no validated technique, no veto.
+        assert "ransomware" in ir_playbook.classify(self.ARCHIVE, asserted=True)
+        assert "ransomware" in ir_playbook.classify(self.ARCHIVE, asserted=True, techniques=[])
+
+    def test_the_defining_technique_keeps_the_weak_form(self):
+        assert "ransomware" in ir_playbook.classify(
+            "The file shares on CORP-FS01 were encrypted", asserted=True, techniques=["T1486"])
+
+    def test_explicit_ransom_words_are_never_vetoed(self):
+        assert "ransomware" in ir_playbook.classify(
+            "A ransom note was dropped and shadow copies deleted", asserted=True, techniques=["T1490"])
+
+    def test_other_classes_ignore_techniques(self):
+        assert "credential_compromise" in ir_playbook.classify(
+            "Domain credentials were dumped from lsass", asserted=True, techniques=["T1021.002"])

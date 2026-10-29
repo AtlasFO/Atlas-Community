@@ -20,7 +20,7 @@ _INSTALL = ("apt install libevt-utils (libevt-tools with the GIFT PPA), "
 _RECORD_MARKERS = ("Event number", "Record number")
 
 
-@mcp.tool()
+@mcp.tool(meta={"input_names": ["*.evt"]})
 @output_safe
 def evt_export(evt_path: str, output_dir: str, mode: str = "items",
                resources_dir: str = "") -> dict:

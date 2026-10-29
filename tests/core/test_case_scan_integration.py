@@ -7,6 +7,8 @@ output sitting in the case directory is all it takes.
 """
 from __future__ import annotations
 
+import pytest
+
 import json
 import os
 
@@ -141,6 +143,7 @@ class TestEventLogObligationIsSatisfiable:
         assert "Security.evtx" in ob["detail"]
 
 
+@pytest.mark.usefixtures("todays_pivots")
 class TestPivotTargetQuality:
     def _case(self, tmp_path):
         case = tmp_path / "case"
@@ -159,6 +162,9 @@ class TestPivotTargetQuality:
             "nodes": {"C1": {"id": "C1", "kind": "claim", "status": "new",
                              "statement": "Beacon to 203.0.113.44 observed."}},
             "edges": []}), encoding="utf-8")
+        # The incident frame (the brief names the owner): the prose's verb
+        # makes the address the attacker's and so a pivot.
+        (case / "CASE.md").write_text("**Case ID:** CASE\n**System owner:** victim\n", encoding="utf-8")
         return case
 
     def test_atlas_own_output_is_never_a_pivot_target(self, tmp_path):
@@ -173,14 +179,15 @@ class TestPivotTargetQuality:
                     if "trace" in t or "transcript" in t or ".atlas" in t]
 
     def test_targets_are_offered_in_value_order(self, tmp_path):
-        """open_pivots used to sort alphabetically, so a display cap showed
-        Application.evtx and cut off Security.evtx."""
+        """open_pivots must not sort alphabetically, or a display cap shows
+        Application.evtx and cuts off Security.evtx."""
         case = self._case(tmp_path)
         ip.refresh_pivots(case)
         pending = ip.open_pivots(case)[0]["pending"]
         assert pending[0].endswith("Security.evtx"), pending[:3]
-        assert ip.format_pivot_nudge(ip.open_pivots(case)).index(
-            "Security.evtx") < 900
+        searches = [line for line in ip.format_pivot_nudge(ip.open_pivots(case)).splitlines()
+                    if " owed): pattern " in line]
+        assert searches[0].startswith("- evidence/winevt/Security.evtx"), searches
 
 
 class TestSourceSetsOnLinkedEvidence:

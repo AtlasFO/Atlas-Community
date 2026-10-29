@@ -17,8 +17,8 @@ Trigger (description prose):
       removable / email / attachment / web upload / C2 / Telegram / SMTP).
 
 Pass condition (evidence, NOT prose): a transfer marker appears in
-lineage_evidence_text(ctx) — the agent's supporting_evidence plus the cmd /
-stdout_excerpt of the linked_call_id and input_call_ids entries. Transfer
+lineage_evidence_text(ctx) — the rows the linked_call_id and input_call_ids
+calls printed (never the analyst's own supporting_evidence or command). Transfer
 markers: an FTP/transfer log (transfers.log), a byte-count of data sent/written/
 transferred, a USN $J write/rename record, a removable-volume LNK / MountedDevices
 / DEVPKEY binding (the file physically resided on removable media), a mail record
@@ -152,8 +152,9 @@ def check(ctx) -> Optional[dict]:
         "success": False,
         "error": (
             f"{ctx.tier} finding claims data was exfiltrated over a named channel "
-            f"but its evidence (supporting_evidence or the linked_call_id / "
-            f"input_call_ids entries) shows only presence/staging, not a transfer. "
+            f"but the rows of the calls it cites (linked_call_id / input_call_ids) "
+            f"show only presence/staging, not a transfer; text in supporting_evidence "
+            f"is not a row. "
             f"A file in a sync folder, a :com.dropbox.attributes ADS, or "
             f"tool-execution alone is not egress. Cite a transfer artifact — an "
             f"FTP/transfer log, a byte count sent/written, a USN $J write/rename, "

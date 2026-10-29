@@ -63,7 +63,7 @@ def test_finding_ids_stable_monotonic(tmp_path: Path):
 
 
 def test_upsert_finding_syncs_index_transactionally(tmp_path: Path):
-    """X7: claim_graph write must not leave finding_index empty."""
+    """claim_graph write must not leave finding_index empty."""
     from core.claim_graph import upsert_claim_from_finding
 
     case = _case(tmp_path)
@@ -113,10 +113,14 @@ def test_nodes_for_report_host_scope_is_the_recorded_host_only(tmp_path: Path):
     assert hosts == [("DC02", "host")]
 
 
-def test_a_promoted_claim_is_shown_once_under_its_conclusion(tmp_path: Path):
+def test_a_promoted_claim_is_shown_once_under_its_conclusion(tmp_path: Path, monkeypatch):
     """A conclusion restates the claim it was promoted from; the report lists
     the conclusion, keeps the claim's id as an alias so references to it
-    still resolve, and does not detail the claim a second time."""
+    still resolve, and does not detail the claim a second time. (The fold of
+    a reworded promotion applies without the door; with the conclusion door only an
+    identical single-basis conclusion folds its basis,
+    tests/core/test_conclusion_door.py.)"""
+    monkeypatch.setenv("ATLAS_CONCLUSION_DOOR", "0")
     case = _case(tmp_path)
     c = add_claim(case, "Data left the host via the sync client", confidence="LIKELY", host="WS01")
     other = add_claim(case, "An archive was staged in the Downloads folder", confidence="LIKELY", host="WS01")

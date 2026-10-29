@@ -1,17 +1,25 @@
 """Regression test for dashboard/read_models.py's questions_projection().
 
-Bug: a case whose CASE.md has Investigation Requests bullets but no
+Failure class: a case whose CASE.md has Investigation Requests bullets but no
 .atlas/investigation_tasks.json yet (a case created by hand, by the CLI, or
-under a dashboard version that predates dashboard/case_admin.py's write-side
-sync — see tests/dashboard/test_case_admin.py) showed "No investigation
-questions" forever in the Questions tab: questions_projection() read only
-the task store, and nothing had ever reconciled CASE.md into it. Fixed by
-having load_task_store() reconcile on every read, not just on the
-dashboard's own save/create paths.
+by a dashboard without dashboard/case_admin.py's write-side sync — see
+tests/dashboard/test_case_admin.py) would show "No investigation
+questions" forever in the Questions tab if questions_projection() read only
+the task store and nothing reconciled CASE.md into it. load_task_store()
+therefore reconciles on every read, not just on the dashboard's own
+save/create paths.
 """
 from __future__ import annotations
 
 from dashboard import read_models
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _todays_answer_path(monkeypatch):
+    """This module pins the answer path before the composer: the scaffold,
+    the prose pass, the conclusion lead (ATLAS_ANSWER_COMPOSE=0)."""
+    monkeypatch.setenv("ATLAS_ANSWER_COMPOSE", "0")
 
 
 def test_questions_appear_without_any_prior_sync(tmp_path):

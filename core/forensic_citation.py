@@ -1,21 +1,22 @@
 """A citation an analyst can read, check, and go look up.
 
-What was wrong
-==============
-Atlas had evidence but no *citation*. Supporting Evidence was raw tool
-output pushed through a fixed field template by column position — with no
-check that the value in a slot was of that kind. A line of ``fls`` output
-became::
+The failure class
+=================
+Evidence without a *citation*: Supporting Evidence as raw tool output
+pushed through a fixed field template by column position, with no check
+that the value in a slot is of that kind. A line of ``fls`` output
+becomes::
 
     Timestamp: d/d 1234-128-1:
     Machine: Documents and Settings
     User: ProgramData
 
-None of those are a timestamp, a machine or a user. The renderer had simply
-assigned column 0 → timestamp, column 1 → machine, column 2 → user. Beside
-it, provenance read ``Source File: evidence_index call_id=21 / Line: 1`` —
+None of those are a timestamp, a machine or a user. The renderer simply
+assigns column 0 → timestamp, column 1 → machine, column 2 → user. Beside
+it, provenance reads ``Source File: evidence_index call_id=21 / Line: 1`` —
 an internal identifier that tells a reader nothing about where in the
-evidence the fact lives, and 40 lines of hexdump pasted in as "description".
+evidence the fact lives — and 40 lines of hexdump are pasted in as
+"description".
 
 What a citation actually is
 ===========================
@@ -28,7 +29,7 @@ Five parts, each optional, each *earned*: which host, which artifact (named
 by what it is, not by the path Atlas happened to write it to), which record
 inside it, when, and the specific value being relied on.
 
-The rule that keeps it honest — and the one whose absence produced the
+The rule that keeps it honest — and the one whose absence produces the
 nonsense above — is that **a field is only labelled when the value has been
 validated as that kind of thing**. A timestamp must parse as a time. An
 event id must be numeric. A host must look like a host name. Anything that
@@ -388,30 +389,53 @@ def _record_from_ref(record_ref: str, kind: str) -> str:
     return ""
 
 
+def record_host(event: dict[str, Any], known_hosts: Iterable[str] = (), case_dir: Any = None) -> str:
+    """The case host a resolved evidence event belongs to, by the record,
+    never by the claim: the host its source path names (the case's label as
+    a token of the path, core.evidence_links.host_of_path, so a file named
+    after its host is that host's), then a host-shaped host field, then the
+    one case host its text names. "" when none names one, or when the text
+    names two: a record that names the host it came from and a host it
+    reached decides nothing by itself."""
+    ev = event if isinstance(event, dict) else {}
+    hosts = [str(h) for h in known_hosts if h]
+    source = str(ev.get("record_ref") or ev.get("source") or "")
+    source_path = source.split(":")[0] if source else ""
+    if source_path and (hosts or case_dir) and not source_path.startswith(("trace call_id", "evidence_index")):
+        from core.evidence_links import host_of_path
+        # With the case root the Evidence Links resolve an image not named
+        # after its host; the label as a path token works either way.
+        named = host_of_path(case_dir, source_path.split("::", 1)[0], hosts=hosts or None)
+        if named:
+            return named
+    host = str(ev.get("host") or "").strip()
+    if host and looks_like_host(host, hosts):
+        return host
+    low = str(ev.get("text") or "").lower()
+    mentioned = [h for h in hosts if host_mentioned(h, low)]
+    return mentioned[0] if len(mentioned) == 1 else ""
+
+
 def citation_from_event(
     event: dict[str, Any],
     *,
     known_hosts: Iterable[str] = (),
+    claim_host: str = "",
+    case_dir: Any = None,
 ) -> Citation:
     """Build a citation from a resolved evidence event, field by field.
 
     Every field is validated before it is accepted. An event whose fields
     cannot be identified still produces a usable citation — it just carries
-    an excerpt instead of inventing structure.
+    an excerpt instead of inventing structure. The host is the record's
+    (record_host); ``claim_host`` stands in only when the record names none.
     """
     ev = event if isinstance(event, dict) else {}
     text = str(ev.get("text") or "")
     source = str(ev.get("record_ref") or ev.get("source") or "")
     source_path = source.split(":")[0] if source else ""
 
-    host = str(ev.get("host") or "").strip()
-    if not looks_like_host(host, known_hosts):
-        host = ""
-        blob = (source + " " + text).lower()
-        for candidate in known_hosts:
-            if candidate and host_mentioned(candidate, blob):
-                host = candidate
-                break
+    host = record_host(ev, known_hosts, case_dir) or str(claim_host or "").strip()
 
     if not source_path or source_path in ("supporting_evidence",) or \
             source_path.startswith(("trace call_id", "evidence_index")):
@@ -461,6 +485,7 @@ def render_citations(
     *,
     known_hosts: Iterable[str] = (),
     limit: int = 8,
+    case_dir: Any = None,
 ) -> str:
     """A Supporting Evidence block a human can read.
 
@@ -472,7 +497,7 @@ def render_citations(
     total = 0
     for ev in events:
         total += 1
-        cite = citation_from_event(ev, known_hosts=known_hosts)
+        cite = citation_from_event(ev, known_hosts=known_hosts, case_dir=case_dir)
         rendered = cite.render()
         key = rendered.lower()
         if key in seen:
@@ -527,7 +552,7 @@ _OWN_WORDS_CMD_PREFIXES = (
 _OWN_WORDS_TYPES = frozenset((
     "reason_call", "dair_call", "finding", "self_correction",
     "investigation_narration", "curiosity_probe", "deferred_intent",
-    "call_initiated",
+    "call_initiated", "work_item",
 ))
 
 

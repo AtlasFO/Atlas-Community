@@ -20,9 +20,6 @@ _MIN_ROWS = env_int("ATLAS_COVERAGE_MIN_ROWS", 2000)
 _MAX_ROWS = env_int("ATLAS_COVERAGE_MAX_ROWS", 15000)
 _MAX_CHUNKS = env_int("ATLAS_COVERAGE_MAX_CHUNKS", 40)
 
-_TIME_COL_RE = re.compile(
-    r"(?i)^(time|timestamp|datetime|date|timecreated|recordid|@timestamp)$"
-)
 
 
 def _row_chunk_size(available_tool_tokens: int) -> int:
@@ -62,22 +59,14 @@ def profile_tabular(path: str, sample_rows: int = 2000) -> dict[str, Any]:
                 return out
             cols = [c.strip() for c in header]
             out["columns"] = cols[:40]
-            time_idx = None
-            for i, c in enumerate(cols):
-                if _TIME_COL_RE.match(c.strip()):
-                    time_idx = i
-                    out["time_column"] = c.strip()
-                    break
-            # Prefer common EVTX enrichment names
-            if time_idx is None:
-                for pref in ("TimeCreated", "Timestamp", "datetime", "DateTime"):
-                    for i, c in enumerate(cols):
-                        if c.strip().lower() == pref.lower():
-                            time_idx = i
-                            out["time_column"] = c.strip()
-                            break
-                    if time_idx is not None:
-                        break
+            # The one time-column list of the program (core.table_rows): a
+            # Plaso date-and-time pair is read as one moment, a record
+            # counter is never a time.
+            from core.table_rows import row_time, time_columns
+            tcols = time_columns(cols)
+            time_idx = tcols[0] if tcols else None
+            if tcols:
+                out["time_column"] = "+".join(cols[i] for i in tcols)
 
             # Frequency on first categorical-ish column (EventID / etc.)
             cat_idx = None
@@ -96,7 +85,9 @@ def profile_tabular(path: str, sample_rows: int = 2000) -> dict[str, Any]:
             for row in reader:
                 n += 1
                 if time_idx is not None and time_idx < len(row):
-                    val = (row[time_idx] or "").strip()
+                    # One column compares as written (an ISO export sorts as
+                    # text); a split date and time pair is parsed into one.
+                    val = row_time(row, tcols) if len(tcols) > 1 else (row[time_idx] or "").strip()
                     if val:
                         if tmin is None or val < tmin:
                             tmin = val

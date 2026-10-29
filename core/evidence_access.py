@@ -59,6 +59,11 @@ def _is_access_gated_media_entry(img: dict[str, Any]) -> bool:
 # coverage (core.coverage_ledger.NON_PROBE_TOOLS) asks whether a file inside
 # it was reached, which is why fsstat opens the media but examines nothing.
 _TSK_OPEN_TOOLS = frozenset({"tsk_fls", "tsk_fsstat"})
+# Calls that read a file inside an image open its filesystem too, but only
+# their success says so: "path not found" inside an image is not a failed
+# open of the image, so these never record access_failed
+# (ATLAS_ABSENCE_GATE_V2).
+_TSK_READ_OPENERS = frozenset({"tsk_resolve_path", "tsk_icat"})
 
 # How a pending image is opened, for the refusals that ask for it.
 OPEN_STEPS = ("tsk.fsstat or tsk.fls at the volume's offset_sectors (tsk.mmls "
@@ -465,11 +470,28 @@ _MEDIA_LABEL_STOP = frozenset({
 })
 
 
-def media_labels(entry: dict[str, Any]) -> set[str]:
+def shared_media_dirs(entries: list[dict[str, Any]]) -> frozenset[str]:
+    """Collection directories (lower case) that hold two or more media of
+    the case: such a directory is the operator's folder, not one host's
+    label, and names none of the media in it (ATLAS_ABSENCE_GATE_V2)."""
+    from core.envfile import env_flag
+    if not env_flag("ATLAS_ABSENCE_GATE_V2"):
+        return frozenset()
+    seen: dict[str, set[str]] = {}
+    for e in entries or []:
+        raw = str(e.get("path") or e.get("source") or "").replace("\\", "/").rstrip("/")
+        parts = raw.split("/")
+        if len(parts) >= 2 and parts[-2]:
+            seen.setdefault(parts[-2].strip().lower(), set()).add(raw)
+    return frozenset(d for d, media in seen.items() if len(media) >= 2)
+
+
+def media_labels(entry: dict[str, Any], shared_dirs: frozenset[str] = frozenset()) -> set[str]:
     """The names by which a claim or a tool call refers to this medium: the
     image's file name and stem, the directory it was collected under (the
-    operator's label for the host), the segments of its stem that carry a
-    digit or a mark, and the mount point it was opened at."""
+    operator's label for the host, unless it is in ``shared_dirs``), the
+    segments of its stem that carry a digit or a mark, and the mount point
+    it was opened at."""
     labels: set[str] = set()
 
     def _add(tok: str, min_len: int = 3) -> None:
@@ -486,12 +508,13 @@ def media_labels(entry: dict[str, Any]) -> set[str]:
         stem = base.rsplit(".", 1)[0] if "." in base else base
         _add(base)
         _add(stem)
-        if len(parts) >= 2:
-            _add(parts[-2], 2)          # the collection directory: a deliberate label
+        own_dir = parts[-2] if len(parts) >= 2 and parts[-2].strip().lower() not in shared_dirs else ""
+        if own_dir:
+            _add(own_dir, 2)          # the collection directory: a deliberate label
         # Segments of the stem and of the directory that carry a digit or a
         # mark name a host or a medium ("rm#3", "dc01"); plain words ("data",
         # "cdrive") and image extensions written as words ("e01") do not.
-        for seg in re.split(r"[_\-\s]+", stem + " " + (parts[-2] if len(parts) >= 2 else "")):
+        for seg in re.split(r"[_\-\s]+", stem + " " + own_dir):
             if re.search(r"[\d#]", seg) and not _DISK_EXT_RE.search("." + seg):
                 _add(seg)
     mount = ((entry.get("mount_result") or {}).get("mount_point")
@@ -501,14 +524,15 @@ def media_labels(entry: dict[str, Any]) -> set[str]:
     return labels
 
 
-def media_named_in(entry: dict[str, Any], text: str) -> bool:
+def media_named_in(entry: dict[str, Any], text: str,
+                   shared_dirs: frozenset[str] = frozenset()) -> bool:
     """Whether ``text`` (a claim, its evidence, the calls it cites) refers to
     this medium by one of its labels, as a whole word."""
     low = (text or "").lower()
     if not low:
         return False
     return any(re.search(rf"(?<![\w]){re.escape(label)}(?![\w])", low)
-               for label in media_labels(entry))
+               for label in media_labels(entry, shared_dirs))
 
 
 def absence_escape_blocked_by_access(
@@ -524,7 +548,7 @@ def absence_escape_blocked_by_access(
     cites - scopes the check to the media the claim is about: an absence
     asserted of an opened image is not blocked because some other image in
     the case is still waiting to be opened (media_named_in). A claim that
-    names no medium at all is judged against every pending one, as before.
+    names no medium at all is judged against every pending one.
     """
     root = _case_root(case_dir)
     if root is None:
@@ -540,8 +564,9 @@ def absence_escape_blocked_by_access(
         sample, stage = "disk image", "planned"
     else:
         if about_text:
-            named = [e for e in entries if media_named_in(e, about_text)]
-            named_pending = [e for e in pending if media_named_in(e, about_text)]
+            shared = shared_media_dirs(entries)
+            named = [e for e in entries if media_named_in(e, about_text, shared)]
+            named_pending = [e for e in pending if media_named_in(e, about_text, shared)]
             if named and not named_pending:
                 return None
             if named_pending:
@@ -644,6 +669,31 @@ def is_tsk_open_tool(tool_name: str) -> bool:
     return bool(name) and (name in _TSK_OPEN_TOOLS or f"tsk_{name}" in _TSK_OPEN_TOOLS)
 
 
+def _already_opened(root: Path, image_path: str) -> bool:
+    from core.envfile import env_flag
+    if not env_flag("ATLAS_ABSENCE_GATE_V2"):
+        return False
+    from core.mount_plan import load_mount_plan
+    target = os.path.abspath(os.path.expanduser(str(image_path)))
+    for img in load_mount_plan(root).get("images") or []:
+        ip = str(img.get("path") or "")
+        if ip and (os.path.abspath(os.path.expanduser(ip)) == target
+                   or os.path.basename(ip) == os.path.basename(target)):
+            return img.get("status") == "opened"
+    return False
+
+
+def is_tsk_read_opener(tool_name: str) -> bool:
+    """Whether ``tool_name`` reads a file inside an image, which opens the
+    image when it succeeds (ATLAS_ABSENCE_GATE_V2; off: never)."""
+    from core.coverage_ledger import listed_tool_name
+    from core.envfile import env_flag
+    if not env_flag("ATLAS_ABSENCE_GATE_V2"):
+        return False
+    name = listed_tool_name(tool_name)
+    return bool(name) and (name in _TSK_READ_OPENERS or f"tsk_{name}" in _TSK_READ_OPENERS)
+
+
 def parse_tool_result_success(result_text: str) -> tuple[bool, str]:
     """Interpret agent-facing tool result text into (success, error_snippet).
 
@@ -688,7 +738,10 @@ def record_open_from_tool(
 ) -> Optional[dict[str, Any]]:
     """Persist opened / access_failed on mount_plan after TSK (or similar) tools."""
     root = _case_root(case_dir)
-    if root is None or not is_tsk_open_tool(tool_name):
+    read_opener = not is_tsk_open_tool(tool_name) and is_tsk_read_opener(tool_name)
+    if root is None or not (is_tsk_open_tool(tool_name) or read_opener):
+        return None
+    if read_opener and not success:
         return None
     # Extract a path-like token from args/cmd.
     blob = cmd_or_args or ""
@@ -709,8 +762,9 @@ def record_open_from_tool(
     if not candidates:
         # The raw device ewfmount exposes (mnt/<stem>/ewf/ewf1) is what the
         # mount helpers tell the analyst to run TSK against when a volume
-        # does not mount; reading it opens the image it belongs to.
-        stems = {m.group(1) for m in re.finditer(r'mnt/([^/\s"\']+)/ewf/ewf\d+', blob)}
+        # does not mount, and a disk container's raw view (mnt/<stem>/disk)
+        # what a tool result names; reading either opens its image.
+        stems = {m.group(1) for m in re.finditer(r'mnt/([^/\s"\']+)/(?:ewf/ewf\d+|disk(?![\w.-]))', blob)}
         if stems:
             try:
                 from core.mount_plan import _mount_stem, load_mount_plan
@@ -734,6 +788,10 @@ def record_open_from_tool(
         from core.mount_plan import mark_image_opened, mark_image_access_failed
         if success:
             return mark_image_opened(root, image_path, tool=tool_name)
+        if _already_opened(root, image_path):
+            # One failed call (a wrong offset, a bad inode) does not undo an
+            # open another call recorded (ATLAS_ABSENCE_GATE_V2).
+            return None
         return mark_image_access_failed(
             root, image_path, error=error or f"{tool_name} failed", tool=tool_name,
         )

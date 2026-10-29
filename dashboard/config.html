@@ -254,6 +254,8 @@
   table.cfg-table td.r .cell-sub { white-space: normal; }
   #usage-periods table.cfg-table th, #usage-periods table.cfg-table td { padding-left: 10px; padding-right: 10px; }
   table.cfg-table input[type=number] { width: 7.5em; padding: 5px 8px; }
+  .price-tier { margin-top: 4px; font-size: var(--fs-small); }
+  .price-tier label { display: inline-flex; align-items: center; gap: 4px; margin: 4px 10px 0 0; }
   table.cfg-table select { padding: 5px 8px; max-width: 100%; }
   .cell-sub { display: block; color: var(--fg-2); font-size: var(--fs-small); }
   .nowrap { white-space: nowrap; }
@@ -534,13 +536,14 @@
       <div class="set-group" id="llm-form" data-form hidden>
         <div class="group-head">
           <div><h3 id="llm-form-title">Add a provider</h3>
-            <p>An OpenAI-compatible endpoint. Test the connection to fill the model list and to learn what the model can do.</p></div>
+            <p>An OpenAI-compatible or Anthropic endpoint. Test the connection to fill the model list and to learn what the model can do.</p></div>
           <button class="btn ghost icon" type="button" id="llm-form-close" aria-label="Close the provider form"><svg class="i" aria-hidden="true"><use href="#i-close"/></svg></button>
         </div>
         <div class="fields">
           <div class="field">
             <label for="llm-preset">Preset</label>
-            <select id="llm-preset"></select>
+            <select id="llm-preset" aria-describedby="llm-preset-about"></select>
+            <p class="field-hint" id="llm-preset-about"></p>
           </div>
           <div class="field">
             <label for="llm-name">Provider name</label>
@@ -566,6 +569,18 @@
             <input type="password" id="llm-api-key" name="atlas-llm-api-key"
               placeholder="Leave empty to keep the stored key" autocomplete="off" />
           </div>
+          <div class="field" data-custom-auth hidden>
+            <label for="llm-auth-header">Auth header</label>
+            <input type="text" id="llm-auth-header" name="atlas-llm-auth-header"
+              placeholder="Authorization" autocomplete="off" />
+            <p class="field-hint">The header the key goes in. Empty: Authorization.</p>
+          </div>
+          <div class="field" data-custom-auth hidden>
+            <label for="llm-auth-prefix">Auth prefix</label>
+            <input type="text" id="llm-auth-prefix" name="atlas-llm-auth-prefix"
+              placeholder="Bearer " autocomplete="off" />
+            <p class="field-hint">Text before the key, with its trailing space (Token ). Empty: Bearer on Authorization, nothing on another header.</p>
+          </div>
           <div class="field">
             <label for="llm-store-key-in">Store the key in</label>
             <select id="llm-store-key-in">
@@ -588,6 +603,7 @@
         <div class="group-foot">
           <label class="check-line"><input type="checkbox" class="switch" role="switch" id="llm-skip-probe" /> Save without testing</label>
           <div class="acts">
+            <button class="btn" id="llm-test-cancel" type="button" hidden>Cancel test</button>
             <button class="btn" id="llm-test-btn" type="button">Test connection</button>
             <button class="btn ok" id="llm-save-btn" type="button">Save provider</button>
           </div>
@@ -733,7 +749,7 @@
       <div class="set-group" data-form>
         <div class="set-row">
           <div><div class="row-label"><label for="usage-currency">Currency</label></div>
-            <p class="row-help">Shown next to every cost.</p></div>
+            <p class="row-help">Shown next to every cost; a label only, it converts nothing. Vendors publish their prices in USD.</p></div>
           <div class="row-ctl"><input id="usage-currency" class="short" type="text" maxlength="12" data-keep="currency" /></div>
         </div>
         <div class="set-row cfg-check">
@@ -752,12 +768,12 @@
       <div class="set-group" data-form>
         <div class="group-head">
           <div><h3>Price list</h3>
-            <p>One row per model set up under Providers and per model the ledger has recorded; a model added under Providers appears here on its own. Leave cached empty to bill cached input at the input price.</p></div>
+            <p>One row per model set up under Providers and per model the ledger has recorded; a model added under Providers appears here on its own. Prices are per million tokens. Leave cache read or cache write empty to bill those tokens at the input price. A model priced higher for long prompts takes a second set of prices under Long prompts, from the prompt length on that the provider names (cache reads and writes count towards it).</p></div>
         </div>
         <div class="tbl-wrap">
           <table class="cfg-table" id="usage-prices">
-            <thead><tr><th>Model</th><th class="r">Input</th><th class="r hide-small">Cached input</th><th class="r">Output</th><th><span class="sr">Actions</span></th></tr></thead>
-            <tbody><tr><td colspan="5" class="placeholder">Loading…</td></tr></tbody>
+            <thead><tr><th>Model</th><th class="r">Input</th><th class="r hide-small">Cache read</th><th class="r hide-small">Cache write</th><th class="r">Output</th><th><span class="sr">Actions</span></th></tr></thead>
+            <tbody><tr><td colspan="6" class="placeholder">Loading…</td></tr></tbody>
           </table>
         </div>
         <div class="group-foot">
@@ -1723,6 +1739,10 @@ def register(mcp) -> None:
   let LAST_PROVIDERS = [];
   // The provider loaded into the form with Edit, while its name is unchanged.
   let EDITING = null;
+  // What the last Test connection got an answer from (base URL, model,
+  // profile): a save of exactly these is taken even when the provider's
+  // model list does not show the model. The server compares the values.
+  let LAST_TESTED = null;
   const showMsg = msgFor('llm-msg');
   const listMsg = msgFor('llm-list-msg');
 
@@ -1755,12 +1775,12 @@ def register(mcp) -> None:
       <tr>
         <td><b>${esc(p.name)}</b><span class="cell-sub mono">${esc(p.base_url || '—')}</span></td>
         <td class="mono">${esc(p.model || '—')}</td>
-        <td class="hide-small"><span class="pill ${p.key_set ? 'ok' : 'bad'}">${p.key_set ? 'set' : 'not set'}</span></td>
+        <td class="hide-small"><span class="pill ${p.key_set || p.needs_api_key === false ? 'ok' : 'bad'}">${p.key_set ? 'set' : p.needs_api_key === false ? 'not needed' : 'not set'}</span></td>
         <td class="hide-small">${esc(p.thinking || 'auto')}</td>
         <td class="hide-small">${p.roles.map(r => `<span class="role-chip-sm">${esc(r)}</span>`).join('') || '<span class="cell-sub">none</span>'}</td>
         <td class="acts">
           <button class="btn ghost sm" type="button" data-edit-provider="${esc(p.name)}" aria-label="Edit ${esc(p.name)}">Edit</button>
-          ${p.name === 'llmhub' ? '' : `<button class="btn ghost sm bad" type="button" data-delete-provider="${esc(p.name)}" aria-label="Remove ${esc(p.name)}">Remove</button>`}
+          ${p.implicit ? '' : `<button class="btn ghost sm bad" type="button" data-delete-provider="${esc(p.name)}" aria-label="Remove ${esc(p.name)}">Remove</button>`}
         </td>
       </tr>`).join('');
     tbody.querySelectorAll('[data-edit-provider]').forEach(btn => {
@@ -1777,8 +1797,13 @@ def register(mcp) -> None:
         }
         if (!(await confirmInline(btn, `Remove ${name}?`, 'Remove'))) return;
         try {
-          await AtlasShell.apiPost('config/llm/delete', { name });
-          listMsg(`Removed ${name}.`, true);
+          const r = await AtlasShell.apiPost('config/llm/delete', { name });
+          // A removal deletes the provider's settings and its key; what it
+          // could not remove is said, never a plain success.
+          const left = [];
+          if (r.key_left_in_keyring) left.push(`its key ${r.key_left_in_keyring} is still in the OS keyring (bin/atlas-secret clear ${r.key_left_in_keyring})`);
+          if (r.left_unusable) left.push(`${r.left_unusable} shared its settings and is now unusable`);
+          listMsg(`Removed ${name}.` + (left.length ? ` But ${left.join('; ')}.` : ''), !left.length);
           await loadLlmConfig();
           loadPrices().catch(e => say('usage-prices-msg', e.message, 'err'));
         } catch (e) { listMsg(e.message, false); }
@@ -1786,13 +1811,30 @@ def register(mcp) -> None:
     });
   }
 
+  // The Thinking select offers the levels the chosen profile takes (all of
+  // them for a profile that lists none); a level saved before that check
+  // stays shown, marked, so an edit does not silently change it.
+  function setThinkingLevels(presetId, keep) {
+    const preset = PRESETS.find(p => p.id === presetId);
+    const levels = (preset && preset.levels) || ['auto', 'low', 'medium', 'high'];
+    const want = keep || $('llm-thinking').value || 'auto';
+    const opts = levels.map(v => [v, v === 'auto' ? 'Auto, learn from replies' : v]);
+    const stale = !!keep && !levels.includes(keep);
+    if (stale) opts.push([keep, `${keep} (this profile does not take it)`]);
+    $('llm-thinking').innerHTML = opts.map(([v, label]) =>
+      `<option value="${esc(v)}">${esc(label)}</option>`).join('');
+    $('llm-thinking').value = levels.includes(want) || stale ? want : 'auto';
+  }
+
   function resetProviderForm() {
     closeInline();
     EDITING = null;
+    LAST_TESTED = null;
     $('llm-form-title').textContent = 'Add a provider';
     $('llm-preset').value = '';
+    showPresetAbout('');
     ['llm-name', 'llm-base-url', 'llm-model', 'llm-api-key'].forEach(id => { $(id).value = ''; });
-    $('llm-thinking').value = 'auto';
+    setThinkingLevels('');
     say('llm-msg', '');
   }
 
@@ -1802,10 +1844,14 @@ def register(mcp) -> None:
     resetProviderForm();
     EDITING = p.name;
     $('llm-form-title').textContent = `Edit ${p.name}`;
+    // The profile the saved provider is bound to, so a test and a save
+    // speak with its auth header and request shape.
+    if (p.profile && PRESETS.some(x => x.id === p.profile)) $('llm-preset').value = p.profile;
+    showPresetAbout($('llm-preset').value, { header: p.auth_header, prefix: p.auth_prefix });
     $('llm-name').value = p.name;
     $('llm-base-url').value = p.base_url || '';
     $('llm-model').value = p.model || '';
-    $('llm-thinking').value = p.thinking || 'auto';
+    setThinkingLevels($('llm-preset').value, p.thinking || 'auto');
     openPanel('llm-form', 'llm-base-url');
   }
   $('llm-add-btn').addEventListener('click', () => { resetProviderForm(); openPanel('llm-form', 'llm-preset'); });
@@ -1867,7 +1913,7 @@ def register(mcp) -> None:
         ? (cur ? '' : '<option value="" selected disabled>No provider</option>')
         : `<option value=""${cur ? '' : ' selected'}>Off${r.id === 'report' ? ' (uses the analyst’s provider)' : ''}</option>`;
       const options = none + providers.map(p =>
-        `<option value="${esc(p.name)}"${p.name === cur ? ' selected' : ''}>${esc(p.name)}${p.model ? ' · ' + esc(p.model) : ''}${p.key_set ? '' : ' (no key)'}</option>`).join('');
+        `<option value="${esc(p.name)}"${p.name === cur ? ' selected' : ''}>${esc(p.name)}${p.model ? ' · ' + esc(p.model) : ''}${p.key_set || p.needs_api_key === false ? '' : ' (no key)'}</option>`).join('');
       const overridden = OVERRIDDEN.has(r.id)
         ? ' <span class="pill warn" title="A model override in .env decides this role; saving its provider here clears it">override</span>' : '';
       return `<tr>
@@ -1897,7 +1943,7 @@ def register(mcp) -> None:
       await loadLlmConfig();
       const keyless = changed.filter(sel => {
         const p = LAST_PROVIDERS.find(x => x.name === sel.value);
-        return p && !p.key_set;
+        return p && !p.key_set && p.needs_api_key !== false;
       }).map(sel => `${sel.dataset.role} (${sel.value})`);
       say('roles-msg', 'Saved. The next call uses these providers; a run under way keeps the ones it started with.'
         + (keyless.length ? ` No API key is stored for ${keyless.join(', ')}; if the endpoint needs one, the role fails until it is added.` : ''),
@@ -1918,8 +1964,31 @@ def register(mcp) -> None:
     return name;
   }
 
+  // What the chosen profile says about itself (its description and notes:
+  // a base-URL pattern, how model ids look), and the Auth fields, which
+  // only the Other profile takes from the form: every other profile
+  // brings its own.
+  const CUSTOM_PRESET = 'custom';
+  function showPresetAbout(presetId, auth) {
+    const preset = PRESETS.find(p => p.id === presetId);
+    $('llm-preset-about').textContent = preset
+      ? [preset.description, preset.notes].filter(Boolean).join(' ') : '';
+    const custom = presetId === CUSTOM_PRESET;
+    document.querySelectorAll('[data-custom-auth]').forEach(el => { el.hidden = !custom; });
+    $('llm-auth-header').value = custom && auth ? auth.header || '' : '';
+    $('llm-auth-prefix').value = custom && auth ? auth.prefix || '' : '';
+  }
+
+  // The auth fields a request carries: only for Other, so a save under
+  // another profile never touches a header set by hand.
+  function authFields() {
+    if ($('llm-preset').value !== CUSTOM_PRESET) return {};
+    return { auth_header: $('llm-auth-header').value.trim(), auth_prefix: $('llm-auth-prefix').value };
+  }
+
   function applyPreset() {
     const preset = PRESETS.find(p => p.id === $('llm-preset').value);
+    showPresetAbout($('llm-preset').value);
     if (!preset) return;
     // On a provider loaded with Edit a preset fills the endpoint only; the
     // provider keeps its name and roles.
@@ -1938,6 +2007,7 @@ def register(mcp) -> None:
     } else if (!presetModel) {
       $('llm-model').value = '';
     }
+    setThinkingLevels(preset.id);
   }
   $('llm-preset').addEventListener('change', applyPreset);
 
@@ -1981,14 +2051,23 @@ def register(mcp) -> None:
       assigned: ROLES.filter(r => data.providers.some(p => p.roles.includes(r))).length,
       roles: ROLES.length,
       overrides: (data.model_overrides || []).length,
-      keyless: data.providers.filter(p => !p.key_set).flatMap(p => p.roles),
+      keyless: data.providers.filter(p => !p.key_set && p.needs_api_key !== false).flatMap(p => p.roles),
     };
     badge('llm', analyst ? (data.providers.length || '') : '!', analyst ? '' : 'bad');
     renderOverview();
   }
 
+  // Test connection waits for the model's answers, which a thinking model
+  // takes its time over (the server ends the check at its own deadline),
+  // so it is not abandoned at the shell's 15 s; Cancel ends the wait. A
+  // test writes nothing, so leaving it is harmless.
+  let TEST_ABORT = null;
+  $('llm-test-cancel').addEventListener('click', () => { if (TEST_ABORT) TEST_ABORT.abort(); });
+
   $('llm-test-btn').addEventListener('click', () => whileBusy($('llm-test-btn'), async () => {
-    showMsg('Testing…', true);
+    showMsg('Testing… a model that thinks can take a minute.', true);
+    TEST_ABORT = new AbortController();
+    $('llm-test-cancel').hidden = false;
     try {
       const result = await AtlasShell.apiPost('config/llm/probe', {
         base_url: $('llm-base-url').value.trim(),
@@ -1998,7 +2077,15 @@ def register(mcp) -> None:
         // are chosen against.
         model: $('llm-model').value.trim(),
         name: $('llm-name').value.trim(),
-      });
+        // The profile the test speaks with: its auth header and headers.
+        preset_id: $('llm-preset').value,
+        ...authFields(),
+      }, { signal: TEST_ABORT.signal });
+      const caps = result.capabilities || {};
+      LAST_TESTED = caps.answered ? {
+        base_url: $('llm-base-url').value.trim(), model: $('llm-model').value.trim(),
+        profile: $('llm-preset').value,
+      } : null;
       if (result.ok) {
         $('llm-model-list').innerHTML = (result.models || []).map(id =>
           `<option value="${esc(id)}"></option>`).join('');
@@ -2009,10 +2096,22 @@ def register(mcp) -> None:
       } else {
         showMsg(`Not reachable: ${result.error || 'HTTP ' + result.status}`, false);
       }
-    } catch (e) { showMsg(e.message, false); }
+    } catch (e) {
+      showMsg(e.cancelled ? 'Test cancelled.' : e.message, !!e.cancelled);
+    } finally {
+      TEST_ABORT = null;
+      $('llm-test-cancel').hidden = true;
+    }
   }));
 
-  function saveProvider() {
+  // Save checks the provider on the server before it writes. It has no
+  // Cancel: leaving the wait would not stop the server, which may still
+  // write after the page said so. Its own bound only ends a wait for a
+  // server that never answers.
+  const SAVE_WAIT_MS = 120000;
+  const SAVE_SLOW_MS = 15000;
+
+  function saveProvider(signal) {
     const name = $('llm-name').value.trim();
     // Roles are set under Roles in a run. A save under the name of an
     // existing provider edits it and keeps the roles it has, however the
@@ -2028,7 +2127,9 @@ def register(mcp) -> None:
       roles: existing ? existing.roles : [],
       thinking: $('llm-thinking').value,
       skip_probe: $('llm-skip-probe').checked,
-    });
+      tested: LAST_TESTED,
+      ...authFields(),
+    }, { signal });
   }
 
   $('llm-save-btn').addEventListener('click', () => whileBusy($('llm-save-btn'), async () => {
@@ -2037,11 +2138,13 @@ def register(mcp) -> None:
       showMsg('The model id cannot be a dashboard role (admin/analyst/viewer). Use a catalogue id from Test connection.', false);
       return;
     }
-    showMsg('Saving…', true);
+    showMsg('Saving: checking the provider…', true);
+    const slow = setTimeout(() => showMsg(
+      'Saving: the server is still checking the provider; do not press Save again.', true), SAVE_SLOW_MS);
     const savedName = $('llm-name').value.trim();
     const savedPreset = PRESETS.find(p => p.id === $('llm-preset').value);
     try {
-      const result = await saveProvider();
+      const result = await saveProvider(AbortSignal.timeout(SAVE_WAIT_MS));
       $('llm-api-key').value = '';
       await loadLlmConfig();
       // A provider is ready for a role, now or later, only with its key. A
@@ -2057,7 +2160,11 @@ def register(mcp) -> None:
       listMsg(`Saved ${savedName}.` + (result.api_key && result.api_key.keyring_failed
         ? ` (The keyring write failed: ${result.api_key.keyring_failed}. The key is in .env instead.)` : '') + keyNote, true);
       loadPrices().catch(e => say('usage-prices-msg', e.message, 'err'));
-    } catch (e) { showMsg(e.message, false); }
+    } catch (e) {
+      showMsg(e.network
+        ? `No answer from the server within ${SAVE_WAIT_MS / 60000} minutes. The save may still finish there: reload the page and check the providers list before saving again.`
+        : e.message, false);
+    } finally { clearTimeout(slow); }
   }));
 
   // ── Thinking levels ─────────────────────────────────────────────────
@@ -2616,7 +2723,7 @@ def register(mcp) -> None:
   const usageMsg = msgFor('usage-msg');
   const usagePricesMsg = msgFor('usage-prices-msg');
   const currencyMsg = msgFor('usage-currency-msg');
-  let USAGE_CURRENCY = 'EUR';
+  let USAGE_CURRENCY = 'USD';
 
   function fmtCost(v, unpriced) {
     const s = Number(v || 0).toLocaleString(AtlasShell.lang(), { minimumFractionDigits: 2, maximumFractionDigits: 4 });
@@ -2643,14 +2750,15 @@ def register(mcp) -> None:
     return `
       <h4>${esc(p.key)} <span class="field-hint">${fmtN(p.runs.length)} runs · ${fmtN(p.input)} in / ${fmtN(p.output)} out · ${fmtCost(p.cost, p.unpriced)}</span></h4>
       <table class="cfg-table">
-        <thead><tr><th>Started</th><th>Case and run</th><th>By</th><th>Models</th><th class="r">Calls</th><th class="r">Input</th><th class="r">Output</th><th class="r">Cost</th></tr></thead>
+        <thead><tr><th>Started</th><th>Case and run</th><th>By</th><th>Models</th><th class="r">Calls</th><th class="r">Lost</th><th class="r">Input</th><th class="r">Output</th><th class="r">Cost</th></tr></thead>
         <tbody>${runs.map(r => `<tr>
           <td class="nowrap" title="${esc(r.started)}">${esc(new Date(r.started).toLocaleString(AtlasShell.lang(), { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }))}</td>
           <td>${esc(r.case_id)}<span class="cell-sub mono nowrap">${esc(r.command)} ${esc(r.run_id)}</span></td>
           <td>${esc(r.started_by || '')}</td>
           <td class="mono nowrap">${r.models.map(m => `<span title="${esc(m)}">${esc(String(m).split('|').pop())}</span>`).join('<br>')}</td>
           <td class="r">${fmtN(r.calls)}${r.unreported ? `<span class="cell-sub">${fmtN(r.unreported)} without usage</span>` : ''}</td>
-          <td class="r">${fmtN(r.input)}<span class="cell-sub">${fmtN(r.cached)} cached</span></td>
+          <td class="r" title="Requests the provider or the connection cut before a reply arrived: no tokens, no cost">${fmtN(r.lost || 0)}</td>
+          <td class="r">${fmtN(r.input)}<span class="cell-sub">${fmtN(r.cached)} cached${r.cache_write ? `, ${fmtN(r.cache_write)} written to cache` : ''}</span></td>
           <td class="r">${fmtN(r.output)}<span class="cell-sub">${fmtN(r.reasoning)} reasoning</span></td>
           <td class="r wrap">${fmtCost(r.cost, r.unpriced)}</td>
         </tr>`).join('')}</tbody>
@@ -2685,7 +2793,7 @@ def register(mcp) -> None:
       period: $('usage-period').value,
       months: $('usage-months').value,
     });
-    USAGE_CURRENCY = data.currency || 'EUR';
+    USAGE_CURRENCY = data.currency || 'USD';
     const imported = data.imported || {};
     if (imported.error) usageMsg(imported.error, false);
     else if (imported.runs) usageMsg(`Added ${fmtN(imported.runs)} earlier ${imported.runs === 1 ? 'run' : 'runs'} from their case folders.`, true);
@@ -2694,7 +2802,8 @@ def register(mcp) -> None:
     $('usage-stats').innerHTML = [
       ['Runs', fmtN(t.runs), `since ${data.since || '–'}`],
       ['Calls', fmtN(t.calls), t.unreported ? `${fmtN(t.unreported)} without usage` : 'all with usage'],
-      ['Input', fmtN(t.input), `${fmtN(t.cached)} cached`],
+      ['Lost', fmtN(t.lost || 0), 'requests cut before a reply'],
+      ['Input', fmtN(t.input), `${fmtN(t.cached)} cached` + (t.cache_write ? `, ${fmtN(t.cache_write)} written to cache` : '')],
       ['Output', fmtN(t.output), 'tokens'],
       ['Cost', esc(fmtCostText(t.cost)), t.unpriced ? `${fmtN(t.unpriced)} calls unpriced` : 'every call priced'],
     ].map(([l, v, s]) => `<div class="stat"><div class="v">${v}</div><div class="l">${l}</div><div class="stat-s">${esc(s)}</div></div>`).join('');
@@ -2745,7 +2854,7 @@ def register(mcp) -> None:
   // ── Prices ──────────────────────────────────────────────────────────
   async function loadPrices() {
     const data = await AtlasShell.api('config/usage/prices');
-    USAGE_CURRENCY = data.currency || 'EUR';
+    USAGE_CURRENCY = data.currency || 'USD';
     // A reload from another group's save keeps edits not yet saved here.
     keepEdits($('usage-currency').closest('.set-group'), () => {
       const cur = $('usage-currency');
@@ -2769,14 +2878,20 @@ def register(mcp) -> None:
     tbody.innerHTML = models.length ? models.map(m => {
       const p = prices[m.key] || {};
       const priced = p.input !== null && p.input !== undefined;
-      const cell = (f) => `<input type="number" min="0" step="0.0001" data-price-key="${esc(m.key)}" data-field="${f}" data-keep="price:${esc(m.key)}:${f}" value="${p[f] === null || p[f] === undefined ? '' : esc(String(p[f]))}" aria-label="${esc(m.model)} ${f} price" />`;
+      const cell = (f, label, step = '0.0001') => `<input type="number" min="0" step="${step}" data-price-key="${esc(m.key)}" data-field="${f}" data-keep="price:${esc(m.key)}:${f}" value="${p[f] === null || p[f] === undefined ? '' : esc(String(p[f]))}" aria-label="${esc(m.model)} ${label}" />`;
       const from = [m.configured ? 'set up under Providers' : '', m.used ? 'used in runs' : ''].filter(Boolean).join(', ');
+      const tier = (f, label) => `<label>${label} ${cell('long_' + f, 'long-prompt ' + label.toLowerCase() + ' price')}</label>`;
       return `<tr>
         <td><span class="mono">${esc(m.model)}</span>${priced ? '' : ' <span class="pill warn">no price</span>'}
-          <span class="cell-sub">${esc(m.provider)}${from ? ' · ' + esc(from) : ''}</span></td>
-        <td class="r">${cell('input')}</td><td class="r hide-small">${cell('cached')}</td><td class="r">${cell('output')}</td>
+          <span class="cell-sub">${esc(m.provider)}${from ? ' · ' + esc(from) : ''}</span>
+          <details class="price-tier"${p.long_over ? ' open' : ''}><summary>Long prompts</summary>
+            <label>Over ${cell('long_over', 'long-prompt length in tokens', '1')} prompt tokens</label>
+            ${tier('input', 'Input')}${tier('cached', 'Cache read')}${tier('cache_write', 'Cache write')}${tier('output', 'Output')}
+          </details></td>
+        <td class="r">${cell('input', 'input price')}</td><td class="r hide-small">${cell('cached', 'cache read price')}</td>
+        <td class="r hide-small">${cell('cache_write', 'cache write price')}</td><td class="r">${cell('output', 'output price')}</td>
         <td class="acts"><button class="btn ghost sm bad" type="button" data-delete-price="${esc(m.key)}" aria-label="Remove ${esc(m.model)} from the price list">Remove</button></td></tr>`;
-    }).join('') : '<tr><td colspan="5" class="placeholder">No model under Providers or in the ledger yet.</td></tr>';
+    }).join('') : '<tr><td colspan="6" class="placeholder">No model under Providers or in the ledger yet.</td></tr>';
     tbody.querySelectorAll('[data-delete-price]').forEach(btn => btn.addEventListener('click', async () => {
       const key = btn.dataset.deletePrice;
       if (!(await confirmInline(btn, 'Remove it and its prices?', 'Remove'))) return;

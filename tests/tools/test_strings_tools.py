@@ -236,7 +236,7 @@ class TestFlossExtract:
 def test_strings_grep_searches_many_patterns_in_one_pass(mock_run, tmp_path):
     """Extraction is the cost on a large input, so patterns share a pass.
 
-    Three indicators over one disk image used to mean six full `strings`
+    Three indicators over one disk image would mean six full `strings`
     runs, each killed by the fixed default timeout.
     """
     from tools.strings_tools import strings_grep
@@ -262,7 +262,8 @@ def test_strings_grep_searches_many_patterns_in_one_pass(mock_run, tmp_path):
     mock_run.reset_mock()
     single = strings_grep(str(target), "OneDrive")
     assert single["pattern"] == "OneDrive"
-    assert mock_run.call_count == 2
+    # The same file again: its kept extraction answers, nothing runs.
+    assert mock_run.call_count == 0 and single["matches_by_pattern"] == {"OneDrive": 2}
 
 
 def test_strings_grep_timeout_scales_with_the_input(mock_run, tmp_path,
@@ -275,6 +276,8 @@ def test_strings_grep_timeout_scales_with_the_input(mock_run, tmp_path,
 
     target = tmp_path / "sample.txt"
     target.write_text("x\n", encoding="utf-8")
+    # Where nothing spills nothing is kept, so each call runs and shows its deadline.
+    monkeypatch.setattr("core.executor._spill_target_dir", lambda: None)
 
     strings_grep(str(target), "x")
     assert mock_run.call_args.kwargs["timeout"] == DEFAULT_TIMEOUT
@@ -283,3 +286,126 @@ def test_strings_grep_timeout_scales_with_the_input(mock_run, tmp_path,
                         lambda _p: 40 * 1024 * 1024 * 1024)
     strings_grep(str(target), "x")
     assert mock_run.call_args.kwargs["timeout"] > DEFAULT_TIMEOUT
+
+
+class TestStringsGrepKeepsOneExtractionPerFile:
+    """Within a case, a strings pass over the same file state, length and
+    encoding runs once: later greps read the kept extraction, and a spilled
+    output is linked into it, not copied, so it is on disk once."""
+
+    @pytest.fixture()
+    def case(self, tmp_path):
+        case = tmp_path / "CASE-A"
+        (case / "analysis" / "tool-output").mkdir(parents=True)
+        (case / "evidence").mkdir()
+        image = case / "evidence" / "usb.dd"
+        image.write_bytes(b"\x00" * 64)
+        with patch("core.executor._spill_target_dir",
+                   return_value=str(case / "analysis" / "tool-output")):
+            yield case, str(image)
+
+    def _spilling_run(self, case, run_ok):
+        def fake(cmd, **kw):
+            wide = "-el" in cmd
+            out = case / "analysis" / "tool-output"
+            spill = out / f"{len(list(out.glob('*.stdout')))}.stdout"
+            spill.write_text(("wide " if wide else "") + "jane.doe@example.com\nnoise line\n", encoding="utf-8")
+            return {**run_ok, "stdout": "preview", "truncated": True, "stdout_file": str(spill)}
+        return fake
+
+    def test_a_second_grep_reads_the_kept_extraction(self, case, mock_run, run_ok):
+        from tools.strings_tools import strings_grep
+        case_dir, image = case
+        mock_run.side_effect = self._spilling_run(case_dir, run_ok)
+        first = strings_grep(image, "example\\.com")
+        assert mock_run.call_count == 2 and first["match_count"] == 2
+        second = strings_grep(image, "noise")
+        assert mock_run.call_count == 2, "the second grep ran strings again"
+        assert second["match_count"] == 2 and second["extraction_reused"] is True
+        kept = sorted((case_dir / "analysis" / "tool-output" / "strings-cache").iterdir())
+        assert len(kept) == 2 and all(k.stat().st_nlink == 2 for k in kept)
+
+    def test_a_changed_file_is_extracted_again_and_its_old_extraction_removed(self, case, mock_run, run_ok):
+        import os
+        from tools.strings_tools import strings_grep
+        case_dir, image = case
+        mock_run.side_effect = self._spilling_run(case_dir, run_ok)
+        strings_grep(image, "example")
+        os.utime(image, ns=(1_950_000_000_000_000_000, 1_950_000_000_000_000_000))
+        strings_grep(image, "example")
+        assert mock_run.call_count == 4
+        assert len(list((case_dir / "analysis" / "tool-output" / "strings-cache").iterdir())) == 2
+
+    def test_a_failed_pass_is_not_kept(self, case, mock_run, run_ok, run_fail):
+        from tools.strings_tools import strings_grep
+        case_dir, image = case
+        mock_run.return_value = run_fail
+        strings_grep(image, "example")
+        strings_grep(image, "example")
+        assert mock_run.call_count == 4
+
+    def test_a_file_rewritten_in_place_with_its_size_and_mtime_kept_is_extracted_again(self, case, mock_run, run_ok):
+        import os
+        import time
+        from tools.strings_tools import strings_grep
+        case_dir, image = case
+        mock_run.side_effect = self._spilling_run(case_dir, run_ok)
+        strings_grep(image, "example")
+        st = os.stat(image)
+        time.sleep(0.01)
+        with open(image, "r+b") as fh:          # same inode, same size
+            fh.write(b"\x01" * 64)
+        os.utime(image, ns=(st.st_atime_ns, st.st_mtime_ns))   # mtime put back, as cp -p does
+        strings_grep(image, "example")
+        assert mock_run.call_count == 4
+
+    def test_a_link_that_fails_for_another_reason_than_another_filesystem_keeps_nothing(
+            self, case, mock_run, run_ok, monkeypatch):
+        import errno
+        from tools import strings_tools
+        case_dir, image = case
+        mock_run.side_effect = self._spilling_run(case_dir, run_ok)
+
+        def fail(code):
+            def link(src, dst):
+                raise OSError(code, "link")
+            return link
+        monkeypatch.setattr(strings_tools.os, "link", fail(errno.EEXIST))
+        strings_tools.strings_grep(image, "example")
+        kept = case_dir / "analysis" / "tool-output" / "strings-cache"
+        assert not [p for p in kept.iterdir()] if kept.exists() else True
+        monkeypatch.setattr(strings_tools.os, "link", fail(errno.EXDEV))
+        strings_tools.strings_grep(image, "example")
+        assert len(list(kept.iterdir())) == 2 and all(p.stat().st_nlink == 1 for p in kept.iterdir())
+
+
+class TestADirectoryIsTheWrongInputKind:
+    """A folder handed to a reader of one file's bytes is refused before
+    the program runs, as the wrong input kind (a gate refusal). The
+    program's exit 1 on a folder read as a tool failure to investigate,
+    and the latch nudged turn after turn for an input of the wrong kind."""
+
+    @pytest.mark.parametrize("name", ["strings_extract", "strings_grep", "hexdump", "xxd_dump",
+                                      "floss_extract", "read_text"])
+    def test_a_directory_is_refused_and_nothing_runs(self, name, mock_run, tmp_path, monkeypatch):
+        import json
+        import tools.strings_tools as st
+        from agent.tool_investigate import classify_tool_result
+        from core.middleware import _app_level_failure
+        monkeypatch.setattr(st.shutil, "which", lambda _n: "/usr/bin/floss")
+        folder = tmp_path / "logs"
+        folder.mkdir()
+        tool = getattr(st, name)
+        r = tool(str(folder), "x") if name == "strings_grep" else tool(str(folder))
+        assert r["success"] is False and r["gate"] == r["failure_class"] == "wrong_input_kind"
+        assert "directory" in r["error"] and not mock_run.called
+        # The chain the refusal rides: the trace records a refusal, not a
+        # failure, and the investigate latch takes no debt from it.
+        assert _app_level_failure(r)[1] == "gate_refusal"
+        assert classify_tool_result(f"strings_{name}", json.dumps(r)) is None
+
+    def test_a_file_is_not_refused(self, mock_run, tmp_path):
+        from tools.strings_tools import hexdump
+        f = tmp_path / "sample.bin"
+        f.write_bytes(b"\x00" * 8)
+        assert hexdump(str(f))["success"] is True and mock_run.called

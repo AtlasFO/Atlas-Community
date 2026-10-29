@@ -125,7 +125,7 @@ class TestMergeDebt:
         assert prune_exhausted_debt(debt) == []
 
     def test_identical_tool_error_exhausts(self):
-        """B6: same disk FS tool_error argv must not retry forever."""
+        """Same disk FS tool_error argv must not retry forever."""
         issue = classify_tool_result(
             "tsk_sigfind",
             "TOOL ERROR: sigfind: invalid block size\n",
@@ -200,3 +200,67 @@ class TestMessages:
         )
         assert "atlas_finish refused" in msg
         assert "open tool-failure investigate item" not in msg
+
+
+def test_a_time_cut_is_the_finish_debt_and_a_display_cut_is_not(monkeypatch):
+    """ATLAS_INCOMPLETE_READ_DEBT: an executor time cut is an
+    incomplete read whichever tool ran it; a display cut of a named tool's
+    output is not finish debt."""
+    import json
+    from agent.tool_investigate import classify_tool_result
+    cut = classify_tool_result("strings_strings_grep", json.dumps(
+        {"success": False, "timed_out": True, "error": "timed out after 300s"}))
+    assert cut and cut["kind"] == "incomplete_scan" and cut["blocking_finish"] is True
+    shown = classify_tool_result("strings_strings_grep", json.dumps({"success": True, "truncated": True}))
+    assert shown is None
+    monkeypatch.setenv("ATLAS_INCOMPLETE_READ_DEBT", "0")
+    assert classify_tool_result("strings_strings_grep", json.dumps(
+        {"success": True, "truncated": True}))["kind"] == "truncated_critical"
+
+
+def test_the_topic_debt_no_longer_blocks_the_report(monkeypatch):
+    from tools._gates import critical_scan_timeout as cst
+    monkeypatch.setattr(cst, "unresolved_critical_scan_timeouts", lambda _e: [{"cmd": "x"}])
+    from agent.loop import Agent
+    assert Agent._critical_scan_debt() == []
+    monkeypatch.setenv("ATLAS_INCOMPLETE_READ_DEBT", "0")
+    assert Agent._critical_scan_debt() == [{"cmd": "x"}]
+
+
+class TestHelperUnavailable:
+    """A helper role that timed out or answered empty is said once and never
+    holds the finish; an evidence tool's time cut stays blocking."""
+
+    _TIMEOUT = ('{"success": false, "error": "Tool exceeded 330s budget — abandoned",'
+                ' "timed_out": true, "tool": "reason_reason_synthesize"}')
+
+    def test_helper_timeout_is_non_blocking(self):
+        for name in ("reason_synthesize", "reason_reason_plan", "dair_assess"):
+            issue = classify_tool_result(name, self._TIMEOUT)
+            assert issue["kind"] == "helper_unavailable", name
+            assert issue["blocking_finish"] is False
+        assert finish_blocking_issues(merge_investigate_debt([], [issue])) == []
+
+    def test_helper_empty_reply_is_non_blocking(self):
+        issue = classify_tool_result(
+            "reason_hypothesize",
+            '{"success": false, "gate": "empty_reason_response", "error": "Model returned empty response"}')
+        assert issue["kind"] == "helper_unavailable" and issue["blocking_finish"] is False
+
+    def test_a_cut_reply_and_an_unavailable_answer_are_helper_failures(self):
+        for gate in ("reply_length_cut", "helper_unavailable"):
+            issue = classify_tool_result(
+                "reason_synthesize", '{"success": false, "gate": "%s", "error": "no usable answer"}' % gate)
+            assert issue["kind"] == "helper_unavailable" and issue["blocking_finish"] is False, gate
+
+    def test_evidence_tool_timeout_stays_blocking(self):
+        issue = classify_tool_result("misc_evtx_filter", self._TIMEOUT.replace("reason_reason_synthesize", "x"))
+        assert issue["kind"] == "incomplete_scan" and issue["blocking_finish"] is True
+        # The deterministic report gate is not a model role.
+        issue = classify_tool_result("reason_pre_report_check", self._TIMEOUT)
+        assert issue["kind"] == "incomplete_scan"
+
+    def test_message_asks_for_a_plain_retry_not_a_narrower_one(self):
+        msg = format_investigate_message([classify_tool_result("reason_synthesize", self._TIMEOUT)])
+        assert "narrower call does not help" in msg and "corrected/narrower" not in msg
+        assert f"after {IDENTICAL_FAIL_LIMIT}" in msg

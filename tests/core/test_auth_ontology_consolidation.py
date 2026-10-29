@@ -6,7 +6,6 @@ import re
 from core.auth_ontology import (
     WINDOWS_AUTH_FAILURE_EIDS,
     WINDOWS_AUTH_SUCCESS_EIDS,
-    auth_tool_hint_regex,
     case_session_auth_intent_regex,
     critical_auth_scan_regex,
     logon_inventory_cmd_regex,
@@ -69,11 +68,9 @@ def test_prose_helpers_track_ontology_tuples():
         assert eid in prose
 
 
-def test_logon_inventory_and_tool_hint_cover_platform_eids():
+def test_logon_inventory_covers_platform_eids():
     inv = logon_inventory_cmd_regex()
-    hint = auth_tool_hint_regex()
     cmd = f"ez.evtxecmd --inc {WINDOWS_AUTH_SUCCESS_EIDS[0]},{WINDOWS_AUTH_FAILURE_EIDS[0]}"
     assert inv.search(cmd)
-    assert hint.search(f"pull {WINDOWS_AUTH_SUCCESS_EIDS[0]} by logon type")
     # Not a parallel hardcoded list — still matches Linux session tools.
     assert inv.search("last -f /var/log/wtmp")

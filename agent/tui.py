@@ -8,6 +8,7 @@ loop only ever talks to the `UI` class.
 """
 from __future__ import annotations
 
+import itertools
 import math
 import os
 import random
@@ -38,7 +39,7 @@ except ImportError:  # pragma: no cover
     HAS_PTK = False
 
 NAME = "Atlas"
-TAGLINE = "Autonomous DFIR agent for malware analysis and rogue-actor attribution"
+TAGLINE = "Autonomous DFIR agent that shows its work"
 LORE = ("Atlas was the Titan tasked with bearing the weight of the sky "
         "so it would not fall. This one bears the weight of the "
         "investigation.")
@@ -60,8 +61,8 @@ ATLAS_TINY = "( ─ ⊕ ─ )"
 # Block-letter wordmark, one string per letter per row, coloured with a neon
 # gradient in the banner. Shown only when the terminal is wide enough.
 WORDMARK = (
-    ("█▀▄▀█", "▄▀█", "█▀█", "▄▀█"),
-    ("█ ▀ █", "█▀█", "█▀▄", "█▀█"),
+    ("▄▀█", "▀█▀", "█  ", "▄▀█", "█▀"),
+    ("█▀█", " █ ", "█▄▄", "█▀█", "▄█"),
 )
 
 # ── Command-keyed animations ─────────────────────────────────────────────────
@@ -148,7 +149,8 @@ THEMES = {
              "border": "bright_cyan", "finish_border": "bright_green",
              "slow": "bright_yellow",
              "wordmark": ("bold bright_cyan", "bold bright_magenta",
-                          "bold bright_green", "bold bright_cyan"),
+                          "bold bright_green", "bold bright_magenta",
+                          "bold bright_cyan"),
              "tool_palette": ("bright_green", "bright_cyan", "bright_magenta",
                               "bright_yellow", "bright_blue")},
     "atlas": {"accent": "bold red", "avatar": "tan", "tool": "green",
@@ -235,24 +237,24 @@ def resolve_live_skin(cli_value: str | None = None) -> str:
 # extra refreshes). 0.1s matches the dashboard's refresh_per_second=10.
 FRAME_SECONDS = 0.1
 
-# Spinner verbs — DFIR work with nightmare-demon flavor.
+# Spinner verbs: the kinds of work a DFIR run does.
 VERBS = (
-    "Haunting the registry",
+    "Parsing the registry",
     "Carving unallocated space",
-    "Chasing ghosts through the shellbags",
-    "Exorcising rootkits",
+    "Walking the shellbags",
+    "Hunting for rootkits",
     "Interrogating hives",
     "Following the USN trail",
-    "Summoning volatile memory",
+    "Reading volatile memory",
     "Cross-examining timestamps",
-    "Stalking lateral movement",
-    "Reading the MFT's entrails",
-    "Sniffing packets",
-    "Digging up deleted files",
-    "Following the scent",
-    "Fetching artifacts",
-    "Chewing on the evidence",
-    "Auditing the nightmare",
+    "Tracing lateral movement",
+    "Decoding the MFT",
+    "Dissecting packets",
+    "Recovering deleted files",
+    "Building the timeline",
+    "Collecting artifacts",
+    "Weighing the evidence",
+    "Auditing the findings",
     "Triaging",
     "Hypothesizing",
     "Correlating",
@@ -441,7 +443,7 @@ class UI:
             body.append(f"{ATLAS_TINY} ", style=THEME["avatar"])
         if avatar is ATLAS_LARGE:  # wide terminal: the neon block wordmark
             for row in WORDMARK:
-                for letter, style in zip(row, THEME["wordmark"]):
+                for letter, style in zip(row, itertools.cycle(THEME["wordmark"])):
                     body.append(letter + " ", style=style)
                 body.append("\n")
         body.append(f"{NAME}", style=THEME["accent"])
@@ -514,7 +516,7 @@ class UI:
                  THEME["tool"] if findings else THEME["dim"])
         if st.get("tokens"):
             part("⌁", f"{st['tokens']:,} tok", THEME["dim"])
-        # Investigation orchestrator stewardship strip (Phase 3).
+        # Investigation orchestrator stewardship strip.
         policy = st.get("ctx_policy")
         if policy:
             room = st.get("ctx_tool_tok")
@@ -984,7 +986,7 @@ class UI:
         box_h = len(hud) + 2
         box_x = (width - box_w) // 2
         # Sit the plaque just under the dish; clamp so it never falls off
-        # the bottom of the fixed canvas (the Live-clipping bug we fixed).
+        # the bottom of the fixed canvas.
         box_y = min(size, height - box_h)
         box_y = max(0, box_y)
         self._paint_hud_box(

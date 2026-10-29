@@ -158,13 +158,13 @@ class TestTheIndexCarriesTheBeliefs:
         from core.call_memo import render_index
         claims = [
             {"id": "C0001", "confidence": "CONFIRMED",
-             "statement": "Account gnome authenticated from 137.30.122.253"},
+             "statement": "Account ftpuser authenticated from 198.51.100.53"},
             {"id": "C0002", "confidence": "LIKELY",
              "statement": "Archive transferred over FTP"},
         ]
         text = render_index(self._memo(), findings=2, claims=claims)
         assert "C0001" in text and "C0002" in text
-        assert "Account gnome authenticated" in text
+        assert "Account ftpuser authenticated" in text
         assert "[CONFIRMED]" in text and "[LIKELY]" in text
 
     def test_a_belief_stays_challengeable(self):

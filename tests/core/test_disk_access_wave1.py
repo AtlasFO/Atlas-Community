@@ -24,7 +24,10 @@ def test_manifest_includes_tsk_mmls():
 def test_disk_open_tool_for_path():
     from core.runtime_capabilities import disk_open_tool_for_path
 
-    assert disk_open_tool_for_path("evidence/x.vmdk") == "img.vmdk_chain_info"
+    # A disk container is read through its raw view like a raw image; the
+    # mount plan names a copy where a host has no views.
+    for name in ("x.vmdk", "x.vhd", "x.vhdx", "x.qcow2", "x.vdi"):
+        assert disk_open_tool_for_path(f"evidence/{name}") == "tsk.mmls", name
     assert disk_open_tool_for_path("analysis/x.raw") == "tsk.mmls"
     assert disk_open_tool_for_path("evidence/x.E01") == "ewf.mount_full_image"
 
@@ -101,7 +104,7 @@ def test_dair_default_orders_prefer_tsk_not_mount():
     from tools.dair import _DEFAULT_WORK_ORDERS
 
     flat = {cue: order for cues, order in _DEFAULT_WORK_ORDERS for cue in cues}
-    assert flat[".vmdk"][0] == "img.vmdk_chain_info"
-    assert "tsk.mmls" in flat[".vmdk"]
+    for cue in (".vmdk", ".vhdx", ".qcow2", ".vdi"):
+        assert flat[cue][0] == "tsk.mmls" and "img.vmdk_export_raw" not in flat[cue], cue
     assert flat[".raw"][0] == "tsk.mmls"
     assert flat[".raw"][0] != "ewf.mount_full_image"

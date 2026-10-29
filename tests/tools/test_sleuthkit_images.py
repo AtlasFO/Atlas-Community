@@ -1,5 +1,7 @@
 """A disk tool called on an image that is not on disk names the images the case has."""
 
+import pytest
+
 
 class TestAMissingImageNamesTheImagesTheCaseHas:
     """A model that writes an export's name from memory gets the case's
@@ -58,10 +60,10 @@ def test_a_second_walk_reuses_the_listings_already_read(tmp_path):
     img = tmp_path / "disk.raw"
     img.write_bytes(b"\x00" * 512)
     listings = {
-        None: "d/d 134-144-4:\tProgram Files\nd/d 3671-144-7:\tDocuments and Settings\n",
-        134: "d/d 11737-144-5:\tLook@LAN\nd/d 9947-144-5:\tCain\n",
-        11737: "r/r 11776-128-3:\tirunin.ini\n",
-        9947: "r/r 9958-128-3:\tAbel.dll\n",
+        None: "d/d 200-144-1:\tProgram Files\nd/d 210-144-1:\tDocuments and Settings\n",
+        200: "d/d 300-144-1:\tToolDir\nd/d 310-144-1:\tSuite\n",
+        300: "r/r 301-128-1:\ttool.ini\n",
+        310: "r/r 311-128-1:\thelper.dll\n",
     }
 
     def run(cmd, **kw):
@@ -70,12 +72,12 @@ def test_a_second_walk_reuses_the_listings_already_read(tmp_path):
 
     fn = getattr(tsk_resolve_path, "fn", tsk_resolve_path)
     with patch("tools.sleuthkit.run", side_effect=run) as mocked:
-        first = fn(str(img), "Program Files/Look@LAN/irunin.ini")
-        second = fn(str(img), "Program Files/Cain/Abel.dll")
-    assert first["success"] and first["inode"] == "11776-128-3"
-    assert second["success"] and second["inode"] == "9958-128-3"
+        first = fn(str(img), "Program Files/ToolDir/tool.ini")
+        second = fn(str(img), "Program Files/Suite/helper.dll")
+    assert first["success"] and first["inode"] == "301-128-1"
+    assert second["success"] and second["inode"] == "311-128-1"
     walked = [int(c.args[0][-1]) if c.args[0][-1].isdigit() else None for c in mocked.call_args_list]
-    assert walked == [None, 134, 11737, 9947]
+    assert walked == [None, 200, 300, 310]
     sleuthkit._LISTINGS.clear()
 
 
@@ -261,3 +263,101 @@ class TestAMountedFilesystemDirectoryIsReadThroughItsDevice:
         run.assert_not_called()
         assert out["success"] is False and out["gate"] == "image_format"
         assert "mounted filesystem" in out["error"] and "raw device" in out["error"]
+
+
+class TestAnAddressOutsideTheFilesystem:
+    """An entry number taken from elsewhere (a timeline built on the original
+    volume, another image, another copy) is outside this filesystem's range.
+    The Sleuth Kit says so with the range's edge; the result says to find the
+    file by its path here, within the 200 characters a failure latch quotes."""
+
+    TOO_LARGE = "Metadata address too large for image (27)"
+
+    @staticmethod
+    def _case(tmp_path, monkeypatch, case_dir=True):
+        import core.paths
+        (tmp_path / ".atlas").mkdir(exist_ok=True)
+        monkeypatch.setattr(core.paths, "active_case_dir",
+                            lambda: str(tmp_path) if case_dir else None)
+        img = tmp_path / "disk.raw"
+        img.write_bytes(b"\x00" * 512)
+        return img
+
+    @staticmethod
+    def _says_resolve(hint):
+        head = hint[:200]
+        return head.startswith("metadata address outside this filesystem's range") \
+            and "tsk.resolve_path" in head and "tsk.fls" in head
+
+    def _icat(self, tmp_path, img, result, **kw):
+        from unittest.mock import patch
+        from tools.sleuthkit import tsk_icat
+        with patch("tools.sleuthkit.run_with_output_file", return_value=dict(result)):
+            return getattr(tsk_icat, "fn", tsk_icat)(str(img), "123456-128-4",
+                                                     str(tmp_path / "out.bin"), **kw)
+
+    def test_icat_points_at_the_files_path(self, tmp_path, monkeypatch):
+        img = self._case(tmp_path, monkeypatch)
+        out = self._icat(tmp_path, img, {"success": False, "stderr": self.TOO_LARGE})
+        assert out["success"] is False and out["stderr"] == self.TOO_LARGE
+        assert self._says_resolve(out["hint"]) and "(last address 27)" in out["hint"]
+
+    def test_without_a_case_directory_it_still_says_so(self, tmp_path, monkeypatch):
+        img = self._case(tmp_path, monkeypatch, case_dir=False)
+        out = self._icat(tmp_path, img, {"success": False, "stderr": self.TOO_LARGE})
+        assert self._says_resolve(out["hint"])
+
+    def test_a_call_without_an_offset_reads_the_remembered_volume(self, tmp_path, monkeypatch):
+        """No offset means the one that worked before, not another volume:
+        the answer is about the address."""
+        from core.mount_plan import note_volume_offset
+        img = self._case(tmp_path, monkeypatch)
+        note_volume_offset(tmp_path, img, 2048)
+        out = self._icat(tmp_path, img, {"success": False, "stderr": self.TOO_LARGE})
+        assert self._says_resolve(out["hint"]) and "different volume" not in out["hint"]
+
+    def test_a_named_other_volume_is_named_first(self, tmp_path, monkeypatch):
+        """Another volume has its own range: the offset that worked comes first."""
+        from core.mount_plan import note_volume_offset
+        img = self._case(tmp_path, monkeypatch)
+        note_volume_offset(tmp_path, img, 2048)
+        out = self._icat(tmp_path, img, {"success": False, "stderr": self.TOO_LARGE},
+                         offset_sectors=63)
+        assert "offset_sectors=2048" in out["hint"] and "different volume" in out["hint"]
+
+    def test_a_successful_extraction_remembers_its_volume(self, tmp_path, monkeypatch):
+        from core.mount_plan import volume_offset
+        img = self._case(tmp_path, monkeypatch)
+        out = self._icat(tmp_path, img, {"success": True, "stderr": ""}, offset_sectors=2048)
+        assert out["success"] and "hint" not in out
+        assert volume_offset(tmp_path, img) == 2048
+
+    @pytest.mark.parametrize("tool, stderr, bound", [
+        ("tsk_istat", "Metadata address is too large for image (27)", "(last address 27)"),
+        ("tsk_ffind", "Inode is too large for image (4097)", "(last address 4097)"),
+        ("tsk_istat", "Metadata address too small for image (2)", "(first address 2)"),
+        ("tsk_fls", "Invalid walk range (fatfs_dir_open_meta: invalid a_addr value: 999999\n)", ""),
+    ])
+    def test_every_tool_that_takes_an_address_says_so(self, tmp_path, monkeypatch,
+                                                      tool, stderr, bound):
+        from unittest.mock import patch
+        import tools.sleuthkit as sk
+        img = self._case(tmp_path, monkeypatch)
+        fn = getattr(getattr(sk, tool), "fn", getattr(sk, tool))
+        with patch("tools.sleuthkit.run", return_value={"success": False, "stdout": "", "stderr": stderr}):
+            out = fn(str(img), offset_sectors=2048, inode=999999)
+        assert self._says_resolve(out["hint"])
+        if bound:
+            assert bound in out["hint"]
+        else:
+            assert "(last address" not in out["hint"] and "(first address" not in out["hint"]
+
+    @pytest.mark.parametrize("stderr", [
+        "Cannot determine file system type",
+        "Attribute not found in file (ntfs_attr: 128-99 not found)",
+        "Error reading image file (raw_read: offset 4096 too large)",
+    ])
+    def test_other_failures_get_no_address_advice(self, tmp_path, monkeypatch, stderr):
+        img = self._case(tmp_path, monkeypatch)
+        out = self._icat(tmp_path, img, {"success": False, "stderr": stderr}, offset_sectors=2048)
+        assert "metadata address" not in str(out.get("hint") or "")

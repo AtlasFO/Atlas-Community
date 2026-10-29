@@ -5,6 +5,36 @@ import os
 import pytest
 from unittest.mock import MagicMock, patch
 
+# The suite never reads the operator's configuration. server.py and the CLI
+# load the repo's .env at import, and on a configured host that hands the
+# tests a live provider and its key: a composer, reason or director call in
+# a test would then reach a real model (and a test asserting the
+# deterministic path would see a composed one). The .env loader is a no-op
+# for the test process, and the provider selection and credentials found in
+# the environment are removed before any test module is imported; a test
+# that needs a provider sets its own.
+import dotenv as _dotenv
+import re as _re
+
+_dotenv.load_dotenv = lambda *a, **k: False
+_OPERATOR_ENV_RE = _re.compile(r"(?:_API_KEY|_AUTH_TOKEN)$|^ATLAS_\w*_PROVIDER$|^(?:LLMHUB|OPENROUTER|REASON|DAIR)_")
+
+
+def _drop_operator_env() -> None:
+    for name in [n for n in os.environ if _OPERATOR_ENV_RE.search(n)]:
+        os.environ.pop(name, None)
+
+
+_drop_operator_env()
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _operator_env_stays_out():
+    """Once more after collection: an import during collection (the GNOME
+    keyring fill in server.py) may have put a credential back."""
+    _drop_operator_env()
+    yield
+
 
 @pytest.fixture(autouse=True)
 def _environment_is_restored_after_every_test():
@@ -32,10 +62,28 @@ def _learned_profiles_stay_out_of_the_users_file(monkeypatch, tmp_path):
     llm._compat_mem.clear()
     llm._compat_dirty.clear()
     llm._compat_loaded = False
+    # Each test is a run of its own: the run-scoped rung memory starts empty.
+    llm._RUN_LEVEL.clear()
+    llm._RUN_NO_RUNG.clear()
     yield
     llm._compat_mem.clear()
     llm._compat_dirty.clear()
     llm._compat_loaded = False
+    llm._RUN_LEVEL.clear()
+    llm._RUN_NO_RUNG.clear()
+
+
+@pytest.fixture(autouse=True)
+def _provider_profiles_are_the_shipped_ones(monkeypatch, tmp_path):
+    """The operator's own provider profiles (provider_profiles.local/) never
+    reach a test: every test reads the shipped folder and an empty user
+    folder, and the catalogue is read afresh."""
+    from core import provider_profiles
+    monkeypatch.setenv(provider_profiles.DIR_ENV, str(tmp_path / "provider_profiles.local"))
+    monkeypatch.delenv(provider_profiles.HASH_ENV, raising=False)
+    provider_profiles._catalog = None
+    yield
+    provider_profiles._catalog = None
 
 
 @pytest.fixture(autouse=True)
@@ -221,7 +269,7 @@ def shape_log_mock(mock_log):
     which the gate iterates.
 
     This shapes only what the gates read. Assertions on recording calls
-    (record_agent_message and friends) keep working as before.
+    (record_agent_message and friends) keep working.
     """
     from core.deferred_intents import (
         DEFERRED_BACKLOG_CAP,
@@ -239,6 +287,10 @@ def shape_log_mock(mock_log):
     # No active case: the case-path gate only rewrites relative paths, and
     # these tests pass absolute ones or none at all.
     mock_log.case_dir.return_value = None
+    # The work order: no items, nothing ready.
+    mock_log.work_items.return_value = []
+    mock_log.shortest_ready_call.return_value = ""
+    mock_log.close_items_for_call.return_value = []
     return mock_log
 
 
@@ -286,3 +338,38 @@ def no_privileged_kill(monkeypatch):
 
     monkeypatch.setattr(_pk, "_run", _refused)
     return calls
+
+
+@pytest.fixture(autouse=True)
+def no_raw_views(monkeypatch):
+    """No test starts a qemu-storage-daemon by accident: on a host with qemu
+    and FUSE (the test VM) a plan built over a test's .vmdk would probe and
+    export it. A test of the views switches them on and fakes the host."""
+    monkeypatch.setenv("ATLAS_RAW_VIEWS", "0")
+
+
+@pytest.fixture
+def todays_dair(monkeypatch):
+    """The DAIR window and its deferral, with ATLAS_DAIR_NO_DEFER off."""
+    monkeypatch.setenv("ATLAS_DAIR_NO_DEFER", "0")
+
+
+@pytest.fixture
+def todays_coverage(monkeypatch):
+    """The coverage floor and its blockers, with ATLAS_COVERAGE_HONESTY off."""
+    monkeypatch.setenv("ATLAS_COVERAGE_HONESTY", "0")
+
+
+@pytest.fixture
+def todays_pivots(monkeypatch):
+    """The pivot ledger's owed searches, with ATLAS_ESTATE_COUNT off."""
+    monkeypatch.setenv("ATLAS_ESTATE_COUNT", "0")
+
+
+@pytest.fixture
+def todays_report_check(monkeypatch):
+    """The report check with the work-order switches off: the scenario-shaped checks,
+    the reviewer's blockers and the UNRESOLVABLE hatch, the coverage floor."""
+    monkeypatch.setenv("ATLAS_REPORT_CHECK_NO_SCENARIO", "0")
+    monkeypatch.setenv("ATLAS_BLOCKER_ITEMS", "0")
+    monkeypatch.setenv("ATLAS_COVERAGE_HONESTY", "0")

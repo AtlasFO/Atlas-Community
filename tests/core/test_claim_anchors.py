@@ -48,11 +48,11 @@ def test_the_event_id_shorthand_is_an_anchor():
 
 
 def test_a_build_number_inside_an_address_is_not_a_second_anchor():
-    """"194.61.24.102" used to yield "61.24.102" as well: a tail no output
+    """"198.51.100.102" used to yield "51.100.102" as well: a tail no output
     prints on its own, so the finding could never be cited."""
-    anchors = _claim_anchors({"statement": "beaconing to 194.61.24.102 over 443"})
-    assert "194.61.24.102" in anchors
-    assert "61.24.102" not in anchors
+    anchors = _claim_anchors({"statement": "beaconing to 198.51.100.102 over 443"})
+    assert "198.51.100.102" in anchors
+    assert "51.100.102" not in anchors
 
 
 def test_prose_after_a_cue_is_not_an_anchor():

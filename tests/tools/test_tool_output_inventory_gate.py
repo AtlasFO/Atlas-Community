@@ -19,61 +19,61 @@ def _ctx(description, tier="LIKELY"):
 
 
 INVENTORIES = (
-    "Amcache.hve (call 20) parsed: 292 file entries, 97 shortcuts, 351 drive "
-    "binaries, 11 device containers, 131 device PnPs. Prefetch (call 21): 160 of "
-    "161 .pf files parsed (CHROME.EXE-CCF9F3F5.pf corrupted/unreadable). Both "
-    "confirm extensive program execution on the system including Chrome browser.",
-    "Security.evtx (call 73) parsed for 2018-03-25 to 2018-04-07: 7,137 total "
-    "records, 1,622 in window. 827 logon events (4624), 789 privilege elevation "
-    "events (4672), 3 account creation events (4720), 3 network logon events "
-    "(4728). Log coverage: 2018-03-27 09:15:58 to 2018-04-06 12:46:32 UTC.",
+    "Amcache.hve (call 20) parsed: 418 file entries, 63 shortcuts, 207 drive "
+    "binaries, 9 device containers, 88 device PnPs. Prefetch (call 21): 140 of "
+    "141 .pf files parsed (BROWSER.EXE-1A2B3C4D.pf corrupted/unreadable). Both "
+    "confirm extensive program execution on the system including the browser.",
+    "Security.evtx (call 73) parsed for 2031-03-05 to 2031-03-16: 5,214 total "
+    "records, 1,307 in window. 612 logon events (4624), 540 privilege elevation "
+    "events (4672), 2 account creation events (4720), 4 network logon events "
+    "(4728). Log coverage: 2031-03-06 08:02:11 to 2031-03-15 17:40:05 UTC.",
     "Processed the MFT listing: 41,220 rows, 2,113 deleted entries, 88 ADS records.",
     # a Hayabusa-shaped, a Plaso-shaped and a German inventory
     "Hayabusa processed the winevt tree: 71 high alerts, 402 medium alerts and "
     "1,930 low alerts across 12 channels.",
     "Plaso ingested the image: 4,882,101 events, 27 parsers, 3 warnings.",
-    "Amcache.hve geparst: 292 Dateieinträge, 97 Verknüpfungen, 351 Treiber.",
+    "Amcache.hve geparst: 418 Dateieinträge, 63 Verknüpfungen, 207 Treiber.",
     # a subject that names a user or a tool binary is still an inventory
     "NTUSER.DAT for user jdoe parsed: 4,512 keys and 23 MRU lists.",
-    "PECmd.exe processed the Prefetch folder: 160 files, 1 error.",
+    "PECmd.exe processed the Prefetch folder: 140 files, 1 error.",
 )
 
 FINDINGS = (
     # counts on the way to a conclusion, opening on the case
     "Attribution: the laptop is owned and used by the single local account "
     "jdoe (SID S-1-5-21-1111111111-2222222222-3333333333-1001). Security.evtx "
-    "(call 73) shows 827 interactive logon events (4624) for this account in the "
+    "(call 73) shows 612 interactive logon events (4624) for this account in the "
     "window and none for any other account.",
-    "Memory image netscan shows 289 TCPv4 connections to port 443 (call 222), of "
-    "which 3 reference AWS addresses: 54.239.16.35 (twice) and 51.140.98.69 (once).",
-    "USBKEY.dd is a FAT16 filesystem (mkdosfs, 506848 sectors, 8 sectors/cluster) "
+    "Memory image netscan shows 214 TCPv4 connections to port 443 (call 222), of "
+    "which 3 reference cloud addresses: 203.0.113.35 (twice) and 198.51.100.69 (once).",
+    "STICK01.dd is a FAT16 filesystem (mkdosfs, 401216 sectors, 4 sectors/cluster) "
     "with no partition table, consistent with a reformatted USB key.",
-    "CONFIRMED initial access to DC01 via RDP brute force from 194.61.24.102: 95 "
-    "failed logons (4625, LogonType 3) between 02:19 and 02:21 UTC, then one "
-    "successful logon (4624) as Administrator at 02:21:47.",
+    "CONFIRMED initial access to DC01 via RDP brute force from 203.0.113.44: 68 "
+    "failed logons (4625, LogonType 3) between 04:10 and 04:13 UTC, then one "
+    "successful logon (4624) as Administrator at 04:13:22.",
     # a parse that failed is a limitation, not a tally
-    "RM#3 (UDF CD-R) E01 image cannot be parsed by TSK fls - it reports possible "
-    "encryption (high entropy 7.65); UDF is not supported by TSK.",
+    "MEDIA#3 (UDF DVD-R) E01 image cannot be parsed by TSK fls - it reports possible "
+    "encryption (high entropy 7.81); UDF is not supported by TSK.",
     "NTUSER.DAT for user jdoe is in a dirty state with no transaction logs; "
     "RECmd aborted parsing (0 key/value pairs recovered, call 23), so the "
     "registry-based user activity artifacts from this hive are unavailable.",
     # a parse verb with counts on the way to a conclusion, no colon list
-    "Security.evtx parsed for the window shows 95 failed logons (4625) and 1 "
-    "successful logon (4624) from 194.61.24.102",
+    "Security.evtx parsed for the window shows 68 failed logons (4625) and 1 "
+    "successful logon (4624) from 203.0.113.44",
     "Parsed $UsnJrnl shows 1,203 files deleted from C:\\Users\\jdoe\\Documents "
     "between 02:10 and 02:14 and 2 .zip files created in C:\\Windows\\Temp.",
     "Parsing SRUM shows chrome.exe sent 1.2 GB over 14 network connections in 3 "
-    "sessions to 52.84.1.10",
+    "sessions to 198.51.100.10",
     "Parsed the Security log and found that the attacker account 'hacker' was "
-    "created at 02:31, and used for 3 RDP logons and 2 network logon events "
-    "from 194.61.24.102.",
+    "created at 04:31, and used for 3 RDP logons and 2 network logon events "
+    "from 203.0.113.44.",
     # the attacker did the processing
     "The ransomware binary processed 12,000 files on the F: share and 300 files "
     "on C: before the note was dropped.",
     "WinRAR processed 1,204 files from the Projects share into 3 archives; 2 "
     "archive files were then copied to E:\\.",
     # addresses and versions are not counts
-    "Amcache parsed: chrome.exe version 65.0.3325.181 connected to 194.61.24.102",
+    "Amcache parsed: chrome.exe version 98.0.4758.102 connected to 203.0.113.44",
     # the clause's subject did the processing: an act, even as a colon list
     "The attacker processed the share: 12,000 files encrypted and 3 ransom notes dropped.",
 )
@@ -96,11 +96,11 @@ class TestTheRefusal:
     def test_the_inventory_is_refused_and_told_where_it_goes(self):
         out = toi.check(_ctx(INVENTORIES[0]))
         assert out and out["gate"] == toi.GATE and out["success"] is False
-        assert "292 file entries" in out["error"]
+        assert "418 file entries" in out["error"]
         assert "misc.record_agent_message" in out["error"]
-        assert out["counts"] == ["292 file entries", "97 shortcuts", "351 drive binaries",
-                                 "11 device containers", "131 device PnPs"]
-        assert toi.tally(INVENTORIES[1])[:2] == ["7,137 total records", "1,622 in window"]
+        assert out["counts"] == ["418 file entries", "63 shortcuts", "207 drive binaries",
+                                 "9 device containers", "88 device PnPs"]
+        assert toi.tally(INVENTORIES[1])[:2] == ["5,214 total records", "1,307 in window"]
 
     def test_a_finding_passes(self):
         for text in FINDINGS:
@@ -130,11 +130,11 @@ class TestRecordFindingReturnsTheRefusalAlone:
         log.record_dair_call("Analyze", "", False, "", "", "stay", "")
         cid = log.record_tool_call("<py>:ez_amcache", True, False, 0, 0,
                                    evidence_ref="mnt/host/fs/Windows/AppCompat/Programs/Amcache.hve",
-                                   stdout_excerpt="292 file entries, 97 shortcuts")
+                                   stdout_excerpt="418 file entries, 63 shortcuts")
         with patch("core.execution_log.log", log):
             r = misc.record_finding(description=INVENTORIES[0], confidence="CONFIRMED",
                                     source="ez.amcache", linked_call_id=cid,
-                                    input_call_ids=[cid], supporting_evidence="292 entries",
+                                    input_call_ids=[cid], supporting_evidence="418 entries",
                                     host="HOST1")
         assert r["success"] is False and r["gate"] == toi.GATE
         assert "also_refused_by" not in r and "repair_hint" not in r and "evaluation" not in r
@@ -152,7 +152,7 @@ class TestRecordFindingReturnsTheRefusalAlone:
         log.record_dair_call("Analyze", "", False, "", "", "stay", "")
         cid = log.record_tool_call("<py>:ez_amcache", True, False, 0, 0,
                                    evidence_ref="mnt/host/fs/Windows/AppCompat/Programs/Amcache.hve",
-                                   stdout_excerpt="292 file entries, 97 shortcuts")
+                                   stdout_excerpt="418 file entries, 63 shortcuts")
         with patch("core.execution_log.log", log):
             r = misc.record_agent_message("Parsed the execution artifacts.", input_call_ids=[cid],
                                           findings=[{"description": INVENTORIES[0],

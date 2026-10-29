@@ -218,6 +218,12 @@ class TestAppendToBrief:
             case_admin.append_to_brief(cases_root, "Nope", requests=["x"])
 
 
+def _save(cases_root, case, text):
+    """A Brief save as the editor makes it: with the version it read."""
+    return case_admin.write_case_md(cases_root, case, text,
+                                    case_admin.read_case_md(cases_root, case)["version"])
+
+
 class TestCaseMd:
     def test_reads_the_created_template(self, cases_root):
         case_admin.create_case(cases_root, "MD-CASE-1")
@@ -231,43 +237,44 @@ class TestCaseMd:
 
     def test_write_then_read_round_trips(self, cases_root):
         case_admin.create_case(cases_root, "MD-CASE-2")
-        case_admin.write_case_md(cases_root, "MD-CASE-2", "# Updated brief\n")
+        _save(cases_root, "MD-CASE-2", "# Updated brief\n")
         result = case_admin.read_case_md(cases_root, "MD-CASE-2")
         assert result["content"] == "# Updated brief\n"
 
     def test_write_refuses_nonexistent_case(self, cases_root):
         with pytest.raises(case_admin.CaseAdminError, match="no such case"):
-            case_admin.write_case_md(cases_root, "GHOST-MD-2", "x")
+            case_admin.write_case_md(cases_root, "GHOST-MD-2", "x", "0" * 64)
 
     def test_write_leaves_no_tmp_file_behind(self, cases_root):
         d = case_admin.create_case(cases_root, "MD-CASE-3")
-        case_admin.write_case_md(cases_root, "MD-CASE-3", "content")
-        assert not (d / "CASE.md.tmp").exists()
+        _save(cases_root, "MD-CASE-3", "content")
+        assert not [p.name for p in d.iterdir() if p.name.endswith(".tmp")]
 
     def test_a_code_block_that_never_closes_is_reported_on_save_and_read(self, cases_root):
         case_admin.create_case(cases_root, "MD-CASE-6")
         broken = ("**Case ID:** MD-CASE-6\n\n## Notes\n```\nraw output\n\n"
                   "## Investigation Requests\n- Was data taken from CORP-FS01?\n")
-        saved = case_admin.write_case_md(cases_root, "MD-CASE-6", broken)
+        saved = _save(cases_root, "MD-CASE-6", broken)
         assert saved["success"] and saved["unclosed_fence"]["line"] == 4
         assert saved["unclosed_fence"]["hidden_requests"] == 1
         assert case_admin.read_case_md(cases_root, "MD-CASE-6")["unclosed_fence"]["line"] == 4
         fixed = broken.replace("raw output\n", "raw output\n```\n")
-        assert case_admin.write_case_md(cases_root, "MD-CASE-6", fixed)["unclosed_fence"] is None
+        assert _save(cases_root, "MD-CASE-6", fixed)["unclosed_fence"] is None
         assert case_admin.read_case_md(cases_root, "MD-CASE-6")["unclosed_fence"] is None
 
     def test_missing_case_md_reports_not_exists(self, cases_root):
         d = case_admin.create_case(cases_root, "MD-CASE-4")
         (d / "CASE.md").unlink()
         result = case_admin.read_case_md(cases_root, "MD-CASE-4")
-        assert result == {"exists": False, "content": ""}
+        assert result["exists"] is False and result["content"] == ""
+        assert result["unclosed_fence"] is None and len(result["version"]) == 64
 
     def test_edited_requests_appear_in_task_store_immediately(self, cases_root):
         # Same regression as create_case's version, for the edit-then-save
         # path in the dashboard's CASE.md editor.
         from core.investigation_tasks import load_tasks
         d = case_admin.create_case(cases_root, "MD-CASE-5")
-        case_admin.write_case_md(
+        _save(
             cases_root, "MD-CASE-5",
             "**Case ID:** MD-CASE-5\n\n"
             "## Investigation Requests\n"

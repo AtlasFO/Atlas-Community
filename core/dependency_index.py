@@ -171,6 +171,11 @@ def nodes_for_dirty_evidence(
 
 
 _DIRTY_PATH_CAP = 20
+# A recount's stamp keeps every image it names: a re-validation may read any
+# of them (core.coverage_ledger.coverage_review_hits).
+_UNCAPPED_STAMP_KEYS = frozenset({"recounted"})
+# A review reason, and the reasons a belief questioned again gathers.
+_REASON_CAP = 1000
 
 
 def dirty_hits(
@@ -204,9 +209,23 @@ def _merge_stamp(dst: dict[str, list[str]] | None, src: dict[str, list[str]] | N
     for k, v in (src or {}).items():
         merged = out.setdefault(k, [])
         for p in v:
-            if p not in merged and len(merged) < _DIRTY_PATH_CAP:
+            if p not in merged and (k in _UNCAPPED_STAMP_KEYS or len(merged) < _DIRTY_PATH_CAP):
                 merged.append(p)
     return {k: v for k, v in out.items() if v}
+
+
+# What a review raised by a recount says in the report, where the coverage
+# the belief states would otherwise stand as a gap.
+COVERAGE_REVIEW_NOTE = ("needs review — the coverage it rests on was corrected by the "
+                        "recount from the trace")
+
+
+def coverage_corrected(node: dict[str, Any]) -> bool:
+    """Is ``node`` under review because a recount contradicts the coverage
+    it states, or that one of its bases states? ``node`` is a claim-graph
+    node or a report section's copy of one, which carries the answer."""
+    return node.get("status") == "needs_review" and bool(
+        node.get("coverage_corrected") or (node.get("invalidated_by") or {}).get("recounted"))
 
 
 def mark_needs_review(
@@ -216,6 +235,7 @@ def mark_needs_review(
     reason: str = "upstream evidence changed",
     dirty: dict[str, list[str]] | None = None,
     hits: dict[str, dict[str, list[str]]] | None = None,
+    reasons: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Set status=needs_review on current beliefs (never silent supersede).
 
@@ -223,9 +243,11 @@ def mark_needs_review(
     removed paths that hit it, stamped on the node as ``invalidated_by`` so
     a re-validation can be held to a read of what changed for it; ``dirty``
     (the whole scan's diff) is the stamp for a node ``hits`` does not name.
-    A node already under review that is marked again merges the new paths
-    and takes the new time. A node marked through a ``derived_from`` edge
-    inherits its bases' paths and carries the
+    ``reasons`` gives a node its own reason instead of ``reason``; a node
+    marked through a base takes the base's. A node already under review that
+    is marked again merges the new paths, takes the new time and adds a
+    reason it does not carry yet. A node marked through a ``derived_from``
+    edge inherits its bases' paths and carries the
     parents it was marked for in ``invalidated_via``; a node marked
     directly carries none, and a direct mark drops the stamp, because the
     node is then questioned in its own right and not only through its
@@ -254,10 +276,13 @@ def mark_needs_review(
             return _merge_stamp({}, own)
         return dict(by)
 
+    def _reason_for(nid: str) -> str:
+        return (reasons or {}).get(nid) or reason
+
     def _mark(n: dict[str, Any], *, via: list[str] | None,
-              stamp: dict[str, list[str]] | None) -> None:
+              stamp: dict[str, list[str]] | None, why: str) -> None:
         n["status"] = "needs_review"
-        n["invalidation_reason"] = reason[:500]
+        n["invalidation_reason"] = why[:_REASON_CAP]
         n["invalidated_at"] = now
         n["updated_at"] = now
         for stale in ("revalidated_at", "revalidation_call_ids", "invalidated_via", "invalidated_by"):
@@ -279,16 +304,20 @@ def mark_needs_review(
             continue
         if st in CURRENT_BELIEF_STATUSES or st == "needs_review":
             if st != "needs_review":
-                _mark(node, via=None, stamp=_stamp_for(nid))
+                _mark(node, via=None, stamp=_stamp_for(nid), why=_reason_for(nid))
                 marked.append(nid)
             else:
                 # Questioned again, now in its own right: the new paths join
-                # the stamp and the review's time moves, so a read made
-                # between the two changes no longer passes.
+                # the stamp, the review's time moves, so a read made between
+                # the two changes no longer passes, and the new reason joins
+                # the old.
                 node.pop("invalidated_via", None)
                 node["invalidated_by"] = _merge_stamp(node.get("invalidated_by"), _stamp_for(nid))
                 if not node["invalidated_by"]:
                     node.pop("invalidated_by", None)
+                old, why = str(node.get("invalidation_reason") or ""), _reason_for(nid)
+                if why and why not in old:
+                    node["invalidation_reason"] = (f"{old}; {why}" if old else why)[:_REASON_CAP]
                 node["invalidated_at"] = now
                 node["updated_at"] = now
                 touched = True
@@ -315,7 +344,8 @@ def mark_needs_review(
             src = (graph.get("nodes") or {}).get(edge.get("from")) or {}
             n = (graph.get("nodes") or {}).get(tgt)
             if n and n.get("status") in CURRENT_BELIEF_STATUSES:
-                _mark(n, via=[str(edge.get("from"))], stamp=src.get("invalidated_by"))
+                _mark(n, via=[str(edge.get("from"))], stamp=src.get("invalidated_by"),
+                      why=_reason_for(str(edge.get("from"))))
                 graph["nodes"][tgt] = n
                 if tgt not in marked_set:
                     marked.append(tgt)

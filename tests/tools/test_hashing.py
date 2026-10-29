@@ -422,14 +422,14 @@ Acquiry information
 \tCase number:\t\t1
 Media information
 \tMedia type:\t\tfixed disk
-\tNumber of sectors:\t9514260
-\tMedia size:\t\t4.5 GiB (4871301120 bytes)
+\tNumber of sectors:\t8388608
+\tMedia size:\t\t4.0 GiB (4294967296 bytes)
 
 Digest hash information
-\tMD5:\t\t\taee4fcd9301c03b3b054623ca261959a
+\tMD5:\t\t\t3f1c9a7e5b2d4c6081f2a3b4c5d6e7f8
 """
-EWFVERIFY_OK = """MD5 hash stored in file:\t\taee4fcd9301c03b3b054623ca261959a
-MD5 hash calculated over data:\t\taee4fcd9301c03b3b054623ca261959a
+EWFVERIFY_OK = """MD5 hash stored in file:\t\t3f1c9a7e5b2d4c6081f2a3b4c5d6e7f8
+MD5 hash calculated over data:\t\t3f1c9a7e5b2d4c6081f2a3b4c5d6e7f8
 
 ewfverify: SUCCESS
 """
@@ -465,9 +465,9 @@ class TestEwfAcquisition:
         with patch("tools.hashing.run", side_effect=self._run()) as run:
             r = verify_evidence_hash(str(img))
         assert r["success"] and r["full_hash"] is True
-        assert r["acquisition_hashes"] == {"md5": "aee4fcd9301c03b3b054623ca261959a"}
+        assert r["acquisition_hashes"] == {"md5": "3f1c9a7e5b2d4c6081f2a3b4c5d6e7f8"}
         assert r["acquisition_verified"] is True
-        assert r["media_size_bytes"] == 4871301120
+        assert r["media_size_bytes"] == 4294967296
         assert [c.args[0][0] for c in run.call_args_list] == ["ewfinfo", "ewfverify"]
 
     def test_a_mismatch_is_reported_as_false(self, tmp_path):
@@ -486,11 +486,11 @@ class TestEwfAcquisition:
 
     def test_media_above_the_policy_is_read_but_not_rehashed(self, tmp_path, monkeypatch):
         import core.paths
-        monkeypatch.setattr(core.paths, "FULL_HASH_MAX_GB", 1)   # the segment file is tiny, the media 4.5 GB
+        monkeypatch.setattr(core.paths, "FULL_HASH_MAX_GB", 1)   # the segment file is tiny, the media 4.0 GB
         img = tmp_path / "notebook.E01"; img.write_bytes(b"EVF" * 100)
         with patch("tools.hashing.run", side_effect=self._run()) as run:
             r = verify_evidence_hash(str(img))
-        assert r["acquisition_hashes"]["md5"].startswith("aee4")
+        assert r["acquisition_hashes"]["md5"].startswith("3f1c")
         assert r["acquisition_verified"] is None and "ATLAS_FULL_HASH_MAX_GB" in r["acquisition_note"]
         assert [c.args[0][0] for c in run.call_args_list] == ["ewfinfo"]
         with patch("tools.hashing.run", side_effect=self._run()) as run:
@@ -513,4 +513,99 @@ class TestEwfAcquisition:
                 patch("tools.hashing.run", side_effect=self._run()):
             verify_evidence_hash(str(img))
         entry = [e for e in l._entries if e.get("tool") == "hash_verify_evidence_hash"][-1]
-        assert "acquisition_md5=aee4fcd9301c03b3b054623ca261959a (verified by ewfverify)" in entry["conclusion"]
+        assert "acquisition_md5=3f1c9a7e5b2d4c6081f2a3b4c5d6e7f8 (verified by ewfverify)" in entry["conclusion"]
+
+
+class TestHashDirectoryCacheAndBatches:
+    """hash_directory fills and reads the stat-keyed cache (saved once per
+    call), records into the hash index in batches, and summarises a large
+    folder's reply with a manifest. Invented files only."""
+
+    @pytest.fixture(autouse=True)
+    def isolate(self, tmp_path, monkeypatch):
+        import tools.hashing as h
+        monkeypatch.setattr(h, "_HASH_CACHE_PATH", str(tmp_path / "cache" / "hash_cache.json"))
+        monkeypatch.setattr(h, "_HASH_CACHE", None)
+        case = tmp_path / "CASE-A"
+        (case / "analysis").mkdir(parents=True)
+        (case / ".atlas").mkdir()
+        monkeypatch.setattr(h, "_case_dir", lambda: str(case))
+        self.case = case
+        yield
+        monkeypatch.setattr(h, "_HASH_CACHE", None)
+
+    def _folder(self, tmp_path, n):
+        d = tmp_path / "carve"
+        d.mkdir()
+        for i in range(n):
+            (d / f"f{i:04d}.bin").write_bytes(f"invented {i}".encode())
+        return d
+
+    def test_the_folder_pass_fills_the_cache_and_reads_it_on_a_repeat(self, tmp_path):
+        import tools.hashing as h
+        d = self._folder(tmp_path, 3)
+        saves = []
+        real = h._save_hash_cache
+        with patch.object(h, "_save_hash_cache", side_effect=lambda c: (saves.append(1), real(c))):
+            r1 = hash_directory(str(d))
+            r2 = hash_directory(str(d))
+        assert r1["cache_hits"] == 0 and r2["cache_hits"] == 3 and len(saves) == 2     # once per call
+        assert [x["sha256"] for x in r1["hashes"]] == [x["sha256"] for x in r2["hashes"]]
+        assert hash_file(str(d / "f0000.bin"))["cache_hit"] is True        # the folder's pass served it
+        assert hash_directory(str(d), algorithm="md5")["cache_hits"] == 3  # the pass kept all three digests
+
+    def test_the_hash_index_is_written_in_batches(self, tmp_path, monkeypatch):
+        import tools.hashing as h
+        from core import hash_index
+        d = self._folder(tmp_path, 5)
+        monkeypatch.setattr(h, "_RECORD_BATCH", 2)
+        calls = []
+        real = hash_index.record
+        monkeypatch.setattr(hash_index, "record", lambda c, rows: (calls.append(len(rows)), real(c, rows))[1])
+        r = hash_directory(str(d))
+        assert r["file_count"] == 5 and calls == [2, 2, 1]
+        assert len(hash_index._load(str(self.case))) == 5
+
+    def test_a_large_folder_reply_is_summarised_and_its_rows_go_to_a_manifest(self, tmp_path, monkeypatch):
+        import tools.hashing as h
+        d = self._folder(tmp_path, 5)
+        (d / "copy.bin").write_bytes(b"invented 0")
+        monkeypatch.setattr(h, "_INLINE_ROWS", 3)
+        monkeypatch.setattr(h, "_INLINE_HEAD", 2)
+        r = hash_directory(str(d))
+        assert r["file_count"] == 6 and len(r["hashes"]) == 2 and r["hashes_omitted"] == 4
+        assert r["manifest"].startswith(str(self.case / "analysis" / "hashes")) and "the first 2 rows" in r["note"]
+        with open(r["manifest"], newline="") as f:
+            assert len(list(csv.DictReader(f))) == 6
+        # record() marks the later of a pair (the first was recorded before its copy existed).
+        names = {os.path.basename(x) for x in r["identical_groups"][0]["paths"]}
+        assert r["identical_files"] == 1 and names == {"copy.bin", "f0000.bin"}
+        again = hash_directory(str(tmp_path / "carve"), recursive=False, algorithm="sha1")
+        assert "hashes_omitted" in again                          # the cap applies by count, not algorithm
+        assert r["identical_groups_omitted"] == 0
+        twin = tmp_path / "other" / "carve"                       # the same basename under another parent
+        twin.mkdir(parents=True)
+        (twin / "x.bin").write_bytes(b"invented x")
+        for i in range(4):
+            (twin / f"y{i}.bin").write_bytes(f"invented y{i}".encode())
+        assert hash_directory(str(twin))["manifest"] != r["manifest"]
+
+    def test_the_cache_key_names_the_inode_and_the_ctime(self, tmp_path):
+        import tools.hashing as h
+        f = tmp_path / "a.bin"
+        f.write_bytes(b"invented")
+        st = os.stat(f)
+        key = h._cache_key(st, str(f))
+        assert key.split("|")[1:] == [str(st.st_dev), str(st.st_ino), str(st.st_size),
+                                       str(int(st.st_mtime)), str(int(st.st_ctime))]
+
+    def test_identical_groups_are_cut_with_a_count(self, tmp_path, monkeypatch):
+        import tools.hashing as h
+        d = tmp_path / "carve"
+        d.mkdir()
+        for i in range(22):
+            (d / f"a{i:02d}.bin").write_bytes(f"invented {i}".encode())
+            (d / f"b{i:02d}.bin").write_bytes(f"invented {i}".encode())
+        monkeypatch.setattr(h, "_INLINE_ROWS", 3)
+        r = hash_directory(str(d))
+        assert len(r["identical_groups"]) == 20 and r["identical_groups_omitted"] == 2

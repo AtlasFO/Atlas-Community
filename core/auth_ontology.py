@@ -18,6 +18,12 @@ EVENT_AUTH_SUCCESS = "auth.success"
 EVENT_AUTH_FAILURE = "auth.failure"
 
 # ── Windows platform adapter ─────────────────────────────────────────────────
+#
+# Platform knowledge, not case knowledge: the event ids below are the meaning
+# Microsoft documents for the Windows Security log (the "Audit logon" and
+# "Audit other logon/logoff events" entries of its security auditing event
+# reference), and the legacy numbering the same reference gives for
+# Windows NT 4.0 to Server 2003. A parser classifying a record reads them.
 
 WINDOWS_AUTH_SUCCESS_EIDS = ("4624", "4778")
 WINDOWS_AUTH_FAILURE_EIDS = ("4625",)
@@ -117,11 +123,6 @@ _NEG_WORD = re.compile(
     re.IGNORECASE,
 )
 
-_SESSION_SEARCH_CMD = re.compile(
-    rf"security\.evtx|security_logons|\b(?:{eid_alt(WINDOWS_AUTH_SUCCESS_EIDS + WINDOWS_AUTH_FAILURE_EIDS)})\b",
-    re.IGNORECASE,
-)
-
 # Evidence text that grounds account→person attribution (gates).
 _SESSION_EVIDENCE = re.compile(
     rf"(?:\blogon\b|\blog-on\b|\b(?:{eid_alt(WINDOWS_AUTH_SUCCESS_EIDS + WINDOWS_AUTH_FAILURE_EIDS)})\b"
@@ -153,13 +154,6 @@ _CRITICAL_AUTH_SCAN = re.compile(
     r"chainsaw_hunt|ez\.evtxecmd|ez_evtxecmd|"
     r"(?:^|[\s\"'/])hayabusa(?:-[\w.]+)?(?:\s|$)|"
     rf"\b(?:{eid_alt(WINDOWS_AUTH_RELATED_EIDS)})\b)",
-    re.IGNORECASE,
-)
-
-# Plan/discriminator phrase → ez.evtxecmd.
-_AUTH_TOOL_HINT = re.compile(
-    rf"logon type|logon source|\b(?:{eid_alt(WINDOWS_AUTH_SUCCESS_EIDS + WINDOWS_AUTH_FAILURE_EIDS)})\b|"
-    r"interactive logon|source address",
     re.IGNORECASE,
 )
 
@@ -217,11 +211,6 @@ def claim_auth_none_regex() -> Pattern[str]:
     return _CLAIM_AUTH_NONE
 
 
-def session_search_cmd_regex() -> Pattern[str]:
-    """Regex matching tool cmds that touch Windows Security auth events."""
-    return _SESSION_SEARCH_CMD
-
-
 def session_evidence_regex() -> Pattern[str]:
     """Evidence markers that ground principal/session attribution."""
     return _SESSION_EVIDENCE
@@ -235,11 +224,6 @@ def logon_inventory_cmd_regex() -> Pattern[str]:
 def critical_auth_scan_regex() -> Pattern[str]:
     """Critical auth/session scan tool/cmd detection."""
     return _CRITICAL_AUTH_SCAN
-
-
-def auth_tool_hint_regex() -> Pattern[str]:
-    """Discriminator prose that should suggest ez.evtxecmd."""
-    return _AUTH_TOOL_HINT
 
 
 def principal_interactive_auth_cue_regex() -> Pattern[str]:

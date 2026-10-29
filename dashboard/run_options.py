@@ -63,7 +63,7 @@ _LANGUAGE = {
 }
 _MODEL = {
     "id": "model", "flag": "--model", "type": "text", "group": "advanced",
-    "label": "Model override", "help": "Overrides LLMHUB_MODEL for this run only.",
+    "label": "Model override", "help": "Overrides the analyst provider's model for this run only.",
 }
 
 RUN_OPTIONS: tuple[dict, ...] = (

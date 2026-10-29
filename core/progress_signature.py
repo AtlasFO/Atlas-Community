@@ -2,7 +2,7 @@
 investigation's KNOWLEDGE STATE actually move forward", independent of
 whether the underlying tool calls technically succeeded or failed.
 
-Background: DAIR previously equated "tool succeeded" with "made progress".
+Background: equating "tool succeeded" with "made progress" is wrong.
 An agent could stay in Collect indefinitely re-reading tables, re-confirming
 the same findings, or varying its tool arguments slightly — all while every
 individual call "succeeded" and DAIR kept recommending "stay". This module
@@ -84,18 +84,24 @@ def _ready_to_report_from_trace(entries: list[dict]) -> bool:
 _BLOCKING_COUNT_RE = re.compile(r"BLOCKING_ISSUES\s*\((\d+)\)", re.IGNORECASE)
 
 
-def report_gate_blockers(entries: list[dict], since_call_id: int = 0) -> int | None:
-    """How many blocking issues the most recent reason.pre_report_check
-    verdict named, or None if none has run yet. With ``since_call_id`` only
-    a verdict recorded after that call counts: a resumed log holds the
-    verdicts of the run before."""
+def newest_report_check(entries: list[dict], since_call_id: int = 0) -> dict | None:
+    """The most recent reason.pre_report_check entry, or None if none has
+    run yet. With ``since_call_id`` only one recorded after that call
+    counts: a resumed log holds the verdicts of the run before."""
     for e in reversed(entries):
         if e.get("type") == "reason_call" and e.get("tool") == "reason_pre_report_check":
-            if int(e.get("call_id") or 0) <= since_call_id:
-                return None
-            m = _BLOCKING_COUNT_RE.search(e.get("conclusion") or "")
-            return int(m.group(1)) if m else None
+            return e if int(e.get("call_id") or 0) > since_call_id else None
     return None
+
+
+def report_gate_blockers(entries: list[dict], since_call_id: int = 0) -> int | None:
+    """How many blocking issues the most recent reason.pre_report_check
+    verdict named (newest_report_check), or None if none has run yet."""
+    e = newest_report_check(entries, since_call_id)
+    if e is None:
+        return None
+    m = _BLOCKING_COUNT_RE.search(e.get("conclusion") or "")
+    return int(m.group(1)) if m else None
 
 # ── IOC hint patterns ─────────────────────────────────────────────────────────
 # Heuristic only (see module docstring). Deliberately narrow: IPv4 + hex-hash

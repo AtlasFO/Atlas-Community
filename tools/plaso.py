@@ -9,8 +9,24 @@ from tools._autodispatch import maybe_defer
 mcp = FastMCP("plaso")
 
 
-# Pure command builders — shared by the sync tools below and the background
-# job wrappers in tools/jobs.py (which must run the exact same argv).
+# Command builders — shared by the sync tools below and the background job
+# wrappers in tools/jobs.py (which must run the exact same argv).
+
+def _source(evidence_path: str) -> str:
+    """What log2timeline reads for ``evidence_path``: a disk container's raw
+    view when it has one (plaso finds a split or renamed VMDK's extents by
+    the names its descriptor gives, and reads no VDI), else the path. An
+    Expert Witness image is read through libewf."""
+    try:
+        from core.mount_plan import is_ewf_image, raw_device_for
+        from core.paths import active_case_dir
+        if is_ewf_image(evidence_path):
+            return evidence_path
+        view, _why = raw_device_for(active_case_dir(), evidence_path)
+        return view or evidence_path
+    except Exception:  # noqa: BLE001 - plaso gets the path as given
+        return evidence_path
+
 
 def _timeline_cmd(evidence_path: str, storage_file: str,
                   parsers: Optional[str] = None,
@@ -18,7 +34,7 @@ def _timeline_cmd(evidence_path: str, storage_file: str,
     cmd = ["log2timeline.py", "--storage-file", storage_file, f"--timezone={timezone}"]
     if parsers:
         cmd += ["--parsers", parsers]
-    cmd.append(evidence_path)
+    cmd.append(_source(evidence_path))
     return cmd
 
 
@@ -29,7 +45,7 @@ def _targeted_cmd(evidence_path: str, storage_file: str,
         "--storage-file", storage_file,
         f"--timezone={timezone}",
         "--artifact-filters", artifact_filters,
-        evidence_path,
+        _source(evidence_path),
     ]
 
 

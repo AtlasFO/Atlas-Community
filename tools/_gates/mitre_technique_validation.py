@@ -65,6 +65,13 @@ def check(ctx) -> Optional[dict]:
     unknown: list[str] = []
     for tid in technique_ids:
         v = _mitre_validate(tid)
+        if not v.get("exists") and v.get("available_count") == 0:
+            # The local table knows no technique at all (missing or empty):
+            # nothing can be checked, so nothing is refused. The ids stay as
+            # written, unverified (never counted as validated), and the
+            # record says so.
+            ctx.notes["mitre_unchecked"] = sorted(set(technique_ids))
+            return None
         if v.get("exists"):
             entry = {
                 "technique_id": tid,
@@ -97,7 +104,9 @@ def check(ctx) -> Optional[dict]:
         "error": (
             f"Unknown ATT&CK technique ID(s) in finding: {', '.join(unknown)}. "
             "Validate with correlate.mitre_map (to find candidates) and "
-            "correlate.mitre_validate (to confirm existence) before citing. "
+            "correlate.mitre_validate (to confirm existence) before citing, "
+            "or leave the unknown ID(s) out of the description and "
+            "mitre_techniques: a finding stands without a technique ID. "
             "Unverified technique IDs are an automatic CHALLENGED trigger."
         ),
         "description": ctx.description,

@@ -1,7 +1,7 @@
 """CASE.md Evidence Links — investigator host/path map for Atlas.
 
 CASE.md stays the work inbox. An optional ``## Evidence Links`` section
-gives a *simple* host ↔ path ↔ kind map so Plane A / orchestrator / brief
+gives a *simple* host <-> path <-> kind map so Plane A / orchestrator / brief
 do not invent layouts or confuse the host names a log export uses with
 image folder names.
 
@@ -456,6 +456,58 @@ def host_for_image(image_path: str, case_dir: str | os.PathLike) -> str:
                 r"(?<![a-z0-9])" + re.escape(h.casefold()) + r"(?![a-z0-9])", low):
             return str(h)
     return ""
+
+
+def host_of_path(case_dir: str | os.PathLike | None, path: str,
+                 hosts: list[str] | None = None) -> str:
+    """The case host a file path belongs to (ATLAS_HOST_OF_PATH): the
+    Evidence Links first (host_for_image), then the host label the path
+    carries as a token delimited by any character that is not a letter or
+    a digit (a hyphen, an underscore, a dot, a slash), so corp-ws01-triage.raw
+    is CORP-WS01's. A label inside a longer matched label does not count
+    (SRV-WS01 over WS01); "" when no label or two unrelated labels match.
+    ``hosts`` defaults to the case's known hosts. File names only: free
+    text keeps core.forensic_citation.host_mentioned, where a hyphenated
+    host name must not split."""
+    raw = str(path or "").replace("\\", "/")
+    if not raw:
+        return ""
+    if case_dir:
+        try:
+            linked = host_for_image(raw, case_dir)
+        except Exception:  # noqa: BLE001
+            linked = ""
+        if linked:
+            return linked
+    if hosts is None:
+        try:
+            from core.forensic_citation import known_case_hosts
+            hosts = known_case_hosts(case_dir) if case_dir else []
+        except Exception:  # noqa: BLE001
+            hosts = []
+    from core.forensic_citation import host_name_forms
+    low = raw.casefold()
+    # (start, end, written as the whole label) per host, over its name forms.
+    spans: dict[str, list[tuple[int, int, bool]]] = {}
+    for h in hosts:
+        for form in host_name_forms(h) if h else ():
+            for m in re.finditer(r"(?<![a-z0-9])" + re.escape(form.casefold()) + r"(?![a-z0-9])", low):
+                spans.setdefault(h, []).append((*m.span(), form.casefold() == h.casefold()))
+
+    # A host matched only inside a longer match of another host is that
+    # one's; on the same span, the host whose whole label it is wins over
+    # one matched by a shortened form.
+    def beaten(a: tuple[int, int, bool], h: str) -> bool:
+        return any(o != h and any(b[0] <= a[0] and a[1] <= b[1]
+                                  and (b[1] - b[0] > a[1] - a[0] or (b[2] and not a[2])) for b in bs)
+                   for o, bs in spans.items())
+    top = {h.casefold(): h for h, ss in spans.items() if not all(beaten(a, h) for a in ss)}
+    return next(iter(top.values())) if len(top) == 1 else ""
+
+
+def host_of_path_on() -> bool:
+    from core.envfile import env_flag
+    return env_flag("ATLAS_HOST_OF_PATH", True)
 
 
 def path_link_boost(path: str, case_dir: str | os.PathLike) -> float:

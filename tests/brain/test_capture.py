@@ -5,6 +5,17 @@ import pytest
 
 from core.brain import capture, frontmatter
 
+
+@pytest.fixture(autouse=True)
+def _checked_analyst_client(monkeypatch):
+    """A run checks its model configuration before it touches the case.
+    These tests drive the run with a stubbed investigation, so the check
+    gets a stub client too."""
+    from unittest.mock import MagicMock
+    from agent import cli
+    monkeypatch.setattr(cli, "_analyst_client",
+                        lambda *a, **k: MagicMock(model="analyst-model"))
+
 REVIEW = """# Run Review — TESTCASE
 
 VERDICT: ACCEPTABLE
@@ -153,26 +164,26 @@ def test_answer_key_scrubbed_from_candidates_and_summary(brain, case):
     # of every staged candidate and out of the durable run summary.
     (case / "ground_truth.json").write_text(json.dumps({
         "case_id": "TESTCASE",
-        "secrets": ["vaultkey=examplesecret31", "confidential.bin"],
+        "secrets": ["vaultkey=examplesecret31", "payload.bin"],
     }))
     (case / "analysis" / "TESTCASE_trace.json").write_text(json.dumps({
         "case_id": "TESTCASE",
         "entries": [
             {"type": "self_correction", "trigger": "dair",
              "prior_belief": "the archive was not encrypted",
-             "new_belief": "vaultkey=examplesecret31 decrypts confidential.bin"},
+             "new_belief": "vaultkey=examplesecret31 decrypts payload.bin"},
         ],
     }))
     review = ("## Recommendations\n\n"
-              "- Record that vaultkey=examplesecret31 opens confidential.bin.\n")
-    capture.capture_run(case, "TESTCASE", "decrypt confidential.bin?", review,
+              "- Record that vaultkey=examplesecret31 opens payload.bin.\n")
+    capture.capture_run(case, "TESTCASE", "decrypt payload.bin?", review,
                         "ACCEPTABLE")
 
     flagged = 0
     for p in (brain / "inbox/memory-candidates").glob("*.md"):
         text = p.read_text()
         assert "examplesecret31" not in text
-        assert "confidential.bin" not in text
+        assert "payload.bin" not in text
         meta, _, _ = frontmatter.parse(text)
         if meta["risk"].get("contains_answer_key"):
             flagged += 1
@@ -181,7 +192,7 @@ def test_answer_key_scrubbed_from_candidates_and_summary(brain, case):
 
     summary = next((brain / "logs/runs").glob("*-testcase-train.md")).read_text()
     assert "examplesecret31" not in summary
-    assert "confidential.bin" not in summary
+    assert "payload.bin" not in summary
 
 
 def test_no_ground_truth_leaves_candidates_untouched(brain, case):

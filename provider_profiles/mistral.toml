@@ -1,0 +1,32 @@
+#:schema ./schema.json
+# Atlas provider profile: what Atlas knows about one kind of LLM provider.
+# Every field: docs/llm.md, "Provider profiles", and provider_profiles/schema.json.
+# To change a field, put a file of the same name in provider_profiles.local/
+# (`atlas provider profile init <id>` copies this one there) and keep only the
+# lines you change: the rest, and later fixes to them, come from this file.
+# A file there fails when its id is not its file name, when it sets [env] or
+# implicit, or when it is named custom.toml (the fallback cannot be changed).
+# Format version of this file; leave it at 1.
+schema = 1
+# Must equal the file name without .toml.
+id = "mistral"
+# Position in the setup menu; lower comes first.
+order = 110
+# Name shown in the setup menu and on the Settings page.
+label = "Mistral"
+# One line shown under the label in the menu.
+description = "api.mistral.ai — Mistral models directly."
+# Shown when this profile is chosen: what to know before saving.
+notes = "Mistral takes only none and high as levels; anything else is stepped to high."
+# How these facts were checked: "live", "docs" (vendor documentation only) or "" (no fixed endpoint).
+evidence = "live"
+# Wire format: "chat" (Chat Completions), "responses" (OpenAI Responses) or "messages" (Anthropic Messages).
+dialect = "chat"
+
+[connection]
+# Prefills the base URL field; a provider uses the URL saved with it.
+base_url = "https://api.mistral.ai/v1"
+
+[reasoning]
+# Atlas level = value sent. Only listed levels can be pinned; Auto always can.
+levels = { none = "none", high = "high" }

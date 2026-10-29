@@ -58,7 +58,7 @@ class FakeClient:
     def __init__(self, content: str):
         self._content = content
 
-    def chat(self, messages, max_tokens=2048):
+    def chat(self, messages, max_tokens=2048, role=None):
         class R:
             pass
         r = R()

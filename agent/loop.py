@@ -22,11 +22,11 @@ import re
 import contextlib
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from agent.llm import (LLMHubClient, LLMError, LLMDeadlineError, LLMTransportError,
-                       WAFBlockedError, ToolCall)
+from agent.llm import (_AGENT_ROLE, LLMHubClient, LLMError, LLMDeadlineError, LLMStatusError,
+                       LLMTransportError, WAFBlockedError, ToolCall)
 from agent.toolbox import Toolbox, is_call_shape_refusal, split_call_syntax
 from agent.tui import UI
 
@@ -58,8 +58,8 @@ CHAT_MAX_TOOL_ROUNDS = env_int("ATLAS_CHAT_MAX_TOOL_ROUNDS", 0)
 _CHAT_MAX_PSEUDO_RECOVERIES = env_int("ATLAS_CHAT_MAX_PSEUDO_RECOVERIES", 6)
 
 # Some models emit tool calls as prose/XML in ``content`` instead of the
-# structured ``tool_calls`` field. Chat used to treat that as a final answer
-# and stop — recover or nudge instead.
+# structured ``tool_calls`` field. Taking that as a final answer would end
+# the chat early — recover or nudge instead.
 _PSEUDO_TOOL_CALL_RE = re.compile(
     r"<tool_call>\s*([A-Za-z_][\w.:]*)\s*(?:\((.*?)\))?\s*"
     r"(?:</arg_value>\s*)?</tool_call>",
@@ -203,6 +203,32 @@ LOST_TURN_RETRIES = int(os.environ.get("ATLAS_AGENT_LOST_TURN_RETRIES") or "2")
 LOST_TURN_PAUSE = float(os.environ.get("ATLAS_AGENT_LOST_TURN_PAUSE") or "60")
 LOST_TURN_PAUSE_MAX = 300.0
 
+# The escape's two messages (ATLAS_MODEL_CALL_ESCAPE): after a lost request
+# the model is asked, without tools, for what the investigation has
+# established and the one next step; then, with the tools back, for that
+# step as one call.
+_ESCAPE_ASK = (
+    "[model call failed] Your last {n} replies for this step did not arrive: the provider ended them "
+    "before they finished, so nothing ran. Tools are not available in this reply. In at most 8 short "
+    "lines, write what the investigation has established so far, each line naming what showed it (the "
+    "call, the file or the time), and the one next step you will take.")
+_ESCAPE_FOLLOW_UP = "[next step] Now issue that next step as one function call, with short arguments."
+# The stored text of a reply whose every tool call was left unanswered.
+_PRUNED_REPLY_TEXT = "[this reply's tool calls did not run]"
+# With the work order on and a read due, the follow-up names it; an item
+# whose source named no tool is a read the model chooses the reader for.
+_ESCAPE_FOLLOW_UP_READY = "[next step] Run this next, as one function call: {call}"
+_ESCAPE_FOLLOW_UP_READ = "[next step] Read this next with one function call: {call}"
+# How long an escape may run before the run log and the dashboard card show
+# an alert: an operator setting for attention, not a limit; the escape keeps
+# waiting either way. 0 turns the alert off.
+def _escape_alert_seconds() -> float:
+    """ATLAS_ESCAPE_ALERT_SECONDS, read at call time (default 1800)."""
+    try:
+        return float(os.environ.get("ATLAS_ESCAPE_ALERT_SECONDS") or "1800")
+    except ValueError:
+        return 1800.0
+
 # Turns remaining at which the loop forces a wrap-up if no final report has
 # been written yet. A run that dies "quiet" or at the turn cap without a
 # Report is ungradeable. Wrap-up must clear pre_report blockers and write a *full*
@@ -286,6 +312,14 @@ CUT_OFF_NUDGES_MAX = env_int("ATLAS_AGENT_CUT_OFF_NUDGES", 4)
 # the ceiling rarely, so only a model that keeps running away spends it.
 CUT_OFF_TOTAL_MAX = env_int("ATLAS_AGENT_CUT_OFF_TOTAL", 12)
 EMPTY_REPLY_NUDGES_MAX = env_int("ATLAS_AGENT_EMPTY_REPLY_NUDGES", 6)
+# The provider declined a request (a safety classifier, a content filter).
+# The next request carries this one line, never an empty-reply label; three
+# declines in a row end the run, since the same context
+# is likely to be declined again. A behaviour guard: any other reply resets
+# the count.
+_DECLINED_MSG = ("The provider declined the last request (category: {category}). "
+                 "Continue the analysis with a different approach or other evidence.")
+PROVIDER_DECLINES_MAX = 3
 # Times the loop will ask again after going quiet with nothing recorded at
 # all. This is not a budget for the run — it bounds only the case where the
 # model is answering without ever issuing a call, which is a malfunction and
@@ -318,6 +352,9 @@ _BATCH_TRUNCATED_MSG = (
 # but the first cap's worth were discarded unread. This detects the shape
 # and names it to the model; it cuts nothing.
 BATCH_RUNAWAY_FACTOR = 4
+# More than this many calls in one reply repeating an earlier call of the
+# same reply make it a runaway (the model emitted one call over and over).
+REPLY_DUPLICATES_RUNAWAY = env_int("ATLAS_AGENT_REPLY_DUPLICATES_RUNAWAY", 5)
 _BATCH_RUNAWAY_MSG = (
     " A reply of {sent} calls is far beyond what any reply can run: the "
     "{left} that did not run were discarded, not queued, and a call "
@@ -334,6 +371,15 @@ _DROPPED_CALL_MSG = (
     "tool list spells it. Do not load namespaces you have no next call for: "
     "the list has room for a few at a time, and every extra one pushes out "
     "one you are using."
+)
+# The same note for a stable list (every namespace listed for the whole run):
+# a dropped call then misspelled a listed name.
+_DROPPED_CALL_STABLE_MSG = (
+    "[call did not arrive] Your reply generated a function call that the "
+    "endpoint dropped before it reached Atlas. That happens to a call whose "
+    "name is not in the tool list. Every Atlas tool is in your list for this "
+    "whole run: make the call again, spelled exactly as the tool list spells "
+    "it."
 )
 # Leading tool token in a director prescription such as
 # "table.table_pivot (column=service, scope=all day-files)".
@@ -368,6 +414,33 @@ _META_ONLY_MSG = (
     "namespace only when your next call needs it, one at a time: the list "
     "has room for a few, and every extra one pushes out one you are using."
 )
+_META_ONLY_STABLE_MSG = (
+    "[namespaces only] {streak} replies in a row loaded or listed namespaces "
+    "and called no tool. Every namespace is already in your tool list for "
+    "this whole run, so loading changes nothing. The director's last work "
+    "order named: {tools}. Make one of those calls now."
+)
+
+
+def _list_stable(toolbox) -> bool:
+    """Whether the toolbox lists every tool for the rest of the run (a stand-in
+    toolbox without the notion never does)."""
+    fn = getattr(toolbox, "stable", None)
+    try:
+        return callable(fn) and fn() is True
+    except Exception:  # noqa: BLE001 - a broken stand-in is no stable list
+        return False
+
+
+def _tool_list_mode(toolbox) -> str:
+    """The toolbox's tool-list mode for the run_start record; "" for a
+    stand-in toolbox without one."""
+    fn = getattr(toolbox, "list_mode", None)
+    try:
+        mode = fn() if callable(fn) else ""
+        return mode if isinstance(mode, str) else ""
+    except Exception:  # noqa: BLE001 - a record field never breaks a run
+        return ""
 # An announced action is not always announced in the first person. A reply
 # that says "Now verifying the hashes:" or "Continuing. Next step: ..." has
 # named its next move as plainly as "Let me ...", and reading only the
@@ -497,7 +570,7 @@ def context_char_budget() -> int:
     return env_int("ATLAS_AGENT_CONTEXT_CHARS", 3_000_000)
 
 
-# Back-compat alias (tests / importers); prefer context_char_budget().
+# Module-level value of context_char_budget() for importers.
 CONTEXT_CHAR_BUDGET = context_char_budget()
 TRIMMED_STUB = "[output trimmed from context — full text is in the execution trace]"
 WAF_STUB = ("[this tool output was removed from context: the provider's web "
@@ -540,6 +613,25 @@ IOC_PIVOT_NUDGE_EVERY = env_int("ATLAS_AGENT_IOC_PIVOT_NUDGE_EVERY", 4)
 KNOWLEDGE_INDEX_EVERY = env_int("ATLAS_AGENT_KNOWLEDGE_INDEX_EVERY", 6)
 
 
+def loop_mode() -> str:
+    """ATLAS_LOOP: "conversation" (default) or "frontier" (the queue of
+    short focused calls)."""
+    from core.envfile import env_str
+    v = str(env_str("ATLAS_LOOP", "conversation") or "conversation").strip().lower()
+    return v if v in ("conversation", "frontier") else "conversation"
+
+
+def _vol_store_entries(case_dir) -> int:
+    """How many memory plugin answers the result store holds at the run's
+    start (core.vol_cache): answers from it are not re-run, so a run's wall
+    clock is read beside this count."""
+    try:
+        from core.vol_cache import store_dir
+        return sum(1 for _p in store_dir(case_dir).glob("*.json")) if case_dir else 0
+    except Exception:  # noqa: BLE001
+        return 0
+
+
 def _role_models_safe() -> dict:
     """The model behind every role, for the trace. A run must be readable
     with the models that served it; a resolution error must not stop one."""
@@ -556,6 +648,7 @@ try:
     from core.deferred_intents import PROTOCOL_MARKER as _PROTOCOL_MARKER
 except Exception:  # noqa: BLE001
     _PROTOCOL_MARKER = "[ATLAS_PROTOCOL]"
+_DEFERRED_RE = re.compile(r'"deferred":\s*true')
 
 # Warn one batch before the DAIR window ages out. Every expiry costs two
 # turns (refusals → deferred intents → bare dair_assess → the same batch
@@ -577,12 +670,12 @@ _DAIR_REENGAGE_MSG = (
     "the call in prose. Do not write the report yet."
 )
 
-# The FIRST empty-tool turn used to get the generic "continue … then write
-# the report" nudge, which is the wrong instruction while forensic tools are
-# gated: the model cannot do the closing work it is being pointed at, so the
-# turn is spent and the run is two turns closer to the quiet valve. Name the
-# actual blocker instead. Distinct tag from _DAIR_REENGAGE_MSG on purpose —
-# this one does not consume the (capped) re-engage budget.
+# The first empty-tool turn names the actual blocker instead of the generic
+# "continue … then write the report" nudge: while forensic tools are gated
+# the model cannot do the closing work that nudge points at, so the turn is
+# spent and the run moves closer to the quiet valve. Distinct tag from
+# _DAIR_REENGAGE_MSG on purpose — this one does not consume the (capped)
+# re-engage budget.
 _DAIR_CONTINUE_MSG = (
     "[blocked] You returned no tool call. Forensic tools are currently "
     "blocked because the DAIR window aged out — the only way forward is a "
@@ -647,6 +740,23 @@ _REPORT_DONE_MSG = (
     "any per-host report still owed with misc.write_projected_final_report, "
     "then call atlas_finish."
 )
+# The push with the work order on (ATLAS_WORK_ORDER): open reads are listed
+# in the report as not read; nothing asks the model to declare them
+# unresolvable.
+_REPORT_STALL_MSG_WO = (
+    "[report phase] The director has been in Report for a long stretch "
+    "without getting closer to the report: several syntheses, or many turns in "
+    "which no work item was read and the report gate's blocking issues did not "
+    "go down (a further variant of a finding does not count). Reading a due "
+    "item of the [work order] is work towards the report; beyond that, stop "
+    "collecting. An item you cannot close: run the read that would close it and "
+    "let it fail (the failed call closes the item), or leave it, and the report "
+    "lists it as not read. Then run reason.pre_report_check and write the report "
+    "from the findings you have. "
+    "misc.current_investigation_state reads those findings back in full if "
+    "the conversation above no longer shows them."
+)
+
 _REPORT_STALL_MSG = (
     "[report phase] The director has been in Report for a long stretch "
     "without getting closer to the report: several syntheses, or many turns in "
@@ -730,11 +840,16 @@ def _ledger_run_tokens(payload: dict) -> dict:
             "input_tokens": t["input_tokens"], "output_tokens": t["output_tokens"],
             "cached_tokens": t["cached_tokens"]}
 
+# The calls that check or write the report: a running estate count is
+# applied before them.
+_REPORT_ENTRY_TOOLS = ("pre_report_check", "write_final_report", "write_projected_final_report",
+                       "export_execution_log")
+
 class Agent:
     def __init__(self, client: LLMHubClient, toolbox: Toolbox,
                  case_dir: Path | None, quiet: bool = False,
                  ui: UI | None = None, command: str = "run",
-                 interactive: bool = False):
+                 interactive: bool = False, stamp: str = ""):
         self.client = client
         self.toolbox = toolbox
         self.case_dir = case_dir
@@ -744,7 +859,8 @@ class Agent:
         self.interactive = interactive
         self.ui = ui or UI(quiet=quiet)
         self.messages: list[dict] = []
-        self.transcript_path = self._transcript_path()
+        # ``stamp`` names the transcript after the run's usage-ledger id.
+        self.transcript_path = self._transcript_path(stamp)
         # Per-run stats: filled by run()/_run_tool, consumed by --json and
         # the completion summary panel.
         self.stats: dict = {}
@@ -753,7 +869,7 @@ class Agent:
         self._blocker_ext_fingerprint: str = ""
         self._blocker_ext_at_call_id: int = 0
 
-    def _transcript_path(self) -> Path | None:
+    def _transcript_path(self, stamp: str = "") -> Path | None:
         if not self.case_dir:
             return None
         out = self.case_dir / "analysis"
@@ -761,7 +877,7 @@ class Agent:
             out.mkdir(parents=True, exist_ok=True)
         except OSError:
             return None
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        stamp = stamp or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         # A chat about the case is not a run of it. Its transcript carries a
         # name of its own, so what reads a run's transcript (the dashboard's
         # activity signal, the fresh-run check, the evidence catalogue's
@@ -782,9 +898,9 @@ class Agent:
         Same file (.atlas/run_status.json) agent/cli.py's _persist_run_status
         writes once at completion — this just also writes it every turn while
         the run is in progress. dashboard/run_manager.py's RunSession.status()
-        already reads and merges this file, so no dashboard-side change was
-        needed to surface it; the final _persist_run_status() call at the end
-        of the run overwrites this with the completed-run record as before.
+        already reads and merges this file; the final _persist_run_status()
+        call at the end of the run overwrites it with the completed-run
+        record.
         Never raises: a status write must not be able to break a real
         investigation run.
 
@@ -825,6 +941,8 @@ class Agent:
                 "recent_refusals": [str(e)[:200] for e in refused[-5:]],
                 "info_count": infos,
                 "activity": self.ui.run_state.get("activity") or "",
+                # The model-call escape has run past ATLAS_ESCAPE_ALERT_SECONDS.
+                "escape_alert": bool(self.ui.run_state.get("escape_alert")),
                 # wall-clock start of the currently in-flight tool call, or
                 # "" between calls — lets a reader (dashboard/read_models.py)
                 # tell "waiting on a long tool" apart from "log just hasn't
@@ -832,6 +950,10 @@ class Agent:
                 "tool_started_at": self.ui.run_state.get("tool_started_at") or "",
                 # Delivered pieces of evidence by status (core.evidence_items).
                 "evidence_items": self._evidence_item_counts(),
+                # What the images hold and how much of it was read (the
+                # contents index's unit model, the same numbers the
+                # evidence table shows), recomputed once per turn.
+                "contents": self._contents_counts(),
                 # This process's own PID — the one thing that stays valid
                 # for a run's entire lifetime regardless of how often this
                 # file itself gets rewritten. Lets a reader confirm the run
@@ -918,16 +1040,20 @@ class Agent:
         them only made the conversation longer and the
         instruction less visible.
         """
-        prev = getattr(self, "_nudge_index", None)
-        if prev is None:
-            prev = self._nudge_index = {}
-        i = prev.get(kind)
+        self._retire_nudge(kind)
+        if getattr(self, "_nudge_index", None) is None:
+            self._nudge_index = {}
+        self.messages.append({"role": "user", "content": content})
+        self._nudge_index[kind] = len(self.messages) - 1
+
+    def _retire_nudge(self, kind: str) -> None:
+        """Stub out the standing nudge of this kind, whose ask no longer
+        holds or is said again below it."""
+        i = (getattr(self, "_nudge_index", None) or {}).get(kind)
         if i is not None and i < len(self.messages) and \
                 (self.messages[i].get("role") or "") == "user":
             from core.llm_check import _TURN_STUB
             self.messages[i]["content"] = _TURN_STUB
-        self.messages.append({"role": "user", "content": content})
-        prev[kind] = len(self.messages) - 1
 
     def _nudge_stands(self, kind: str, content: str) -> bool:
         """Whether the last nudge of this kind is still in the conversation
@@ -982,10 +1108,10 @@ class Agent:
                        "error": str(e)[:300]})
 
     def _refresh_context_budget(self, turn: int = 0) -> None:
-        """Phase 3 stewardship: recompute budget + re-orchestrate the plan.
+        """Stewardship: recompute budget + re-orchestrate the plan.
 
-        Optionally LLM-refines candidate order when top scores are flat
-        (Phase 4). Updates LIVE strip fields. Fail-open.
+        Optionally LLM-refines candidate order when top scores are flat.
+        Updates LIVE strip fields. Fail-open.
         """
         if not self.case_dir:
             return
@@ -999,9 +1125,9 @@ class Agent:
             except Exception:
                 pass
             turn_n = int(turn or (self.ui.run_state or {}).get("turn") or 0)
-            # Enable LLM client for ranking unless explicitly disabled.
-            mode = (os.environ.get("ATLAS_ORCH_LLM_RANK") or "auto").lower()
-            client = None if mode in ("0", "off", "false", "no") else self.client
+            # The ranking gets a client only when ATLAS_ORCH_LLM_RANK asks for it.
+            mode = (os.environ.get("ATLAS_ORCH_LLM_RANK") or "off").lower()
+            client = None if mode in ("0", "off", "false", "no", "") else self.client
             result = refresh_orchestration(
                 self.case_dir,
                 messages=self.messages,
@@ -1046,7 +1172,13 @@ class Agent:
         briefly ban the source, so wait before retrying."""
         for attempt in range(4):
             try:
-                tools = self.toolbox.openai_tools()
+                # The escape (_chat_turn_asked_again) may ask without the
+                # tool list, with a shortened copy of the history, or with
+                # a level, learn=False and a tool_choice of its own; all
+                # unset outside an escape.
+                escape_kw = dict(getattr(self, "_escape_kw", None) or {})
+                no_tools = escape_kw.pop("_no_tools", False)
+                tools = None if no_tools else self.toolbox.openai_tools()
                 # getattr-guarded: test doubles and any other minimal
                 # Toolbox-like object may not implement this — a schema-overflow warning is a nice-to-have
                 # diagnostic, never worth an AttributeError on the hot path.
@@ -1066,12 +1198,27 @@ class Agent:
                 choice = getattr(self, "_tool_choice_next", None)
                 self._tool_choice_next = None
                 extra = {"tool_choice": choice} if (choice and tools) else {}
-                resp = self.client.chat(self.messages, tools=tools, **extra)
+                # One ask one thinking level lower after a runaway reply of
+                # repeated calls (_split_reply_duplicates); used once.
+                once = getattr(self, "_next_level_once", None)
+                if once:
+                    extra.update({"level": once, "learn": False})
+                    self._next_level_once = None
+                extra.update(escape_kw)
+                if not tools:
+                    extra.pop("tool_choice", None)
+                self._note_tool_choice_unavailable(extra.get("tool_choice"))
+                messages = getattr(self, "_escape_messages", None) or self.messages
+                resp = self.client.chat(messages, tools=tools, role=_AGENT_ROLE,
+                                        **self._chat_kwargs_taken(extra))
                 self._drop_malformed_calls(resp)
                 return resp
             except WAFBlockedError as e:
+                # The list the request carried: the escape's shortened copy
+                # at rung 3, else the history.
+                sent = getattr(self, "_escape_messages", None) or self.messages
                 candidates = sorted(
-                    (m for m in self.messages
+                    (m for m in sent
                      if m.get("role") == "tool"
                      and len(m.get("content") or "") > 200
                      and m["content"] not in (TRIMMED_STUB, WAF_STUB)),
@@ -1083,6 +1230,35 @@ class Agent:
                 self.ui.warn("WAF block — removed a tool output from context, "
                              "retrying after cooldown")
                 time.sleep(60)
+
+    def _chat_kwargs_taken(self, extra: dict) -> dict:
+        """``extra`` without the keywords this client's chat() does not take
+        (a test double or a minimal client): the escape then skips what the
+        client cannot do instead of raising."""
+        if not extra:
+            return extra
+        import inspect
+        try:
+            params = inspect.signature(self.client.chat).parameters
+        except (TypeError, ValueError):
+            return extra
+        if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+            return extra
+        return {k: v for k, v in extra.items() if k in params}
+
+    def _note_tool_choice_unavailable(self, choice) -> None:
+        """Once per run, when a tool_choice value the endpoint refused for
+        this model is asked for (the intent rescue's or the escape's
+        "required"): the request goes as "auto" and only its text carries
+        the ask (ATLAS_TOOL_CHOICE_VALUE_MEMORY)."""
+        if not choice or getattr(self, "_tool_choice_unavailable_logged", False):
+            return
+        from agent.llm import tool_choice_value_memory_on
+        profile = getattr(self.client, "profile", None)
+        rejected = getattr(profile, "tool_choice_rejected", ())
+        if isinstance(rejected, tuple) and choice in rejected and tool_choice_value_memory_on():
+            self._tool_choice_unavailable_logged = True
+            self._log({"event": "tool_choice_unavailable", "value": choice})
 
     # What the director last prescribed, as the tool references it wrote.
     _last_director_tools: list[str] = []
@@ -1109,6 +1285,8 @@ class Agent:
             return
         if phase:
             self._dair_phase = phase
+            if phase != "Report":
+                self._report_pushed = False     # see _push_report_phase
         progress = data.get("progress") if isinstance(data, dict) else None
         self._last_dair_unchanged = (isinstance(progress, dict)
                                      and progress.get("changed") is False)
@@ -1116,6 +1294,65 @@ class Agent:
         if tools:
             self._last_director_tools = tools
             self._load_namespaces_for(tools)
+        self._director_items(data)
+
+    def _reaches_due_item(self, tool: str, args: dict | None) -> bool:
+        """Whether a call would reach a due work item's target: the item is
+        the reason the read exists, so the belief-starvation latch lets it
+        run (ATLAS_WORK_ORDER)."""
+        from core.deferred_intents import work_order_on
+        if not (work_order_on() and getattr(self, "case_dir", None)):
+            return False
+        try:
+            from core.execution_log import log
+            from core.work_order import _call_view, _reaches
+            view = _call_view({"type": "tool_call", "cmd": f"<py>:{tool}", "mcp_tool": tool}, dict(args or {}),
+                              case_dir=str(self.case_dir))
+            return any(_reaches(i, view, str(self.case_dir)) for i in log.work_items(statuses=("due",)))
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _director_items(self, data) -> None:
+        """The director's prescribed reads as work items, by the
+        vocabulary-free parse (ATLAS_WORK_ORDER); a parsed entry whose
+        fingerprint equals a proposal's adopts it. An entry with no target
+        a call can reach makes no item: it is recorded with the review's
+        directives as refused, so the next review shows it, and counted on
+        the director line."""
+        from core.deferred_intents import work_order_on
+        self._wo_not_tracked = 0
+        if not (work_order_on() and getattr(self, "case_dir", None) and isinstance(data, dict)):
+            return
+        try:
+            from core.execution_log import log
+            from core.work_order import NOT_TRACKED, note_untracked_entries, parse_director_entries
+            refused: list[str] = []
+            for e in parse_director_entries(data, str(self.case_dir), refused):
+                log.add_work_item("director", e["task_ids"], e["tool"], e["target"], e["why"],
+                                  status=e["status"],
+                                  source_ref={"kind": "dair_call", "call_id": data.get("_atlas_call_id")})
+            if refused:
+                # One refused line per reason names its tools, not one line
+                # per entry: a long bare list would fill the next review, and
+                # each line keeps the reason its entries were refused for.
+                self._wo_not_tracked = len(refused)
+                by_reason: dict[str, list[str]] = {}
+                for t in refused:
+                    tool, _sep, why = t.partition(": ")
+                    by_reason.setdefault(why.strip() or NOT_TRACKED, []).append(tool)
+                lines = []
+                for why, named in list(by_reason.items())[:8]:
+                    tools = list(dict.fromkeys(named))
+                    names = ", ".join(tools[:20]) + (f" and {len(tools) - 20} more" if len(tools) > 20 else "")
+                    lines.append(f"{names}: {why}")
+                if len(by_reason) > 8:
+                    rest = sum(len(v) for v in list(by_reason.values())[8:])
+                    lines.append(f"and {rest} more entries refused for {len(by_reason) - 8} more reasons")
+                note_untracked_entries(log, data.get("_atlas_call_id"), lines)
+                self._log({"event": "director_entries_not_tracked", "call_id": data.get("_atlas_call_id"),
+                           "count": len(refused), "entries": refused[:20]})
+        except Exception as err:  # noqa: BLE001
+            self._log({"event": "work_order_director_parse_failed", "error": str(err)[:200]})
 
     @staticmethod
     def _director_tools(data) -> list[str]:
@@ -1177,7 +1414,17 @@ class Agent:
             try:
                 # Room may come from any cold namespace, never from one the
                 # order names or one in recent use.
-                outcome = load(wanted, keep=referenced) or {}
+                from core.envfile import env_flag
+                if env_flag("ATLAS_TOOL_ARRAY_STABLE", True):
+                    # A preload for the director fills free room only: an
+                    # eviction would change the schema array the provider
+                    # renders before the whole conversation (its cache).
+                    try:
+                        outcome = load(wanted, keep=referenced, evict=False) or {}
+                    except TypeError:        # a loader without the parameter
+                        outcome = load(wanted, keep=referenced) or {}
+                else:
+                    outcome = load(wanted, keep=referenced) or {}
             except TypeError:
                 outcome = load(wanted) or {}
         except Exception:  # noqa: BLE001 - loading is best effort
@@ -1231,13 +1478,15 @@ class Agent:
         ceiling returns to where it was, and no test reaches that size
         again this run."""
         from agent.toolbox import set_learned_tool_ceiling
+        # The ceiling goes back first: a probe that completed the list made
+        # it stable, and a stable list refuses the unload below.
+        set_learned_tool_ceiling(self._tool_probe_floor or None)
         unload = getattr(self.toolbox, "unload", None)
         if unload is not None and self._tool_probe_ns:
             try:
                 unload([self._tool_probe_ns])
-            except Exception:  # noqa: BLE001 - the ceiling below still holds
+            except Exception:  # noqa: BLE001 - the ceiling above still holds
                 pass
-        set_learned_tool_ceiling(self._tool_probe_floor or None)
         self._tool_probe_failed_at = self._tool_probe_at
         self._log({"event": "tool_budget_probe_failed", "turn": turn,
                    "at": self._tool_probe_at, "namespace": self._tool_probe_ns,
@@ -1249,6 +1498,8 @@ class Agent:
         self._tool_probe_ns = ""
 
     def _dropped_call_message(self) -> str:
+        if _list_stable(self.toolbox):
+            return _DROPPED_CALL_STABLE_MSG
         loaded = sorted(set(getattr(self.toolbox, "loaded", ()) or ()))
         return _DROPPED_CALL_MSG.format(loaded=", ".join(loaded) or "none")
 
@@ -1298,12 +1549,25 @@ class Agent:
         except Exception:  # noqa: BLE001
             return None
 
+    def _report_settled(self) -> int | None:
+        """How many high-value artifacts the newest report-gate verdict of
+        this run found read, failed or explained (tools/reasoning.py
+        stores it on the check); None before its first."""
+        try:
+            from core.execution_log import log
+            from core.progress_signature import newest_report_check
+            e = newest_report_check(log._entries, since_call_id=getattr(self, "_run_since", 0))
+            return None if e is None or e.get("hv_settled") is None else int(e["hv_settled"])
+        except Exception:  # noqa: BLE001
+            return None
+
     def _report_done(self) -> frozenset:
         """What the report gate's own sources count as discharged, by
         identity: coverage-ledger units and delivered evidence items no
         longer unseen, disk media no longer waiting for an open, requests no
-        longer actionable (or blocked on missing evidence) and request parts
-        no longer open. A first read, open, block or close adds a member; a
+        longer actionable (or blocked on missing evidence), request parts
+        no longer open and findings no longer under the review Plane A raised
+        on them. A first read, open, block, close or settled review adds a member; a
         re-read, a finding, a variant of one, a refused close, a reopened and
         re-closed part, or a unit registered unseen adds none, and a unit a
         ledger rebuild drops takes nothing away from what was already seen.
@@ -1343,6 +1607,28 @@ class Agent:
                             if isinstance(part, dict) and part.get("status") != "open")
         except Exception:  # noqa: BLE001
             pass
+        try:
+            # A finding that left a review (re-validated: review_history;
+            # superseded or withdrawn while under review: invalidated_at).
+            # Only Plane A raises a review, so these grow only with what the
+            # run was handed.
+            from core.claim_graph import load_graph
+            done.update(("review", str(nid))
+                        for nid, n in (load_graph(self.case_dir).get("nodes") or {}).items()
+                        if isinstance(n, dict) and n.get("status") != "needs_review"
+                        and (n.get("review_history") or n.get("invalidated_at")))
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            # A work item closed (read, failed, dismissed) or made moot is a
+            # move: a listing near it or a repeated step is not (ATLAS_WORK_ORDER).
+            from core.deferred_intents import work_order_on
+            if work_order_on():
+                from core.execution_log import log as _wlog
+                from core.work_order import closed_ids
+                done.update(closed_ids(_wlog))
+        except Exception:  # noqa: BLE001
+            pass
         return frozenset(done)
 
     def _report_moved(self, attr: str, *, claims: bool) -> bool:
@@ -1351,11 +1637,15 @@ class Agent:
         under this mark (something the gate counts as open read, opened,
         blocked or closed for the first time), a new low of the blocking
         issues of this run's newest gate verdict (its first verdict is one),
-        or, before that verdict and when ``claims``, any change of the claim
+        a new high of the high-value artifacts that verdict found settled
+        (_report_settled: one more read, failed or explained, which the
+        gate's single issue for them does not show until the last one), or,
+        before that verdict and when ``claims``, any change of the claim
         graph. A finding recorded while nothing new was discharged and the
         same blockers stand (a variant of a finding the gate objects to) is
         no movement, nor are blockers that rise and fall back. The mark keeps
-        every member seen and the low; a check without movement leaves it.
+        every member seen, the low and the high; a check without movement
+        leaves it.
 
         The trade this accepts: after the gate's first verdict, a deep dive
         inside evidence already read that closes no request part and lowers
@@ -1363,20 +1653,23 @@ class Agent:
         (36 Report turns at the defaults): it is the collection the ladder
         exists to end."""
         blockers = self._report_blockers()
+        settled = self._report_settled()
         done = self._report_done()
         count = self._claim_count() if claims and blockers is None else None
         last = getattr(self, attr, None)
         if last is None:
-            setattr(self, attr, (blockers, count, done))
+            setattr(self, attr, (blockers, count, done, settled))
             return True
-        low, last_count, seen = last
+        low, last_count, seen, high = last
         moved = (bool(done - seen)
                  or (blockers is not None and (low is None or blockers < low))
+                 or (settled is not None and (high is None or settled > high))
                  or (count is not None and count != last_count))
         if moved:
             setattr(self, attr, (
                 low if blockers is None else blockers if low is None else min(blockers, low),
-                count, seen | done))
+                count, seen | done,
+                high if settled is None else settled if high is None else max(settled, high)))
         return moved
 
     def _push_report_phase(self, turn: int, *, reason: str) -> bool:
@@ -1384,8 +1677,15 @@ class Agent:
         REPORT_STALL_WRAPUP_FIRES pushes with no move towards the report
         between them the run wraps up: it has stopped producing, and asking
         again would only extend the collection it is asked to end. Returns
-        True on wrap-up."""
-        self._nudge("report_phase_stall", _REPORT_STALL_MSG)
+        True on wrap-up.
+
+        From the first push until the director leaves Report the pivot nudge
+        yields, and its standing copy goes: it sends the model back to
+        searches that are no move towards the report, so the gate this
+        message asks for is never run and the ladder wraps up without it."""
+        self._nudge("report_phase_stall", self._report_stall_msg())
+        self._report_pushed = True
+        self._retire_nudge("ioc_pivot_nudge")
         self._log({"event": "report_phase_stall", "turn": turn,
                    "quiet_turns": REPORT_STALL_TURNS, "reason": reason})
         if not self._report_stall_exhausted(turn):
@@ -1398,6 +1698,654 @@ class Agent:
         self.ui.warn(f"report phase pushed {self._report_stall_fires} times "
                      "without getting closer to the report — wrapping up")
         return True
+
+    @staticmethod
+    def _report_stall_msg() -> str:
+        from core.deferred_intents import work_order_on
+        return _REPORT_STALL_MSG_WO if work_order_on() else _REPORT_STALL_MSG
+
+    # ── the work order (ATLAS_WORK_ORDER) ─────────────────────────────────
+
+    def _escape_follow_up(self) -> str:
+        """The escape's follow-up: the work order's shortest ready call when
+        the order is on and a read is due (core.work_order), else the ask
+        to issue the step the summary named."""
+        try:
+            from core.deferred_intents import work_order_on
+            if work_order_on():
+                from core import work_order as W
+                from core.execution_log import log
+                call, item_id = W.shortest_ready(log, self.case_dir, self._tool_params)
+                if call:
+                    # A showing like the per-turn block's, so the evidence
+                    # gaps' "shown N times" counts it; the turn has not
+                    # ended, so it is not counted as left unattended.
+                    W.mark_presented(log, [item_id], {item_id})
+                    if call.startswith("read "):
+                        return _ESCAPE_FOLLOW_UP_READ.format(call=call[5:])
+                    return _ESCAPE_FOLLOW_UP_READY.format(call=call)
+        except Exception:  # noqa: BLE001 - the plain follow-up always stands
+            pass
+        return _ESCAPE_FOLLOW_UP
+
+    def _tool_params(self, tool: str) -> list[str] | None:
+        """The argument names of ``tool`` in the tool list, or None."""
+        try:
+            name = self.toolbox.resolve(tool)
+            info = self.toolbox.tools.get(name) if name else None
+            return list(((info.schema or {}).get("properties") or {}).keys()) if info else None
+        except Exception:  # noqa: BLE001
+            return None
+
+    def work_order_settled(self) -> bool:
+        """No counted due item, or the order neglected: the report ladder's
+        force-report, finish and close-out may go ahead."""
+        from core.deferred_intents import work_order_on
+        if not work_order_on() or not self.case_dir:
+            return True
+        if getattr(self, "_wo_neglected", False):
+            return True
+        try:
+            from core.execution_log import log
+            from core.work_order import counted_due
+            return not counted_due(log, self.case_dir)
+        except Exception:  # noqa: BLE001
+            return True
+
+    def _work_order_turn(self, turn: int, wrapped_up: bool) -> None:
+        """Once per turn: derive items from the run's state, track movement
+        and the neglect streak, and show the due items as ready calls last
+        in the conversation, superseding the standing copy. Fail-open."""
+        from core.deferred_intents import work_order_on
+        if not (work_order_on() and self.case_dir):
+            return
+        try:
+            from core.execution_log import log
+            from core import work_order as W
+            self._derive_work_items(turn)
+            W.moot_items(log, str(self.case_dir))
+            # Movement is a change of an item's state, by whatever path it
+            # came (a call closing it, a question closing and making it moot,
+            # a director dismissal): the states now against last turn's.
+            states = {i["call_id"]: i.get("status") for i in log.work_items()}
+            before = getattr(self, "_wo_states", None) or {}
+            moved = set(getattr(self, "_wo_moved", None) or ()) | {
+                cid for cid, st in before.items() if st in ("due", "proposed") and states.get(cid) != st}
+            self._wo_states = states
+            self._wo_moved = set()
+            # The streak lives on the loop and restarts at 0 in a resumed
+            # session: at most REPORT_STALL_TURNS more turns before neglect,
+            # while the items' own presented/unattended counts persist.
+            shown_last = list(getattr(self, "_wo_shown", None) or [])
+            if shown_last:
+                if moved & set(shown_last):
+                    self._wo_streak = 0
+                    self._wo_neglected = False
+                else:
+                    self._wo_streak = getattr(self, "_wo_streak", 0) + 1
+                W.mark_presented(log, shown_last, moved)
+            if (not getattr(self, "_wo_neglected", False)
+                    and getattr(self, "_wo_streak", 0) >= REPORT_STALL_TURNS):
+                self._wo_neglected = True
+                self._log({"event": "work_order_neglected", "turn": turn,
+                           "streak": self._wo_streak, "shown": shown_last})
+                self._director_event(turn, "neglected")
+            headers = self._work_order_headers(turn)
+            text, shown = W.work_order_block(log, self.case_dir, self._tool_params,
+                                             header_lines=headers)
+            had_due = bool(getattr(self, "_wo_had_due", False))
+            self._wo_had_due = bool(shown)
+            if had_due and not shown and getattr(self, "_wo_plan_done", False):
+                self._director_event(turn, "due_set_empty")
+            self._wo_shown = shown
+            xo_text, xo_readers = self._extracted_open_block(turn)
+            tools = ([i.get("priority_tool") or i.get("tool") for i in log.work_items(statuses=("due",))
+                      if i.get("call_id") in shown] if text else []) + xo_readers
+            if tools:
+                # One load for the turn: the due items' tools and the readers
+                # the class block names, so the one's room is never made from
+                # the other's namespaces.
+                self._load_namespaces_for([t for t in tools if t], turn=turn)
+            if text:
+                self._nudge("work_order", text)
+            else:
+                self._retire_nudge("work_order")
+        except Exception as e:  # noqa: BLE001
+            self._log({"event": "work_order_turn_failed", "turn": turn, "error": str(e)[:200]})
+        self._extracted_open_turn(turn)
+
+    def _extracted_open_block(self, turn: int) -> tuple[str, list[str]]:
+        """(block, the readers it names) of the extracted file classes no call
+        has read and a read is offered on (offered_open), from the first finish
+        deferral on; ("", []) before it or when none is left. Computed from the
+        trace each turn (extracted_outputs), never stored; recomputed only when
+        the trace changed (its length or last call id), since a read or a new
+        output is a call. A background job whose outcome lands without a new
+        entry shows one turn late. Fail-open."""
+        if not self._closing_stage():
+            return "", []
+        try:
+            from core.execution_log import log
+            from core import work_order as W
+            classes = self._open_classes_cached()
+            mark = (len(log._entries), log._entries[-1].get("call_id") if log._entries else None,
+                    getattr(self, "_oc_cache", (None,))[0])
+            cached = getattr(self, "_xo_cache", None)
+            if cached is None or cached[0] != mark:
+                from core.coverage_ledger import extracted_outputs, offered_open
+                outs = offered_open(extracted_outputs(self.case_dir, readers=True)) \
+                    if getattr(self, "_finish_named_at", None) is not None else []
+                readers = list(dict.fromkeys(
+                    str(name) for o in outs for pairs in (o.get("readers") or {}).values() for name, _m in pairs))
+                if classes:
+                    # The leave tool and the readers the class block names
+                    # load together, so the call it asks for can arrive.
+                    readers += ["coverage.set_evidence_disposition", "coverage.ledger_status"]
+                    readers += [r for g in classes for r in g.get("readers") or []]
+                cached = self._xo_cache = (mark, "\n".join(W.open_work_lines({"parts": [], "derived": outs,
+                                                                               "due": [], "classes": classes})),
+                                           list(dict.fromkeys(readers)))
+            return cached[1], list(cached[2])
+        except Exception as e:  # noqa: BLE001
+            self._log({"event": "extracted_open_turn_failed", "turn": turn, "error": str(e)[:200]})
+            return "", []
+
+    def _extracted_open_turn(self, turn: int) -> None:
+        """The class block (_extracted_open_block) shown each turn after the
+        due items (the planned reads come first), superseding the standing
+        copy; retired once none is left. A class named once at the deferral
+        fades as the conversation grows, and only the last block of a turn
+        reliably steers a small model."""
+        text, _readers = self._extracted_open_block(turn)
+        if text:
+            self._nudge("extracted_open", text)
+        elif self._closing_stage():
+            self._retire_nudge("extracted_open")
+
+    def _stall_work_order(self) -> tuple[bool, list[str]] | None:
+        """(settled, due ready calls) for the stall ladder, None when the
+        work order is off."""
+        from core.deferred_intents import work_order_on
+        if not work_order_on() or not self.case_dir:
+            return None
+        try:
+            from core.execution_log import log
+            from core.work_order import counted_due, ready_call
+            due = counted_due(log, self.case_dir)
+            return (self.work_order_settled(),
+                    [ready_call(i, self._tool_params(i.get("tool") or "")) for i in due[:6]])
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _derive_work_items(self, turn: int) -> None:
+        """Item sources read from the run's state each turn: the plan once
+        the inventory gate holds (and a re-plan for a question whose items
+        all closed without a claim), the sources behind a question's claims
+        when its links change, absence contradictions, and every few turns
+        the proposals (index artefacts, series read in part). A question
+        leaving or re-entering the actionable set asks the director for a
+        review. Each source fails open on its own."""
+        from core.deferred_intents import work_order_plan_on
+        from core.execution_log import log
+        from core import question_plan as Q
+        case = str(self.case_dir)
+        try:
+            from core.investigation_tasks import ACTIONABLE_STATUSES, load_tasks
+            tasks = [t for t in load_tasks(case).get("tasks") or [] if isinstance(t, dict) and t.get("id")]
+        except Exception:  # noqa: BLE001
+            tasks = []
+        status_sig = {str(t["id"]): str(t.get("status") or "") in ACTIONABLE_STATUSES for t in tasks}
+        prev_sig = getattr(self, "_wo_task_sig", None)
+        self._wo_task_sig = status_sig
+        if prev_sig is not None and any(prev_sig.get(k) != v for k, v in status_sig.items() if k in prev_sig):
+            self._director_event(turn, "question_closed_or_reopened")
+        if work_order_plan_on():
+            try:
+                self._plan_questions(turn, case, tasks)
+            except Exception as e:  # noqa: BLE001
+                self._log({"event": "work_order_plan_failed", "turn": turn, "error": str(e)[:200]})
+        self._triage_evidence(turn, case)
+        self._claim_source_items(turn, case, tasks)
+        try:
+            # The incident map syncs once per turn; its signals (a specific
+            # join) become items with the change kind as origin.
+            from core.incident_map import feed_work_items
+            self._map_cursor = feed_work_items(log, case, getattr(self, "_map_cursor", 0))
+        except Exception as e:  # noqa: BLE001
+            self._log({"event": "work_order_map_failed", "turn": turn, "error": str(e)[:200]})
+        if turn % IOC_PIVOT_NUDGE_EVERY == 0:
+            try:
+                Q.proposal_items(log, case)
+            except Exception as e:  # noqa: BLE001
+                self._log({"event": "work_order_proposals_failed", "turn": turn, "error": str(e)[:200]})
+
+    def _claim_source_items(self, turn: int, case: str, tasks: list[dict]) -> None:
+        """The sources behind a question's claims when its links change, and
+        the absence contradictions; each fails open. Both loops call it."""
+        from core.deferred_intents import work_order_sources_on
+        from core.execution_log import log
+        from core import question_plan as Q
+        if work_order_sources_on():
+            try:
+                links = {str(t["id"]): sorted(set(t.get("related_claim_ids") or [])
+                                              | {c for p in t.get("parts") or [] if isinstance(p, dict)
+                                                 for c in p.get("claim_ids") or []}) for t in tasks}
+                seen = getattr(self, "_wo_links", {})
+                for t in tasks:
+                    if links[str(t["id"])] and links[str(t["id"])] != seen.get(str(t["id"])):
+                        Q.source_items_for_question(log, case, t)
+                self._wo_links = links
+            except Exception as e:  # noqa: BLE001
+                self._log({"event": "work_order_sources_failed", "turn": turn, "error": str(e)[:200]})
+        try:
+            Q.absence_items(log, case)
+        except Exception as e:  # noqa: BLE001
+            self._log({"event": "work_order_absence_failed", "turn": turn, "error": str(e)[:200]})
+
+    def _plan_questions(self, turn: int, case: str, tasks: list[dict]) -> None:
+        """The per-question plan, once the inventory gate first holds: one
+        reason-role call per open question not planned in this trace (four
+        at a time), outside the analyst's conversation; and a re-plan of a
+        question whose items all closed while it has no linked claim. A
+        re-plan that adds nothing marks the question exhausted."""
+        from concurrent.futures import ThreadPoolExecutor
+        from core.execution_log import log
+        from core.investigation_tasks import ACTIONABLE_STATUSES
+        from core import question_plan as Q
+        if not getattr(self, "_wo_plan_done", False):
+            from core.evidence_inventory_gate import inventory_satisfied
+            if not inventory_satisfied(case):
+                return
+            done = Q.planned_task_ids(log)
+            todo = [t for t in tasks if str(t.get("status") or "") in ACTIONABLE_STATUSES
+                    and str(t["id"]) not in done]
+            tools = Q.reading_tools()
+            started = time.monotonic()
+            from core.frontier_queue import beside_workers
+            with ThreadPoolExecutor(max_workers=beside_workers()) as pool:
+                results = list(pool.map(lambda t: (t, Q.plan_question(log, case, t, tools)), todo))
+            for t, r in results:
+                self._note_plan_result(turn, t, r)
+                if r["empty"]:
+                    self._log({"event": "work_order_plan_empty", "turn": turn, "task": t["id"],
+                               "reads": r["reads"], "invalid": r["invalid"], "reason": r.get("reason", ""),
+                               "refused": list(r.get("refused") or [])[:5]})
+                    self.ui.warn(f"no read plan for {t['id']}: {r.get('reason') or 'no valid read'}")
+            self._wo_plan_done = True
+            self._log({"event": "work_order_planned", "turn": turn, "questions": len(todo),
+                       "items": sum(len(r["items"]) for _t, r in results),
+                       "seconds": round(time.monotonic() - started, 1)})
+            return
+        exhausted = getattr(self, "_wo_exhausted", None)
+        if exhausted is None:
+            exhausted = self._wo_exhausted = set()
+        for t in tasks:
+            tid = str(t["id"])
+            if tid in exhausted or str(t.get("status") or "") not in ACTIONABLE_STATUSES:
+                continue
+            mine = [i for i in log.work_items(task_id=tid) if i.get("origin") == "plan"]
+            linked = bool(t.get("related_claim_ids")) or any(
+                p.get("claim_ids") for p in t.get("parts") or [] if isinstance(p, dict))
+            if not mine or linked or any(i.get("status") in ("due", "proposed") for i in mine):
+                continue
+            before = {i["call_id"] for i in log.work_items()}
+            closed = "\n".join(f"- {i.get('tool')} {i.get('args_summary')}: {i.get('status')}"
+                               + (f" ({i.get('outcome')[:80]})" if i.get("outcome") else "") for i in mine)
+            r = Q.plan_question(log, case, t, extra="READS ALREADY DONE OR FAILED (plan others):\n" + closed)
+            self._note_plan_result(turn, t, r)
+            # Only a new item still open after creation is a new read: a
+            # re-planned read of a target already read is created closed.
+            if not any(i["call_id"] not in before and i.get("status") in ("due", "proposed")
+                       for i in r["items"]):
+                exhausted.add(tid)
+                self._log({"event": "work_order_plan_exhausted", "turn": turn, "task": tid})
+                self._director_event(turn, "plan_exhausted")
+
+    def _triage_evidence(self, turn: int, case: str) -> None:
+        """Evidence disposition (ATLAS_EVIDENCE_DISPOSITION): once the
+        inventory holds, every pending item not triaged in this trace gets
+        its triage call; each turn the triage items and dispositions are
+        brought together. Fail-open."""
+        try:
+            from core.evidence_disposition import disposition_on
+            if not disposition_on():
+                return
+            from core.evidence_inventory_gate import inventory_satisfied
+            if not inventory_satisfied(case):
+                return
+            from core.execution_log import log
+            from core.evidence_triage import sync_triage, triage_pending
+            def _started(n: int) -> None:
+                # The calls run inside this turn, four at a time: say so.
+                self.ui.info(f"triaging {n} evidence item(s): one short focused call each")
+                self._log({"event": "evidence_triage_started", "turn": turn, "items": n})
+            done = triage_pending(log, case, on_start=_started, agent=self)
+            if done:
+                self._log({"event": "evidence_triaged", "turn": turn, "items": len(done),
+                           "left": sum(len(d["left"]) for d in done),
+                           "refused": sum(len(d["refused"]) for d in done),
+                           "work_items": sum(len(d["items"]) for d in done)})
+            changed = sync_triage(log, case)
+            if changed:
+                self._log({"event": "evidence_triage_synced", "turn": turn, "items": changed})
+            from core.evidence_leave import reopen_left
+            reopened = reopen_left(log, case)           # one batch per turn
+            if reopened:
+                self._log({"event": "evidence_reopened", "turn": turn, "units": reopened})
+        except Exception as e:  # noqa: BLE001
+            self._log({"event": "evidence_triage_failed", "turn": turn, "error": str(e)[:200]})
+
+    def _note_plan_result(self, turn: int, task: dict, r: dict) -> None:
+        """What a plan call leaves behind: the LOCATE outcome in the log."""
+        loc = r.get("locate") or {}
+        if loc.get("empty"):
+            self._log({"event": "work_order_locate_empty", "turn": turn, "task": task["id"],
+                       "dropped": loc.get("dropped"), "error": loc.get("error", "")})
+
+    def _work_order_headers(self, turn: int) -> list[str]:
+        """Lines at the head of the work-order block: the director's last
+        loop-made review, the progress line and the estate counts."""
+        lines: list[str] = []
+        note = getattr(self, "_wo_director_line", "")
+        if note:
+            lines.append(note)
+            self._wo_director_line = ""
+        from core.deferred_intents import dair_no_defer_on
+        progress = self._progress_line(turn) if dair_no_defer_on() else ""
+        if progress:
+            lines.append(progress)
+            self._at_progress_line(turn)
+        counts = getattr(self, "_wo_count_lines", None)
+        if counts:
+            lines += counts
+            self._wo_count_lines = []
+        pending = self._estate_pending()
+        if pending:
+            lines.append(pending)
+        if not self._closing_stage():
+            try:
+                from core import work_order as W
+                count = W.class_count_line({"classes": self._open_classes_cached()}, str(self.case_dir))
+            except Exception:  # noqa: BLE001
+                count = ""
+            if count:
+                lines.append(count)
+        return lines
+
+    def _at_progress_line(self, turn: int) -> None:
+        """What runs with each progress line: the sources behind every
+        question's claims again, and the estate count of indicators found
+        since the last line (filled in by the count)."""
+        from core.deferred_intents import work_order_sources_on
+        if work_order_sources_on():
+            self._wo_links = {}          # re-derive every question's sources once
+        self._count_new_indicators(turn)
+
+    def _count_new_indicators(self, turn: int) -> None:
+        """With each progress line: the indicators the findings attribute
+        that no count has covered yet, over every table, in one pass."""
+        from core.deferred_intents import estate_count_on
+        if not (estate_count_on() and getattr(self, "_estate_intake_done", False)):
+            return
+        try:
+            from core.ioc_pivots import _is_pivotable, indicators_from_beliefs
+            counted = getattr(self, "_estate_counted", set())
+            new = [i for i in indicators_from_beliefs(str(self.case_dir)) if _is_pivotable(i) and i not in counted]
+            if new:
+                self._estate_count(turn, new, self._estate_tables(), why="new indicators")
+        except Exception as e:  # noqa: BLE001
+            self._log({"event": "estate_count_failed", "turn": turn, "error": str(e)[:200]})
+
+    def _estate_tables(self) -> list[str]:
+        from core.ioc_pivots import evidence_sources
+        from tools.tabular import _kind
+        return sorted(rel for rel in evidence_sources(str(self.case_dir)) if _kind(rel) in ("csv", "jsonl", "xlsx"))
+
+    def _estate_count_turn(self, turn: int) -> None:
+        """The estate count (ATLAS_ESTATE_COUNT): once the inventory gate
+        holds, the known indicators over every table; afterwards one pass
+        per turn over the tables that appeared since the last, over the
+        known indicators (a parser that writes one table per log leaves
+        dozens at once: one pass, one thread, one trace entry for them, not
+        one each, which filled the DAIR window and the progress line with
+        counts). The lines open the next work-order block (or stand as
+        their own message)."""
+        from core.deferred_intents import estate_count_on
+        if not (estate_count_on() and self.case_dir):
+            return
+        self._estate_collect(turn)
+        try:
+            from core.evidence_inventory_gate import inventory_satisfied
+            from core.ioc_pivots import load_pivots
+            case = str(self.case_dir)
+            tables = self._estate_tables()
+            known = list((load_pivots(case).get("pivots") or {}).keys())
+            if not getattr(self, "_estate_intake_done", False):
+                if not inventory_satisfied(case):
+                    return
+                self._estate_intake_done = True
+                self._estate_tables_seen = set(tables)
+                if known and tables:
+                    self._estate_count(turn, known, tables, why="intake")
+                return
+            seen = getattr(self, "_estate_tables_seen", set())
+            new = [t for t in tables if t not in seen]
+            seen.update(new)
+            self._estate_tables_seen = seen
+            if known and new:
+                self._estate_count(turn, known, new, why="new tables", new_tables=new)
+        except Exception as e:  # noqa: BLE001
+            self._log({"event": "estate_count_failed", "turn": turn, "error": str(e)[:200]})
+
+    def _estate_count(self, turn: int, indicators: list[str], tables: list[str], *, why: str,
+                      new_tables: list[str] | None = None) -> None:
+        """One count pass. With ATLAS_ESTATE_COUNT_ASYNC the pass reads the
+        tables in a thread of its own and the analyst's turns go on; the
+        main loop applies the result once the pass ends (_estate_collect),
+        so the ledger, the trace and the conversation are written by one
+        thread only. Without it the pass runs here."""
+        from core.deferred_intents import estate_count_async_on
+        from tools.tabular import count_indicators
+        case = str(self.case_dir)
+        counted = getattr(self, "_estate_counted", set())
+        counted.update(indicators)
+        self._estate_counted = counted
+        if not estate_count_async_on():
+            self._estate_apply(turn, indicators, tables, why, new_tables, count_indicators(case, indicators, tables))
+            return
+        import threading
+        job: dict = {"indicators": list(indicators), "tables": list(tables), "why": why, "new_tables": new_tables,
+                     "res": None, "error": ""}
+
+        def work() -> None:
+            try:
+                job["res"] = count_indicators(case, job["indicators"], job["tables"])
+            except Exception as e:  # noqa: BLE001 - reported by _estate_collect
+                job["error"] = f"{type(e).__name__}: {e}"[:200]
+        job["thread"] = threading.Thread(target=work, name="atlas-estate-count", daemon=True)
+        self._estate_jobs = [*getattr(self, "_estate_jobs", []), job]
+        job["thread"].start()
+        self._log({"event": "estate_count_started", "turn": turn, "why": why, "indicators": len(indicators),
+                   "tables": len(tables)})
+        from core.deferred_intents import work_order_on
+        if not work_order_on():
+            self._nudge("estate_counts", self._estate_pending())
+
+    def _estate_pending(self) -> str:
+        """The line that stands for passes still reading their tables."""
+        running = [j for j in getattr(self, "_estate_jobs", []) if j["thread"].is_alive()]
+        if not running:
+            return ""
+        tables = len({t for j in running for t in j["tables"]})
+        iocs = len({i for j in running for i in j["indicators"]})
+        return (f"[estate counts] counting {tables} tables for {iocs} indicators; "
+                "the counts follow when the pass ends")
+
+    def _estate_join(self, turn: int) -> None:
+        """Wait for every count pass still reading and apply it: before the
+        report is checked or written and when the run ends. The wait is
+        bounded by the tables' size, as the pass is."""
+        for job in list(getattr(self, "_estate_jobs", [])):
+            job["thread"].join()
+        self._estate_collect(turn)
+
+    def _estate_collect(self, turn: int) -> None:
+        """Apply every finished pass (main thread): its counts, trace entry
+        and lines; a failed pass is logged and its indicators count again
+        with the next pass."""
+        jobs = getattr(self, "_estate_jobs", [])
+        if not jobs:
+            return
+        keep = []
+        for job in jobs:
+            if job["thread"].is_alive():
+                keep.append(job)
+                continue
+            if job["res"] is None:
+                self._estate_counted = getattr(self, "_estate_counted", set()) - set(job["indicators"])
+                self._log({"event": "estate_count_failed", "turn": turn, "error": job["error"]})
+                try:
+                    from core.execution_log import log
+                    log.record_tool_call("<py>:coverage_count_indicators", False, False, 0, 1,
+                                         stderr=f"estate count over {len(job['tables'])} tables failed: "
+                                                + job["error"])
+                except Exception:  # noqa: BLE001 - the loop log holds it
+                    pass
+                continue
+            self._estate_apply(turn, job["indicators"], job["tables"], job["why"], job["new_tables"], job["res"])
+        self._estate_jobs = keep
+
+    def _estate_apply(self, turn: int, indicators: list[str], tables: list[str], why: str,
+                      new_tables: list[str] | None, res: dict) -> None:
+        """A finished pass: the counts go to the pivot ledger and into a
+        trace entry marked ``kind: "count"`` (numbers, never rows: no
+        sighting, cited like a listing), the lines to the next block."""
+        from core.deferred_intents import work_order_on
+        from core.execution_log import log
+        from core.ioc_pivots import count_lines, record_counts
+        case = str(self.case_dir)
+        record_counts(case, res["counts"])
+        summary = {i: {s: c.get("full") or c.get("name") for s, c in per.items()} for i, per in res["counts"].items()}
+        cid = log.record_tool_call("<py>:coverage_count_indicators", True, False, 0, 0,
+                                   stdout_excerpt=json.dumps({"why": why, "tables": len(tables),
+                                                              "counts": summary}, default=str)[:4000])
+        log.annotate_tool_call(cid, kind="count")
+        lines = count_lines(case, res["counts"], sources=tables, new_tables=new_tables)
+        self._log({"event": "estate_count", "turn": turn, "why": why, "indicators": len(indicators),
+                   "tables": len(tables), "errors": len(res["errors"])})
+        if not lines:
+            if not work_order_on() and not self._estate_pending():
+                self._retire_nudge("estate_counts")       # the "counting" line is stale
+            return
+        if work_order_on():
+            self._wo_count_lines = (getattr(self, "_wo_count_lines", None) or []) + lines
+        else:
+            self._nudge("estate_counts", "\n".join(lines))
+
+    def _progress_line(self, turn: int) -> str:
+        """Every DAIR_WINDOW actions, on its own counter (the actions since
+        the last line's mark): reads of new sources and how many failed, the
+        findings, the other calls, and where the questions stand."""
+        try:
+            from core.execution_log import log
+            from core.middleware import DAIR_WINDOW
+            acts = [e for e in log._entries if e.get("type") in log.ACTION_TYPES]
+            mark = int(getattr(self, "_progress_mark", 0) or 0)
+            from core.execution_log import action_key
+            window = [e for e in acts if int(e.get("call_id") or 0) > mark]
+            if len({action_key(e) for e in window}) < DAIR_WINDOW:
+                return ""
+            self._progress_mark = int(window[-1].get("call_id") or 0)
+            from core.coverage_ledger import _entry_tool, _failed_attempt, reads_content, resolved_entry
+            earlier: set[str] = set()
+            for e in acts:
+                if int(e.get("call_id") or 0) <= mark and e.get("type") == "tool_call":
+                    earlier.add(str(e.get("args") or e.get("cmd") or ""))
+            # Each call as the read rule sees it: a background job's start by
+            # the job's outcome (nothing while it runs), no analyst tool no read.
+            jobs: dict = {}
+            reads = [r for r in (resolved_entry(self.case_dir, e, jobs) for e in window
+                                 if e.get("type") == "tool_call")
+                     if r is not None and reads_content(_entry_tool(r))
+                     and str(r.get("args") or r.get("cmd") or "") not in earlier]
+            failed = sum(1 for e in reads if _failed_attempt(e))
+            findings = [e for e in window if e.get("type") == "finding"]
+            other = max(0, len({action_key(e) for e in window}) - len(reads) - len(findings))
+            fids = ", ".join(str(e.get("call_id")) for e in findings[:6])
+            qs = ""
+            try:
+                from collections import Counter
+                from core.investigation_tasks import load_tasks
+                st = Counter(str(t.get("status") or "open") for t in load_tasks(self.case_dir).get("tasks") or []
+                             if isinstance(t, dict))
+                if st:
+                    answered = st.get("answered", 0) + st.get("done", 0)
+                    partial = st.get("partial", 0)
+                    qs = (f" Questions: {answered} answered, {partial} partial, "
+                          f"{sum(st.values()) - answered - partial} other.")
+            except Exception:  # noqa: BLE001
+                qs = ""
+            self._log({"event": "progress_line", "turn": turn, "actions": len(window)})
+            n_actions = len({action_key(e) for e in window})
+            return (f"[progress] last {n_actions} actions: {len(reads)} reads of new sources ({failed} failed), "
+                    f"{len(findings)} findings" + (f" (calls {fids})" if fids else "")
+                    + f", {other} other calls.{qs}")
+        except Exception:  # noqa: BLE001
+            return ""
+
+    def _director_event(self, turn: int, event: str) -> None:
+        """A review the loop asks the director for on an event of the order
+        (the due set emptied, the order turned neglected, a re-plan came back
+        exhausted, a question closed or reopened), in-process like the
+        pre-report check. Its result goes through _note_dair_phase, so the
+        phase follows the director and its reads become items; the analyst
+        reads one line about it. A failed review is logged and skipped.
+        The frontier has no director: its synthesis item covers the review."""
+        if getattr(self, "_loop_mode", "conversation") == "frontier":
+            return
+        try:
+            from tools.dair import dair_assess
+            from core.execution_log import log
+            from core import work_order as W
+            due = len(W.counted_due(log, str(self.case_dir)))
+            summary = (f"[loop review: {event.replace('_', ' ')}] The work order has {due} due reads; "
+                       f"{len(log.work_items(statuses=('resolved',)))} read, "
+                       f"{len(log.work_items(statuses=('failed',)))} failed, "
+                       f"{len(log.work_items(statuses=('proposed',)))} proposed.")
+            from core.deferred_intents import director_review_on
+            if director_review_on():
+                # The analyst's own stated next reads reach the review, so a
+                # lead it named is not lost between turns.
+                notes = [" ".join(str(m.get("content") or "").split())[:300]
+                         for m in reversed(self.messages or []) if m.get("role") == "assistant"
+                         and str(m.get("content") or "").strip()][:3]
+                if notes:
+                    summary += "\nANALYST'S LATEST NOTES (last three replies, trimmed):\n" + "\n".join(
+                        f"- {n}" for n in reversed(notes))
+            before_phase = getattr(self, "_dair_phase", "")
+            before_ids = {i["call_id"] for i in log.work_items()}
+            out = dair_assess(summary, phase_stack=None)
+            result = json.dumps(out, default=str) if isinstance(out, dict) else str(out)
+            self._note_dair_phase(result)
+            added = [i for i in log.work_items() if i["call_id"] not in before_ids]
+            phase = getattr(self, "_dair_phase", "")
+            line = f"[director] phase {phase}" + (f" (was {before_phase})" if before_phase and before_phase != phase
+                                                   else "")
+            if added:
+                qs = sorted({t for i in added for t in i.get("task_ids") or []})
+                line += f"; added {len(added)} items" + (f" ({', '.join(qs[:6])})" if qs else "")
+            proposed = len(log.work_items(statuses=("proposed",)))
+            if proposed:
+                line += f"; {proposed} proposed kept"
+            untracked = int(getattr(self, "_wo_not_tracked", 0) or 0)
+            if untracked:
+                line += f"; {untracked} not tracked (no target)"
+            self._wo_director_line = line
+            self._log({"event": "work_order_director_review", "turn": turn, "trigger": event,
+                       "phase": phase, "added": len(added)})
+        except Exception as e:  # noqa: BLE001
+            self._log({"event": "work_order_director_review_failed", "turn": turn, "trigger": event,
+                       "error": str(e)[:200]})
 
     def _report_stall_exhausted(self, turn: int) -> bool:
         """Has the report-phase push fired REPORT_STALL_WRAPUP_FIRES times
@@ -1492,6 +2440,39 @@ class Agent:
                 return bool(body) and body not in (_TOOL_STUB, _TURN_STUB)
         return False
 
+    def _rest_of_result_hint(self, hit, spill: str) -> str:
+        """Where the rest of a cut result is, for the replay and pointer
+        texts: a table tool's result is narrowed (one term, a filter, a
+        period), never searched through its spilled JSON; an executor tool's
+        spill is searched; else the call is narrowed."""
+        from tools._gates.universal_from_truncated import rest_of_result_hint
+        entry = None
+        if getattr(hit, "trace_call_id", ""):
+            try:
+                from core.execution_log import log
+                entry = (log.index().by_call_id or {}).get(int(hit.trace_call_id))
+            except Exception:  # noqa: BLE001
+                entry = None
+        cmd = str(entry.get("cmd") or "") if isinstance(entry, dict) else ""
+        if not cmd:
+            # No trace entry to read (the result carried no call id): the
+            # memo's own tool name decides, so a capped table result still
+            # names its narrower calls.
+            from core.coverage_ledger import listed_tool_name
+            name = listed_tool_name(str(getattr(hit, "tool", "") or ""))
+            if name.startswith("table_"):
+                entry = {"cmd": f"<py>:table_{name}"}
+                cmd = entry["cmd"]
+        if cmd.startswith("<py>:table_") or (cmd.startswith("<py>:") and "view_rows_shown" in entry):
+            return rest_of_result_hint(entry, "", None)
+        if spill:
+            return (f"The complete output is on disk at {spill}: search it with "
+                    "strings.strings_grep or search.search_evidence for what you need, "
+                    "or narrow the call so the whole answer fits.")
+        return ("Ask search.search_evidence for the detail you need, or narrow the call "
+                "(a subdirectory or inode, no recursion, a pattern or a column) so the "
+                "whole answer fits.")
+
     def _pointed_result_incomplete(self, hit) -> tuple[str, str]:
         """Why the result an identical call is pointed at was not a complete
         view, and where its complete output is; ``("", "")`` when the model
@@ -1546,10 +2527,15 @@ class Agent:
             stop.set()
 
     def _chat_turn_asked_again(self, turn: int):
-        """``_chat_turn``, asked again after a pause when the provider's
-        transport failed on every attempt of the request. A failed call
-        appended nothing to the history and ran no tool, so the same turn is
-        asked as it was. A deadline or any other LLMError passes through."""
+        """``_chat_turn``, asked again when the provider's transport failed.
+
+        With ATLAS_MODEL_CALL_ESCAPE on this is the escape (_escape_turn);
+        off, the earlier rule: a pause and the same request, and after
+        LOST_TURN_RETRIES losses the error goes to the run loop. A failed
+        call appended nothing to the history and ran no tool."""
+        from agent.llm import model_call_escape_on
+        if model_call_escape_on():
+            return self._escape_turn(turn)
         lost = 0
         while True:
             try:
@@ -1564,11 +2550,269 @@ class Agent:
                 self.ui.warn(f"model call lost ({e}); asking again in {pause:.0f}s")
                 time.sleep(pause)
 
+    # ── the escape (ATLAS_MODEL_CALL_ESCAPE) ───────────────────────────────
+
+    def _answered_in_run(self) -> bool:
+        """The analyst has answered in this run: in this process, or (a
+        resumed run) an earlier process's run transcript under analysis/
+        holds an assistant event. The execution trace is not the record:
+        intake writes tool calls there before the first reply. Read once."""
+        if getattr(self, "_answered_in_process", False):
+            return True
+        cached = getattr(self, "_answered_before", None)
+        if cached is not None:
+            return cached
+        found = False
+        try:
+            from core.run_state import TRANSCRIPT_PREFIX
+            analysis = (self.case_dir / "analysis") if self.case_dir else None
+            mine = getattr(self, "transcript_path", None)
+            for path in sorted(analysis.glob(f"{TRANSCRIPT_PREFIX}*.jsonl")) if analysis else []:
+                if mine is not None and path == mine:
+                    continue
+                with open(path, encoding="utf-8", errors="replace") as fh:
+                    if any('"event": "assistant"' in line for line in fh):
+                        found = True
+                        break
+        except Exception:  # noqa: BLE001 - no record reads as no answer
+            found = False
+        self._answered_before = found
+        return found
+
+    def _escape_turn(self, turn: int):
+        """The analyst's escape from a lost model call.
+
+        A reply the provider or the connection cut is a failed reply, never
+        the model's words and never a reason to end the analysis once the
+        model has answered in this run. Each loss moves to the next rung:
+        0 the same request (only after a fast loss, once), 1 one thinking
+        level lower, 2 a progress ask without the tool list, 3 the same ask
+        over a shortened copy of the history (repeated). A pause doubling
+        from LOST_TURN_PAUSE to LOST_TURN_PAUSE_MAX comes before each
+        request after a loss; every request is learn=False. A summary reply
+        after rung 2 or 3 is followed by one request with the tool list
+        back asking for the next step as one call. The escape never gives up
+        on its own; it raises only before the run's first answer (after two
+        paused identical re-asks) and past the operator's wall clock."""
+        choice0 = getattr(self, "_tool_choice_next", None)
+        lost = 0
+        rung = -1
+        first_loss = None
+        stepped = False
+        level_now = None
+        fallback_tried = False
+        following = False
+        alerted = False
+        while True:
+            try:
+                resp = self._chat_turn()
+            except LLMStatusError as e:
+                tool_less = bool((getattr(self, "_escape_kw", None) or {}).get("_no_tools"))
+                if rung >= 2 and tool_less and e.status == 400 and not fallback_tried:
+                    # An endpoint that refuses a history with tool calls and
+                    # no tool definitions: the same ask with the tool list
+                    # and tool_choice "none".
+                    fallback_tried = True
+                    self._escape_kw = {**self._escape_request(rung, level_now, None), "tool_choice": "none"}
+                    self._escape_kw.pop("_no_tools", None)
+                    continue
+                self._escape_clear()
+                raise
+            except (LLMTransportError, LLMDeadlineError) as e:
+                lost += 1
+                first_loss = first_loss or time.monotonic()
+                deadline = isinstance(e, LLMDeadlineError)
+                runaway = deadline or bool(getattr(e, "runaway", False))
+                long = deadline or bool(getattr(e, "long", False))
+                if not self._answered_in_run():
+                    # A provider that never answered this run is a
+                    # configuration problem: two paused identical re-asks
+                    # (a blip after a long intake), then a clean stop.
+                    if lost > LOST_TURN_RETRIES:
+                        self._escape_clear()
+                        raise
+                    pause = min(LOST_TURN_PAUSE * (2 ** (lost - 1)), LOST_TURN_PAUSE_MAX)
+                    self._log({"event": "llm_turn_lost", "turn": turn, "attempt": lost,
+                               "kind": getattr(e, "kind", "deadline" if deadline else ""),
+                               "pause_seconds": pause, "next": "unchanged", "error": str(e)[:500]})
+                    self.ui.warn(f"model call lost before the first reply of this run ({e}); "
+                                 f"asking again in {pause:.0f}s")
+                    with self._status_heartbeat():
+                        time.sleep(pause)
+                    continue
+                if getattr(self.client, "ladder_events", None) and any(
+                        ev.get("cut") == "provider" for ev in self.client.ladder_events
+                        if isinstance(ev, dict)):
+                    stepped = True       # chat() already stepped down in this turn
+                # The next rung.
+                if rung < 0 and not long and not runaway:
+                    rung = 0
+                else:
+                    lower = None
+                    if rung < 1 and not stepped:
+                        nxt = getattr(self.client, "next_lower_level", None)
+                        try:
+                            lower = nxt(_AGENT_ROLE, level_now) if callable(nxt) else None
+                        except Exception:  # noqa: BLE001
+                            lower = None
+                    if lower:
+                        rung, level_now, stepped = 1, lower, True
+                    else:
+                        rung = min(3, max(2, rung + 1))
+                pause = min(LOST_TURN_PAUSE * (2 ** (lost - 1)), LOST_TURN_PAUSE_MAX)
+                nxt_name = ("unchanged", "level", "progress_ask", "shortened")[rung]
+                attempts = list(getattr(e, "attempts", None) or [])
+                last = attempts[-1] if attempts else {}
+                self._log({"event": "llm_turn_lost", "turn": turn, "attempt": lost,
+                           "kind": getattr(e, "kind", "") or ("deadline" if deadline else ""),
+                           "runaway": runaway, "long": long, "elapsed_s": last.get("seconds"),
+                           "chars": last.get("chars"), "keepalives": last.get("keepalives"),
+                           "provider_error": last.get("error") if last.get("kind") == "cut" else "",
+                           "attempts": attempts, "ladder": list(getattr(self.client, "ladder_events", None) or []),
+                           "pause_seconds": pause, "next": nxt_name, "level": level_now,
+                           "error": str(e)[:500]})
+                when = (datetime.now() + timedelta(seconds=pause)).strftime("%H:%M:%S")
+                how = {"unchanged": "unchanged", "level": f"one thinking level lower ({level_now})",
+                       "progress_ask": "asking for the progress so far",
+                       "shortened": "asking for the progress over a shortened history"}[nxt_name]
+                cause = (f"the provider ended the stream after {last.get('seconds')} s, "
+                         f"{last.get('chars') or 0} characters arrived" if last.get("kind") == "cut"
+                         else "the reply took the whole turn budget" if deadline else str(e)[:160])
+                self.ui.warn(f"model call lost (turn {turn}, {lost}x): {cause}; asking again at {when}, {how}")
+                activity = f"model call lost {lost}x, asking again at {when} {how}"
+                escape_seconds = time.monotonic() - first_loss
+                alert_after = _escape_alert_seconds()
+                if alert_after > 0 and escape_seconds > alert_after:
+                    activity = "ALERT " + activity
+                    self.ui.set_run_state(escape_alert=True)
+                    if not alerted:
+                        alerted = True
+                        self.ui.warn(f"model calls have been failing for {escape_seconds / 60:.0f} min "
+                                     f"(ATLAS_ESCAPE_ALERT_SECONDS={alert_after:.0f})")
+                self.ui.set_run_state(activity=activity)
+                self._persist_live_status()
+                run_start = getattr(self, "_run_start", None)
+                if (MAX_WALL_SECONDS > 0 and run_start is not None
+                        and time.monotonic() - run_start > MAX_WALL_SECONDS + WALL_GRACE_SECONDS):
+                    self._escape_stop = "wall_clock"
+                    self._escape_clear()
+                    raise
+                with self._status_heartbeat():
+                    time.sleep(pause)
+                self._escape_kw = self._escape_request(rung, level_now, choice0, losses=lost)
+                following = False
+                fallback_tried = False
+                continue
+            # A reply (a provider's decline is no progress summary).
+            if (rung >= 2 and not following and not resp.tool_calls
+                    and getattr(resp, "refusal", None) is None):
+                # The progress summary: logged as the model's own words (an
+                # empty one is not), then one request with the tool list back
+                # for the next step as one call.
+                if (resp.content or "").strip():
+                    self._log({"event": "assistant", "turn": turn, "escape": "progress_summary",
+                               "content": resp.content, "tool_calls": []})
+                self._nudge("model_call_escape_next", self._escape_follow_up())
+                self._escape_messages = None
+                self._escape_kw = {"tool_choice": "required", "learn": False,
+                                   **({"level": level_now} if level_now else {})}
+                following = True
+                continue
+            self._last_reply_escape = "follow_up" if following else ""
+            if lost:
+                self._log({"event": "llm_turn_recovered", "turn": turn, "losses": lost,
+                           "seconds": round(time.monotonic() - (first_loss or time.monotonic()), 1),
+                           "answered_with": ("unchanged", "level", "progress_ask", "shortened")[max(rung, 0)]
+                           + ("+follow_up" if following else "")})
+                waited = time.monotonic() - (first_loss or time.monotonic())
+                self.ui.warn(f"model call answered after {lost} lost request{'s' if lost != 1 else ''} "
+                             f"(turn {turn}, {int(waited // 60)} min {int(waited % 60)} s)")
+                self.ui.set_run_state(escape_alert=False)
+            self._escape_clear()
+            return resp
+
+    def _escape_request(self, rung: int, level, choice0, *, losses: int = 0) -> dict:
+        """What the escape's next request carries (the keywords
+        _chat_waf_tolerant passes), and for rungs 2 and 3 the progress ask
+        appended (rung 3 also the shortened copy of the history)."""
+        kw: dict = {"learn": False}
+        if level:
+            kw["level"] = level
+        self._escape_messages = None
+        if rung == 0:
+            if choice0:
+                self._tool_choice_next = choice0     # the rescue's ask survives a resend
+            return kw
+        if rung == 1:
+            return kw
+        if losses:
+            self._nudge("model_call_escape", _ESCAPE_ASK.format(n=losses))
+        kw["_no_tools"] = True
+        if rung >= 3:
+            import copy
+            from core.llm_check import compact_aged_messages
+            shortened = copy.deepcopy(self.messages)
+            compact_aged_messages(shortened, keep_tool_results=0, keep_turn_text=2, batch=1,
+                                  keep_tool_turns=1, batch_turns=1)
+            self._name_trimmed_sources(shortened)
+            if shortened and shortened[-1].get("role") == "user":
+                shortened[-1] = {**shortened[-1], "content": str(shortened[-1].get("content") or "")
+                                 + " The conversation above was shortened for this request."}
+            self._escape_messages = shortened
+        return kw
+
+    def _name_trimmed_sources(self, shortened: list[dict]) -> None:
+        """Every tool result the shortened copy trimmed keeps one line of
+        its source (the trace call id, the tool and its target), so the
+        progress answer can cite what it read. Aligned with the history the
+        copy was made from."""
+        from core.call_memo import trace_call_id_of
+        from core.deferred_intents import args_summary
+        from core.llm_check import _TOOL_STUB
+        calls: dict[str, tuple[str, dict]] = {}
+        for m in self.messages:
+            for tc in (m.get("tool_calls") or []) if m.get("role") == "assistant" else []:
+                fn = tc.get("function") or {}
+                try:
+                    args = json.loads(fn.get("arguments") or "{}")
+                except (TypeError, ValueError):
+                    args = {}
+                calls[tc.get("id")] = (str(fn.get("name") or ""), args if isinstance(args, dict) else {})
+        for i, m in enumerate(shortened):
+            if m.get("role") != "tool" or m.get("content") != _TOOL_STUB:
+                continue
+            original = str(self.messages[i].get("content") or "") if i < len(self.messages) else ""
+            cid = trace_call_id_of(original) if original != _TOOL_STUB else ""
+            name, args = calls.get(m.get("tool_call_id"), ("", {}))
+            target = ", ".join(f"{k}={v}" for k, v in args_summary(args, limit=2, value_chars=80).items())
+            m["content"] = (f"[trimmed: {name or 'a tool'}"
+                            + (f"({target})" if target else "")
+                            + (f", call {cid}" if cid else "") + "; full output in the execution trace]")
+
+    def _escape_clear(self) -> None:
+        """The escape's request shaping off, its two messages retired."""
+        self._escape_kw = None
+        self._escape_messages = None
+        self._retire_nudge("model_call_escape")
+        self._retire_nudge("model_call_escape_next")
+
     def _chat_turn(self):
         """One model call with spinner, appending the assistant message."""
         with self.ui.thinking(), self._status_heartbeat():
             resp = self._chat_waf_tolerant()
-            if _empty_reply(resp):
+            refusal = getattr(resp, "refusal", None)
+            if refusal is not None:
+                # The provider declined (a safety classifier, a content
+                # filter): the turn ends here, with no retry of the same
+                # request; the trace and the token ledger say so. The caller
+                # says what happened next; no assistant turn is kept, since
+                # the provider dropped what the model wrote.
+                self._log({"event": "model_refusal", "category": refusal.get("category"),
+                           "explanation": refusal.get("explanation")})
+                self.ui.warn("the model declined this turn"
+                             + (f" ({refusal['category']})" if refusal.get("category") else "")
+                             + (f": {refusal['explanation']}" if refusal.get("explanation") else ""))
+            elif _empty_reply(resp):
                 if (self._tried_to_call(resp)
                         and int(getattr(resp, "reasoning_tokens", 0) or 0) > 0):
                     # A counted thinking pass and tokens after it that reached
@@ -1590,6 +2834,13 @@ class Agent:
                     resp = self._chat_waf_tolerant()
         for ev in getattr(self.client, "ladder_events", None) or []:
             self._log({"event": "starvation_ladder", **ev})
+        # The hidden retries of a call that was answered in the end.
+        for ev in getattr(self.client, "transport_events", None) or []:
+            if isinstance(ev, dict):
+                self._log({"event": "model_attempt_failed", **ev})
+        self._answered_in_process = True
+        if getattr(resp, "refusal", None) is not None:
+            return resp
         assistant_msg: dict = {"role": "assistant",
                                "content": resp.content or ""}
         # Thinking never enters the history, except the provider fields a
@@ -1993,6 +3244,8 @@ class Agent:
         return f"[analyst guidance] {answer}"
 
     def _run_tool(self, tc) -> str:
+        if str(tc.name).endswith(_REPORT_ENTRY_TOOLS):
+            self._estate_join(getattr(self, "_turn", 0))
         result = self._handle_meta(tc.name, tc.arguments)
         if result is not None:
             return result
@@ -2010,14 +3263,18 @@ class Agent:
         # showing the *previous* turn's activity for its entire duration
         # without this immediate write.
         tool_started_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        # Bare tool name: the glyph prefix this used to carry was a
-        # pictograph that leaked from the CLI spinner into
+        # Bare tool name: a glyph prefix would leak from the CLI spinner into
         # run_status.json and from there into the dashboard.
         self.ui.set_run_state(activity=tc.name, tool_started=start,
                               tool_started_at=tool_started_at)
         self._persist_live_status()
+        _trace_mark = self._trace_length()
         with self._status_heartbeat():
-            result, auto_loaded = self.toolbox.call(tc.name, tc.arguments)
+            if getattr(tc, "budget_free", False):
+                result, auto_loaded = self.toolbox.call(tc.name, tc.arguments, budget_free=True)
+            else:
+                result, auto_loaded = self.toolbox.call(tc.name, tc.arguments)
+        self._close_work_items(tc.name, tc.arguments, _trace_mark)
         if auto_loaded:
             result = "[namespace auto-loaded]\n" + result
         elapsed = time.monotonic() - start
@@ -2059,8 +3316,371 @@ class Agent:
         self.ui.tool_result(result, elapsed, is_error=is_error, is_info=is_info)
         return result
 
+    def _call_once(self, name: str, args: dict | None, *, turn: int, tool_call_id: str = "",
+                   before_run=None, in_context=None, budget_free: bool = False) -> dict:
+        """One tool call through the run's per-call path, shared by the
+        conversation loop and the frontier's items: the call memo (an
+        identical call is replayed when its result has left the
+        conversation, else pointed at), the caller's own gates
+        (``before_run(name, args)`` returns a refusal text or None), the run
+        (_run_tool: meta tools, the report-entry estate join, the status
+        heartbeat, work-item closing, tool stats), the memo record, the
+        result's issue class, the coverage ledger's observation, and the
+        marking of a repeated identical refusal. ``in_context(tool_call_id)``
+        says whether an earlier result is still in the caller's messages (an
+        item starts fresh: nothing is). {"result", "kind": ran | replayed |
+        pointer | refused, "issue", "ran_clean"} and, for a call that ran,
+        "shown_rows" (the identities of the rows it showed the model, empty
+        unless it ran clean); the caller appends the result to its
+        messages."""
+        from types import SimpleNamespace
+        from core.call_memo import memoable
+        tc = SimpleNamespace(name=name, arguments=args or {}, id=tool_call_id, budget_free=budget_free)
+        memo = self._call_memo
+        _key = memo.key(tc.name or "", tc.arguments or {})
+        _hit = memo.get(_key)
+        if (_hit is not None
+                and (IDENTICAL_CALL_WINDOW <= 0
+                     or turn - _hit.turn <= IDENTICAL_CALL_WINDOW)
+                and not _STATEFUL_TOOL_RE.search(tc.name or "")
+                and memoable(tc.name or "")):
+            _hit.hits += 1
+            if not (in_context or self._result_still_in_context)(_hit.tool_call_id):
+                # The earlier result has been compacted out of
+                # the conversation: hand it back rather than
+                # refuse — the model is asking for data it no
+                # longer has, and the answer costs nothing.
+                memo.replays += 1
+                _why, _spill = self._pointed_result_incomplete(_hit)
+                _note = ""
+                if _why:
+                    # A replay of a cut view shows the same part
+                    # again; a model that repeats the call is
+                    # asking for the rest, so name where it is.
+                    _note = (f" This view {_why}; repeating the call shows "
+                             "the same part. "
+                             + self._rest_of_result_hint(_hit, _spill))
+                result = (f"[replayed from turn {_hit.turn}: identical call; "
+                          "its result had been compacted out of the conversation."
+                          f"{_note}]\n" + _hit.result)
+                self._log({"event": "identical_call_replayed", "turn": turn,
+                           "tool": tc.name, "previous_turn": _hit.turn,
+                           "previous_call_id": _hit.trace_call_id})
+                if str(_hit.trace_call_id or "").isdigit():
+                    self._close_work_items(tc.name, tc.arguments, 0,
+                                           replay_of=int(_hit.trace_call_id))
+                return {"result": result, "kind": "replayed", "issue": None, "ran_clean": False}
+            memo.pointers += 1
+            _where = (f" (trace call id {_hit.trace_call_id})"
+                      if _hit.trace_call_id else "")
+            _why, _spill = self._pointed_result_incomplete(_hit)
+            if _why:
+                # The earlier view was cut: "read it there"
+                # points at a part already read. Name the
+                # cut, the complete output and the narrower
+                # calls that fit whole.
+                _error = (
+                    f"{tc.name!r} with these arguments already ran at "
+                    f"turn {_hit.turn}{_where} and {_why}. The "
+                    "conversation holds only the part shown then, and "
+                    "repeating the call returns that same part. "
+                    + self._rest_of_result_hint(_hit, _spill))
+            else:
+                _error = (f"{tc.name!r} with these arguments already "
+                          f"succeeded at turn {_hit.turn}{_where}; a path "
+                          "written differently is the same argument. Its "
+                          "result is still in the conversation: read it "
+                          "there. Change the arguments (another path, "
+                          "inode, pattern or column), or ask "
+                          "search.search_evidence for a detail of it.")
+            result = json.dumps({
+                "success": False,
+                "gate": "identical_call",
+                "error": _error,
+                "previous_turn": _hit.turn,
+                "previous_call_id": _hit.trace_call_id,
+                **({"incomplete": _why} if _why else {}),
+            }, indent=2)
+            self._log({"event": "tool_result", "turn": turn,
+                       "tool": tc.name, "result": result[:4000],
+                       "gate": "identical_call"})
+            return {"result": result, "kind": "pointer", "issue": None, "ran_clean": False}
+        if before_run is not None:
+            refusal = before_run(tc.name, tc.arguments)
+            if refusal is not None:
+                return {"result": refusal, "kind": "refused", "issue": None, "ran_clean": False}
+        from agent.toolbox import take_shown_rows, take_shown_source
+        take_shown_rows()                       # nothing an earlier call on this thread left
+        take_shown_source()
+        result = self._run_tool(tc)
+        _shown = take_shown_rows()
+        _shown_source = take_shown_source()
+        _ran_clean = (
+            not result.startswith(("TOOL ERROR", "ERROR", "TOOL INFO"))
+            and '"success": false' not in result[:200]
+            and not (_PROTOCOL_MARKER and _PROTOCOL_MARKER in result[:300])
+            # An answer deferred to the memory batch ran nothing: never
+            # memoised, so the same call reaches the wrapper again and
+            # gets the batch's answer (tools/volatility._in_batch).
+            and not _DEFERRED_RE.search(result[:400]))
+        if _ran_clean:
+            if (not _STATEFUL_TOOL_RE.search(tc.name or "")
+                    and memoable(tc.name or "")):
+                memo.put(_key, turn=turn, tool_call_id=tc.id,
+                         result=result, tool=tc.name or "",
+                         args=tc.arguments or {})
+        from agent.tool_investigate import classify_tool_result, input_paths
+        issue = classify_tool_result(tc.name, result)
+        if issue:
+            issue["inputs"] = input_paths(tc.arguments)
+        # Coverage ledger: successful probes move unseen→probed.
+        # A middleware protocol refusal (the DAIR window, the
+        # deferred backlog, input scale, context budget,
+        # discovery-first, wrong input kind, disk-open policy)
+        # ran no tool: it credits no probe, no search, no derived
+        # output and no image open. A tool error or a failed
+        # read still records its failure below.
+        _blocked = (result.startswith("TOOL INFO")
+                    or bool(_PROTOCOL_MARKER and _PROTOCOL_MARKER in result[:300]))
+        if self.case_dir and issue is None and not _blocked:
+            try:
+                from core.coverage_ledger import (
+                    observe_tool_paths,
+                )
+                _args_blob = ""
+                try:
+                    import json as _json
+                    _args_blob = _json.dumps(
+                        tc.arguments or {}, default=str,
+                        ensure_ascii=False)
+                except Exception:
+                    _args_blob = str(tc.arguments or "")
+                # Args only — paths that merely appear in the
+                # RESULT text (listings, refusals, search
+                # hits) are not probes; feeding output here
+                # would forge the coverage floor.
+                # Parse JSON success — sudo_auth / success:false
+                # bodies must not count as probes or opens.
+                try:
+                    from core.evidence_access import (
+                        parse_tool_result_success,
+                    )
+                    _ok, _err = parse_tool_result_success(
+                        result)
+                except Exception:
+                    _ok = not result.startswith((
+                        "TOOL ERROR", "ERROR",
+                    ))
+                    _err = "" if _ok else result[:300]
+                observe_tool_paths(
+                    self.case_dir,
+                    tool_name=tc.name,
+                    cmd_or_args=_args_blob,
+                    success=_ok,
+                    result_text=result,
+                )
+                if _ok:
+                    try:
+                        from core.coverage_ledger import (
+                            register_derived_outputs,
+                        )
+                        _derived = register_derived_outputs(
+                            self.case_dir, tool_name=tc.name,
+                            arguments=tc.arguments or {},
+                            result_text=result)
+                        if _derived:
+                            self._log({
+                                "event": "derived_outputs_registered",
+                                "turn": turn,
+                                "paths": _derived[:8],
+                            })
+                    except Exception:  # noqa: BLE001
+                        pass
+                # Same observation, different ledger: a call
+                # naming both an indicator and a source is
+                # the pivot for that pair being carried out
+                # (core/ioc_pivots.py).
+                if _ok:
+                    try:
+                        from core.ioc_pivots import (
+                            observe_search,
+                        )
+                        _closed = observe_search(
+                            self.case_dir,
+                            blob=f"{tc.name} {_args_blob}",
+                            result=result)
+                        if _closed:
+                            self._log({
+                                "event": "ioc_pivot_searched",
+                                "turn": turn,
+                                "closed": _closed[:8],
+                            })
+                    except Exception:
+                        pass
+                # Access stage: persist opened/access_failed
+                # for TSK disk-open tools (mount_plan SoT).
+                try:
+                    from core.evidence_access import (
+                        record_open_from_tool,
+                    )
+                    record_open_from_tool(
+                        self.case_dir,
+                        tool_name=tc.name,
+                        cmd_or_args=_args_blob,
+                        success=_ok,
+                        error=_err or (
+                            "" if _ok else result[:300]
+                        ),
+                    )
+                except Exception as _acc_err:
+                    self._log({
+                        "event": "access_stage_write_failed",
+                        "turn": turn,
+                        "tool": tc.name,
+                        "error": str(_acc_err)[:300],
+                    })
+            except Exception as _cov_err:
+                # A ledger that silently stops moving is how
+                # "coverage floor not met" ambushes the
+                # analyst at close-out — log it.
+                self._log({
+                    "event": "coverage_observe_failed",
+                    "turn": turn, "tool": tc.name,
+                    "error": str(_cov_err)[:300]})
+        result = self._note_repeated_refusal(tc, result, turn)
+        # The rows the call showed the model (core.shown_rows), for an item's
+        # progress; none for a call that did not run clean.
+        return {"result": result, "kind": "ran", "issue": issue, "ran_clean": _ran_clean,
+                "shown_rows": list(_shown or []) if _ran_clean else [],
+                "shown_source": _shown_source if _ran_clean else ""}
+
+    def _split_reply_duplicates(self, turn: int, calls: list, memo) -> tuple[list, list]:
+        """A call identical to an earlier call of the same reply (same name,
+        same canonical arguments) is not run (ATLAS_REPLY_DUPLICATES). More
+        than REPLY_DUPLICATES_RUNAWAY of them make the reply a runaway: a
+        warn line, and the next ask goes one thinking level lower. A
+        behaviour guard, not a cap: every distinct call still runs."""
+        from core.envfile import env_flag
+        if not env_flag("ATLAS_REPLY_DUPLICATES") or len(calls) < 2:
+            return calls, []
+        first: dict = {}
+        unique, dups = [], []
+        for tc in calls:
+            try:
+                k = memo.key(tc.name or "", tc.arguments or {})
+            except Exception:  # noqa: BLE001
+                k = (tc.name, json.dumps(tc.arguments, sort_keys=True, default=str))
+            if k in first:
+                dups.append((tc, first[k]))
+            else:
+                first[k] = tc
+                unique.append(tc)
+        if not dups:
+            return calls, []
+        self._log({"event": "reply_duplicates", "turn": turn, "duplicates": len(dups),
+                   "distinct": len(unique)})
+        if len(dups) > REPLY_DUPLICATES_RUNAWAY:
+            lower = None
+            nxt = getattr(self.client, "next_lower_level", None)
+            try:
+                lower = nxt(_AGENT_ROLE, None) if callable(nxt) else None
+            except Exception:  # noqa: BLE001
+                lower = None
+            if lower:
+                self._next_level_once = lower
+            self._log({"event": "reply_duplicates_runaway", "turn": turn, "duplicates": len(dups),
+                       "runaway": True, "next_level": lower})
+            self.ui.warn(f"runaway reply: {len(dups)} calls repeated a call of the same reply"
+                         + (f"; next ask at thinking level {lower}" if lower else ""))
+        return unique, dups
+
+    def _answer_reply_duplicates(self, dups: list) -> None:
+        """Each duplicate is answered with a short result naming the call it
+        repeats (at most CALLS_PER_TURN_MAX answers; the rest share the
+        batch note)."""
+        if not dups:
+            return
+        from core.call_memo import trace_call_id_of
+        results = {m.get("tool_call_id"): str(m.get("content") or "")
+                   for m in self.messages if m.get("role") == "tool"}
+        for tc, orig in dups[:CALLS_PER_TURN_MAX]:
+            earlier = results.get(orig.id)
+            ref = (trace_call_id_of(earlier) or orig.id) if earlier is not None else ""
+            self.messages.append({"role": "tool", "tool_call_id": tc.id, "content": (
+                f"[duplicate of call {ref} in this reply, not run]" if ref else
+                "[duplicate of an earlier call in this reply; neither ran]")})
+
+    def _prune_unanswered_tool_calls(self) -> None:
+        """Keep on the turn's assistant message only the tool calls a tool
+        result answers. Calls of a reply that did not run (beyond the batch
+        bound, duplicates beyond the answered ones) are said to the model in
+        a note; a call id without its result makes a strict endpoint refuse
+        the next request."""
+        for i in range(len(self.messages) - 1, -1, -1):
+            m = self.messages[i]
+            if m.get("role") != "assistant":
+                continue
+            if not m.get("tool_calls"):
+                return
+            answered = {x.get("tool_call_id") for x in self.messages[i + 1:] if x.get("role") == "tool"}
+            kept = [tc for tc in m["tool_calls"] if tc.get("id") in answered]
+            if len(kept) != len(m["tool_calls"]):
+                if kept:
+                    m["tool_calls"] = kept
+                else:
+                    del m["tool_calls"]
+                    if not str(m.get("content") or "").strip():
+                        # An assistant message with neither text nor calls
+                        # is refused by a strict endpoint; the placeholder
+                        # also keeps the roles alternating.
+                        m["content"] = _PRUNED_REPLY_TEXT
+            return
+
+    @staticmethod
+    def _trace_length() -> int:
+        try:
+            from core.execution_log import log
+            return len(log._entries)
+        except Exception:  # noqa: BLE001
+            return 0
+
+    def _close_work_items(self, tool: str, args: dict | None, mark: int, *,
+                          replay_of: int | None = None) -> None:
+        """The closing rule (ATLAS_WORK_ORDER): the work items a call that
+        ran reached close by its trace entry; a wrong-input-kind or
+        evidence-compat refusal of an item's own ready call closes it as
+        failed (read from the call_abandoned entry, before any protocol
+        skip). A replayed call closes by the original call's entry. Every
+        id closed is movement for the neglect streak. Fail-open."""
+        try:
+            from core.deferred_intents import work_order_on
+            if not work_order_on():
+                return
+            from core.execution_log import log
+            if replay_of is not None:
+                entry = log.index().by_call_id.get(int(replay_of))
+                calls, abandoned = ([entry] if isinstance(entry, dict) else []), []
+            else:
+                new = list(log._entries[mark:])
+                calls = [e for e in new if e.get("type") == "tool_call"]
+                abandoned = [e for e in new if e.get("type") == "call_abandoned"]
+            if not calls and not abandoned:
+                return
+            closed = log.close_items_for_call(tool, args or {}, calls, abandoned,
+                                              closing_call_id=replay_of)
+            if closed:
+                moved = getattr(self, "_wo_moved", None)
+                if moved is None:
+                    moved = self._wo_moved = set()
+                moved.update(closed)
+        except Exception as e:  # noqa: BLE001
+            self._log({"event": "work_order_close_failed", "tool": tool, "error": str(e)[:200]})
+
     @staticmethod
     def _critical_scan_debt() -> list[dict]:
+        from core.deferred_intents import incomplete_read_debt_on
+        if incomplete_read_debt_on():
+            return []        # a time-cut read is the investigate latch's debt
         try:
             from core.execution_log import log
             from tools._gates.critical_scan_timeout import (
@@ -2135,8 +3755,8 @@ class Agent:
     def _pre_report_blocking() -> bool:
         """True when the latest pre_report_check explicitly says not ready.
 
-        Missing check → False (wrap-up still asks for the check). Used to
-        grant turn extensions instead of dying mid-blocker work.
+        Missing check → False (wrap-up still asks for the check). Grants
+        turn extensions instead of dying mid-blocker work.
         """
         try:
             from core.execution_log import log
@@ -2299,6 +3919,21 @@ class Agent:
         except Exception:
             pass
 
+    def _contents_counts(self) -> dict:
+        turn = self.stats.get("turns")
+        cached = getattr(self, "_contents_cache", None)
+        if cached is not None and cached[0] == turn:
+            return cached[1]
+        out: dict = {}
+        try:
+            from core.contents_index import index_status_on, inside_counts
+            if index_status_on():
+                out = {k: v for k, v in inside_counts(self.case_dir).items() if k != "per_image"}
+        except Exception:  # noqa: BLE001
+            out = {}
+        self._contents_cache = (turn, out)
+        return out
+
     def _evidence_item_counts(self) -> dict:
         try:
             from core.coverage_ledger import load_ledger
@@ -2317,12 +3952,17 @@ class Agent:
         one explicit chance to keep working (a run may take 1000 turns if
         the evidence warrants it). It never hard-blocks: the second attempt,
         wall-clock expiry, and ledger-ready degraded exits always pass, and
-        classification stays truthful (incomplete_coverage) either way.
+        classification stays truthful (incomplete_coverage) either way. With
+        the work order on, the one list of open work decides instead
+        (_finish_open_work_check).
 
         Returns the refusal message, or "" when the finish may proceed.
         """
         if wall_expired or not self.case_dir:
             return ""
+        from core.deferred_intents import work_order_on
+        if work_order_on():
+            return self._finish_open_work_check()
         if getattr(self, "_finish_coverage_deferred", False):
             return ""
         try:
@@ -2374,12 +4014,172 @@ class Agent:
         if open_tasks:
             lines.append("Open investigation tasks:")
             lines += [f"  - {t}" for t in open_tasks]
+        try:
+            from core.coverage_ledger import EXTRACTED_OPEN_HEAD, extracted_lines, extracted_outputs
+            _extracted = extracted_lines([o for o in extracted_outputs(self.case_dir, readers=True) if o["open"]],
+                                         only_open=True)
+        except Exception:  # noqa: BLE001
+            _extracted = []
+        if _extracted:
+            lines.append(EXTRACTED_OPEN_HEAD)
+            lines += [f"  - {x}" for x in _extracted]
         lines.append(
             "If you have genuinely exhausted what the evidence supports, "
             "call atlas_finish again and it will proceed (the run is then "
             "classified as incomplete coverage)."
         )
         return "\n".join(lines)
+
+    def _finish_open_work_check(self) -> str:
+        """The finish is deferred while the run still owes work no deferral
+        has named yet (core.work_order.open_work: open question parts,
+        extracted file classes no call read, due reads). It passes when the
+        list is empty, when everything on it was named before, and when the
+        model made no call since the last deferral: atlas_finish called again
+        right away always ends the run, and the report states what stays open
+        (ATLAS_WORK_ORDER). Never a count: each further deferral needs model
+        work and an item no deferral named. Before the list, each open refused
+        finding defers the finish once on its own line
+        (core.work_order.refused_deferral, recorded on the refusal's trace
+        entry): a finding the run lost is acted on or let go one at a time,
+        not read as one line among due reads. Then the parsed outputs no row
+        of which was looked at defer it once together
+        (core.work_order.parsed_deferral, once per set of outputs, recorded
+        on the trace), so the outputs are not read as lines among due reads
+        either."""
+        try:
+            from core.execution_log import log
+            from core import work_order as W
+            work = W.open_work(log, self.case_dir)
+            keys = W.open_work_keys(work)
+        except Exception:  # noqa: BLE001
+            return ""
+        try:
+            alone = W.refused_deferral(log, work.get("refused") or [])
+        except Exception:  # noqa: BLE001
+            alone = ""
+        if alone:
+            return alone
+        try:
+            parsed = W.parsed_deferral(log, work.get("parsed") or [])
+        except Exception:  # noqa: BLE001
+            parsed = ""
+        if parsed:
+            return parsed
+        classes = self._class_deferral(work)
+        if classes:
+            return classes
+        named = getattr(self, "_finish_named", frozenset())
+        calls = getattr(self, "_model_calls", 0)
+        if not keys or keys <= named or calls == getattr(self, "_finish_named_at", None):
+            return ""
+        self._finish_named = named | keys
+        self._finish_named_at = calls
+        lines = ["atlas_finish deferred: work is still open. This is not a hard stop: atlas_finish called again "
+                 "right away ends the run, and the report states what stays open.", *W.open_work_lines(work)]
+        if work["due"]:
+            try:
+                text, _shown = W.work_order_block(log, self.case_dir, self._tool_params)
+            except Exception:  # noqa: BLE001
+                text = ""
+            if text:
+                lines.append(text)
+        return "\n".join(lines)
+
+    def _class_deferral(self, work: dict) -> str:
+        """The class guard, its own step before the generic list: the
+        content classes with neither a read nor a reason (open_class_keys)
+        defer the finish while their set differs from the set the last
+        class deferral named (a read or a leave changes it, a listing does
+        not); the identical set lets the model out, and the ending then
+        carries the stop label (core.investigation_exit: stopped_undecided),
+        never a finished run. No count, no clock. The leave tool's
+        namespace is loaded with the deferral, so the call it names can
+        arrive."""
+        from core import work_order as W
+        ckeys = W.open_class_keys(work)
+        if not ckeys:
+            return ""
+        named = getattr(self, "_finish_classes_named", frozenset())
+        if ckeys == named:
+            self._log({"event": "finish_undecided_classes", "classes": len(ckeys)})
+            return ""
+        self._finish_classes_named = ckeys
+        try:
+            self._load_namespaces_for(["coverage.set_evidence_disposition", "coverage.ledger_status"])
+        except Exception:  # noqa: BLE001
+            pass
+        return "\n".join([
+            "atlas_finish deferred: content classes with neither a read nor a reason stand open. Read one file "
+            "of each, or leave its label with a checked reason (one call per label across hosts). The run cannot "
+            "end as finished while one stands; atlas_finish called again with the same classes open ends the run "
+            "as stopped, with them listed for a person to decide.", *W.class_lines(work)])
+
+    def _closing_stage(self) -> bool:
+        """Whether the run is closing: a finish was deferred, the class guard
+        spoke, or the director is in Report. From here the class block is
+        shown whole each turn; before it, one count line."""
+        return (getattr(self, "_finish_named_at", None) is not None
+                or bool(getattr(self, "_finish_classes_named", None))
+                or getattr(self, "_dair_phase", "") == "Report")
+
+    def _open_classes_cached(self) -> list:
+        """The undecided classes (core.work_order.open_classes), read again
+        only when the ledger file moved."""
+        import os
+        path = os.path.join(str(self.case_dir), ".atlas", "coverage_ledger.json")
+        try:
+            stamp = os.stat(path).st_mtime_ns
+        except OSError:
+            return []
+        cached = getattr(self, "_oc_cache", None)
+        if cached is not None and cached[0] == stamp:
+            return cached[1]
+        try:
+            from core import work_order as W
+            classes = W.open_classes(str(self.case_dir))
+        except Exception as e:  # noqa: BLE001
+            self._log({"event": "open_classes_failed", "error": str(e)[:200]})
+            classes = []
+        self._oc_cache = (stamp, classes)
+        return classes
+
+    def _close_out_held(self, turn: int, *, wall_expired: bool) -> bool:
+        """Whether the gate-ready close-out waits this turn. Under the work
+        order the close-out first gives the model the finish's deferral
+        (_finish_open_work_check: refused findings, parsed outputs, the open
+        work no deferral named yet), as a model that never calls
+        atlas_finish would otherwise never see it; then it waits while each
+        turn's calls close named work (the open-work keys shrink, none
+        appears; a listing reads no file and closes none). The first turn
+        that closes nothing is closed out: progress decides, never a count.
+        Each time it waits the model is shown the list as it stands, headed
+        by the one next read (core.work_order.close_out_head). Without the
+        work order, or once the clock ran out, the close-out never waits."""
+        from core.deferred_intents import work_order_on
+        if wall_expired or not self.case_dir or not work_order_on():
+            return False
+        try:
+            from core import work_order as W
+            from core.execution_log import log
+            work = W.open_work(log, self.case_dir)
+            keys = W.open_work_keys(work) | W.open_class_keys(work)
+        except Exception:  # noqa: BLE001
+            return False
+        calls = getattr(self, "_model_calls", 0)
+        last = getattr(self, "_close_hold", None)
+        text = self._finish_open_work_check()
+        if text:
+            self._close_hold = (keys, calls)
+            self._nudge("close_out_deferred", W.close_out_head(work) + "\n" + text)
+            self._log({"event": "close_out_deferred", "turn": turn, "open": len(keys)})
+            return True
+        if last is not None and keys and calls != last[1] and keys < last[0]:
+            self._close_hold = (keys, calls)
+            self._nudge("close_out_deferred", "\n".join([W.close_out_head(work), *W.open_work_lines(work)]))
+            self._log({"event": "close_out_held", "turn": turn, "open": len(keys)})
+            return True
+        return False
 
     def _finish_report_check(self, *, wall_expired: bool) -> str:
         """One-shot atlas_finish deferral when no official report exists.
@@ -2482,6 +4282,75 @@ class Agent:
             self._log({"event": "pre_report_check_failed", "error": str(e)[:200]})
             return None
 
+    def _close_out_spine(self, turn: int, checked: dict, *, need_dair: bool = True) -> dict:
+        """At the report-stall close-out, supply the synthesis the verdict
+        names as missing: the reviewer's read is Atlas's reason role's work,
+        and an analyst that never asked for it does not remove the need for
+        it. Runs once, in-process, traced as a reason call with source
+        "loop", then the check again. Without a dair_call (synthesize refuses
+        without one), without a finding, or when the synthesis comes back
+        unusable, the verdict stands and the reason is logged
+        (ATLAS_CLOSE_OUT_SPINE; off: the verdict stands)."""
+        from core.envfile import env_flag
+        if not env_flag("ATLAS_CLOSE_OUT_SPINE") or checked.get("has_synthesize", True):
+            return checked
+        if getattr(self, "_spine_ran", False):
+            return checked
+        self._spine_ran = True
+
+        def skipped(reason: str) -> dict:
+            self._log({"event": "spine_skipped", "turn": turn, "reason": reason})
+            return checked
+        try:
+            from core.execution_log import log
+            entries = list(log._entries)
+            # The frontier has no director, so no dair_call to wait for.
+            if need_dair and not any(e.get("type") == "dair_call" for e in entries):
+                return skipped("no dair_call in the trace")
+            findings = [e for e in entries if e.get("type") == "finding"]
+            replaced = {int(e["replaces_call_id"]) for e in findings if e.get("replaces_call_id")}
+            standing = [e for e in findings if int(e.get("call_id") or 0) not in replaced]
+            if not standing:
+                return skipped("no finding to synthesise")
+            text = "\n".join(
+                f"[{e.get('call_id')}] {str(e.get('confidence') or '').upper()}: "
+                f"{' '.join(str(e.get('description') or '').split())}" for e in standing)
+            from tools.reasoning import reason_synthesize
+            out = reason_synthesize(findings=text,
+                                    investigation_summary=self._spine_summary(entries),
+                                    input_call_ids=[int(e["call_id"]) for e in standing])
+            cid = int((out or {}).get("_atlas_call_id") or 0)
+            if cid:
+                log.update_reason_call(cid, source="loop")
+            if not (isinstance(out, dict) and out.get("success")):
+                return skipped("synthesis unusable: " + str((out or {}).get("error") or "no result")[:160])
+            self._log({"event": "close_out_spine", "turn": turn, "synthesize_call_id": cid})
+            again = self._run_pre_report_check()
+            return again if again else checked
+        except Exception as e:  # noqa: BLE001 - the stall ends as without the spine
+            return skipped(f"{type(e).__name__}: {e}"[:200])
+
+    def _spine_summary(self, entries: list) -> str:
+        """What was read, in counts: tool calls, the coverage ledger and the
+        disk media's access stage."""
+        bits = [f"{sum(1 for e in entries if e.get('type') == 'tool_call')} tool calls in the trace"]
+        try:
+            from core.coverage_ledger import coverage_stats, load_ledger
+            stats = coverage_stats(load_ledger(self.case_dir)) if self.case_dir else {}
+            if stats:
+                bits.append("coverage ledger: " + ", ".join(f"{k} {v}" for k, v in stats.items()))
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            from core.evidence_access import media_entries
+            media = media_entries(self.case_dir) if self.case_dir else []
+            if media:
+                opened = sum(1 for m in media if m.get("access_stage") == "opened")
+                bits.append(f"disk media: {opened} of {len(media)} opened")
+        except Exception:  # noqa: BLE001
+            pass
+        return "; ".join(bits)
+
     def _close_out(self, turn: int, *, reason: str) -> bool:
         """Write the case's reports now that the gate has passed, and say
         so. The projection of the recorded findings is the report whether
@@ -2519,13 +4388,83 @@ class Agent:
     # ── main loop ────────────────────────────────────────────────────────
 
     def run(self, system_prompt: str, user_message: str) -> str:
+        """The shared setup, then the loop the mode names (ATLAS_LOOP):
+        the conversation loop (default) or the frontier queue."""
+        mode = loop_mode()
+        refusal = self._loop_mode_refusal(mode)
+        if refusal:
+            return self._refuse_loop_mode(mode, refusal)    # before any run state is written
+        self._loop_mode = mode
+        self._run_setup(system_prompt, user_message, mode)
+        if mode == "frontier":
+            from agent.frontier import FrontierRun
+            return FrontierRun(self).run()
+        return self._run_turns()
+
+    def _loop_mode_refusal(self, mode: str) -> str:
+        """Why this run cannot start in ``mode`` ("" when it can): the
+        frontier needs the incident map's change feed, and a resumed trace
+        keeps the mode it was run in (modes never mix in one trace)."""
+        if mode == "frontier":
+            from core.incident_map import map_on
+            if not map_on():
+                return "ATLAS_LOOP=frontier needs the incident map's change feed; ATLAS_INCIDENT_MAP is off"
+        earlier = self._earlier_loop_mode()
+        if earlier and earlier != mode:
+            return (f"this case's trace was run in {earlier} mode; a resume in {mode} mode is refused "
+                    "(a fresh start converts it)")
+        return ""
+
+    def _earlier_loop_mode(self) -> str:
+        """The loop mode of the latest earlier run transcript under
+        analysis/ (a resumed trace; a fresh start clears them), "" when
+        none. A run_start without the field is the conversation loop."""
+        if not self.case_dir:
+            return ""
+        try:
+            from core.run_state import TRANSCRIPT_PREFIX
+            mine = getattr(self, "transcript_path", None)
+            found = ""
+            for path in sorted((self.case_dir / "analysis").glob(f"{TRANSCRIPT_PREFIX}*.jsonl")):
+                if mine is not None and path == mine:
+                    continue
+                with open(path, encoding="utf-8", errors="replace") as fh:
+                    for line in fh:
+                        if '"event": "run_start"' in line:
+                            try:
+                                found = str(json.loads(line).get("loop_mode") or "conversation")
+                            except ValueError:
+                                continue
+            return found
+        except Exception:  # noqa: BLE001 - an unreadable transcript never blocks a run
+            return ""
+
+    def _refuse_loop_mode(self, mode: str, msg: str) -> str:
+        self.ui.warn(msg)
+        self._log({"event": "loop_mode_refused", "mode": mode, "reason": msg})
+        self.stats = {"stopped_reason": "loop_mode_refused", "finish_status": "loop_mode_refused",
+                      "turns": 0, "duration_seconds": 0.0}
+        return msg
+
+    def _run_setup(self, system_prompt: str, user_message: str, mode: str = "conversation") -> None:
+        """What every loop needs before its first call: the messages, the
+        run_start record (roles and loop mode), the brain-injection manifest,
+        the run clock, the stats, the call memo and the status fields."""
+        from agent.llm import reset_run_memory
+        reset_run_memory()
         self.messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_message},
         ]
+        from core.provider_profiles import HASH_ENV
         self._log({"event": "run_start", "model": self.client.model,
                    "roles": _role_models_safe(),
-                   "base_url": self.client.base_url})
+                   "base_url": self.client.base_url, "loop_mode": mode,
+                   "vol_store_entries": _vol_store_entries(self.case_dir),
+                   # The provider profiles this run started with.
+                   "provider_profiles": os.environ.get(HASH_ENV, ""),
+                   # Whether every tool is listed for the whole run, and why not.
+                   "tool_list": _tool_list_mode(self.toolbox)})
         # Travel the brain-injection manifest with the run: _brain_context()
         # writes analysis/brain_injection.json at prompt-build time (a separate
         # process step), but it was never in the trace — so effectiveness stayed
@@ -2540,14 +4479,35 @@ class Agent:
                                "manifest": _json.loads(_mf.read_text())})
             except Exception:
                 pass
+        self._run_start = time.monotonic()      # the escape compares the wall clock between pauses
+        self._tool_stats = []
+        # The report ladder reads this run's own gate verdicts only.
+        self._run_since = self._last_call_id()
+        # Every successful read-only call of the run, keyed on the tool and
+        # its canonical arguments (paths in real form, tied to the inputs'
+        # size and mtime). A repeat is answered from here instead of run
+        # again: the result the model already had, at the cost of nothing.
+        from core.call_memo import CallMemo
+        self._call_memo = CallMemo(self.case_dir)
+        # Keep a live snapshot so Ctrl+C can persist turns/duration
+        # even when the normal run_end stats assignment never runs.
+        self.stats = {
+            "stopped_reason": "running",
+            "finish_status": "",
+            "turns": 0,
+            "duration_seconds": 0.0,
+        }
+        # When this run began, for the run status the dashboard lists.
+        self._started_at = _run_started_at()
+
+    def _run_turns(self) -> str:
+        """The conversation loop."""
+        memo = self._call_memo
+        run_start = self._run_start
         finish_summary = ""
         quiet_turns = 0
         dair_reengage_used = 0
         blocked_turns = 0
-        run_start = time.monotonic()
-        self._tool_stats = []
-        # The report ladder reads this run's own gate verdicts only.
-        self._run_since = self._last_call_id()
         stopped_reason = "finished"
         turn = 0
         wrapped_up = False
@@ -2557,6 +4517,7 @@ class Agent:
         cut_offs = 0
         cut_offs_total = 0
         empty_replies = 0
+        declines = 0
         no_work_rescues = 0
         tool_budget_shrinks = 0
         # The largest tool list a function call has arrived with in this
@@ -2580,13 +4541,6 @@ class Agent:
         # because it considered itself done — not because it went
         # silent, and the operator is owed that distinction.
         finish_requested = False
-        # Every successful read-only call of the run, keyed on the tool and
-        # its canonical arguments (paths in real form, tied to the inputs'
-        # size and mtime). A repeat is answered from here instead of run
-        # again: the result the model already had, at the cost of nothing.
-        from core.call_memo import CallMemo, memoable
-        memo = CallMemo(self.case_dir)
-        self._call_memo = memo
         # Only a wrap-up caused by a hard budget (turn cap, wall clock, model
         # deadline) rations exploration. The quiet valve and the blocker
         # ladder inject the same message to *restart* a stalled model; a
@@ -2600,16 +4554,6 @@ class Agent:
         blocker_extension_granted = 0
         investigate_debt: list[dict] = []
         stall_state = StallState()
-        # I8 / X12: keep a live snapshot so Ctrl+C can persist turns/duration
-        # even when the normal run_end stats assignment never runs.
-        self.stats = {
-            "stopped_reason": "running",
-            "finish_status": "",
-            "turns": 0,
-            "duration_seconds": 0.0,
-        }
-        # When this run began, for the run status the dashboard lists.
-        self._started_at = _run_started_at()
 
         with self.ui.live_session():
             while True:
@@ -2663,7 +4607,8 @@ class Agent:
                         stall_state, turn=turn,
                         report_written=self._report_written(),
                         case_dir=self.case_dir,
-                        wall_clock=wall_expired):
+                        wall_clock=wall_expired,
+                        work_order=self._stall_work_order()):
                     self.messages.append(_msg)
                     self._log({
                         "event": "run_budget_nudge",
@@ -2715,7 +4660,7 @@ class Agent:
                             # Wrapped up by another trigger and stalled in
                             # Report all the same: start the close-out clock
                             # below, with no second wrap-up message.
-                            self._nudge("report_phase_stall", _REPORT_STALL_MSG)
+                            self._nudge("report_phase_stall", self._report_stall_msg())
                             self._log({"event": "report_phase_stall", "turn": turn,
                                        "quiet_turns": REPORT_STALL_TURNS,
                                        "reason": "stalled_after_wrapup"})
@@ -2729,6 +4674,8 @@ class Agent:
                             and turn - report_wrapup_turn >= REPORT_STALL_TURNS
                             and not self._report_written()):
                         checked = self._run_pre_report_check()
+                        if checked and not checked.get("ready_to_report"):
+                            checked = self._close_out_spine(turn, checked)
                         ready = (bool(checked.get("ready_to_report")) if checked
                                  else self._pre_report_ready())
                         self._log({"event": "report_stall_close_out", "turn": turn,
@@ -2752,15 +4699,38 @@ class Agent:
                     if (self.case_dir
                             and getattr(self, "_dair_phase", "") == "Report"
                             and not self._report_written()
-                            and self._pre_report_fresh_ready()):
+                            and self.work_order_settled()
+                            and self._pre_report_fresh_ready()
+                            and not self._close_out_held(turn, wall_expired=wall_expired)):
                         if self._close_out(turn, reason="gate_ready"):
                             stopped_reason = "closed_out"
                             break
                 except Exception as _e:  # noqa: BLE001
                     self._log({"event": "close_out_failed", "turn": turn,
                                "error": str(_e)[:200]})
+                # No deferral (ATLAS_DAIR_NO_DEFER): a resumed trace's open
+                # protocol intents are retired once, and the window nudge
+                # gives way to the progress line on its own counter.
+                try:
+                    from core.deferred_intents import dair_no_defer_on, work_order_on
+                    if dair_no_defer_on():
+                        if not getattr(self, "_intents_retired", False):
+                            from core.execution_log import log as _rlog
+                            _n = _rlog.retire_protocol_intents("deferral off")
+                            self._intents_retired = True
+                            if _n:
+                                self._log({"event": "protocol_intents_retired", "turn": turn, "count": _n})
+                        if not work_order_on():
+                            _pl = self._progress_line(turn)
+                            if _pl:
+                                self._nudge("dair_progress", _pl)
+                except Exception as _e:  # noqa: BLE001
+                    self._log({"event": "no_defer_turn_failed", "turn": turn, "error": str(_e)[:200]})
                 # DAIR window: say so a batch before it ages out, not after.
                 try:
+                    from core.deferred_intents import dair_no_defer_on as _ndo
+                    if _ndo():
+                        raise StopIteration          # nothing is deferred: no window to warn of
                     from core.middleware import dair_window_used
                     _used, _win = dair_window_used()
                     # A margin the size of the model's recent batches: a
@@ -2775,6 +4745,8 @@ class Agent:
                                     _DAIR_WINDOW_MSG.format(used=_used, window=_win))
                         self._log({"event": "dair_window_nudge", "turn": turn,
                                    "used": _used, "window": _win})
+                except StopIteration:
+                    pass
                 except Exception as _e:  # noqa: BLE001
                     self._log({"event": "dair_window_check_failed", "turn": turn,
                                "error": str(_e)[:200]})
@@ -2791,12 +4763,21 @@ class Agent:
                             format_pivot_nudge, open_pivots, refresh_pivots,
                         )
                         refresh_pivots(self.case_dir)
+                        # Typed rows recorded before sightings existed are
+                        # checked against the evidence a few per turn
+                        # (core.indicators.refresh_sightings, fail-open).
+                        from core.indicators import refresh_sightings
+                        refresh_sightings(self.case_dir)
                         _pivots = open_pivots(self.case_dir)
-                        # Not once the run is wrapping up: the nudge sends
-                        # the model back to grep, and the close-out never
-                        # came.
+                        self._estate_count_turn(turn)
+                        # Not once the run is wrapping up, nor in Report
+                        # once it has been asked for the report: the nudge
+                        # sends the model back to grep, and the close-out
+                        # never came (_push_report_phase).
                         if (_pivots and turn % IOC_PIVOT_NUDGE_EVERY == 0
-                                and not wrapped_up):
+                                and not wrapped_up
+                                and not (getattr(self, "_report_pushed", False)
+                                         and getattr(self, "_dair_phase", "") == "Report")):
                             self._nudge("ioc_pivot_nudge",
                                         format_pivot_nudge(_pivots, case_dir=self.case_dir))
                             self._log({"event": "ioc_pivot_nudge",
@@ -2880,11 +4861,26 @@ class Agent:
                             contradicted_absence_claims, format_value_nudge,
                             unexamined_high_value,
                         )
-                        _clashes = contradicted_absence_claims(self.case_dir)
+                        from core.deferred_intents import work_order_on as _wo_on
+                        _wo = _wo_on()
+                        # With the work order on, clashes are items and the
+                        # unread artefacts proposals (_derive_work_items).
+                        _clashes = [] if _wo else [c for c in contradicted_absence_claims(self.case_dir)
+                                                   if not c.get("hostless")]
                         _unread = (unexamined_high_value(self.case_dir)
-                                   if turn % IOC_PIVOT_NUDGE_EVERY == 0 else [])
-                        if _clashes or _unread:
-                            _msg = format_value_nudge(_unread, _clashes)
+                                   if turn % IOC_PIVOT_NUDGE_EVERY == 0 and not _wo else [])
+                        # The contents index's rows reach the analyst as the
+                        # first host lines of the host-first view, not as a
+                        # rank over the estate (core.contents_index).
+                        _view = ""
+                        if _unread:
+                            from core.contents_index import host_view, host_view_on
+                            if host_view_on():
+                                _view = host_view(self.case_dir, max_hosts=4, header=False)
+                                _unread = [u for u in _unread
+                                           if not str(u.get("source") or "").startswith("index:")]
+                        if _clashes or _unread or _view:
+                            _msg = format_value_nudge(_unread, _clashes, view=_view)
                             # Said once is said: the same list re-injected
                             # every few turns is noise the model learns to
                             # skip. It is repeated only when it changed or
@@ -2906,6 +4902,26 @@ class Agent:
                         self._log({"event": "artifact_value_check_failed",
                                    "turn": turn,
                                    "error": str(_av_err)[:200]})
+                    # What the images hold, one line per host (C2 item 2b):
+                    # said once after the inventory, said again only when
+                    # compaction took the standing copy away.
+                    try:
+                        from core.contents_index import listing_digest, listing_shape_on
+                        from core.evidence_inventory_gate import inventory_satisfied
+                        if listing_shape_on() and inventory_satisfied(self.case_dir):
+                            _dg = listing_digest(self.case_dir)
+                            if _dg.get("lines"):
+                                _dmsg = ("INSIDE THE IMAGES (the contents index built at intake: per host its "
+                                         "file count, commonest extensions, and the largest directory trees "
+                                         "few other hosts hold; tsk.index_find searches it):\n"
+                                         + "\n".join(_dg["lines"]))
+                                if not self._nudge_stands("listing_digest", _dmsg):
+                                    self._nudge("listing_digest", _dmsg)
+                                    self._log({"event": "listing_digest", "turn": turn,
+                                               "hosts": _dg.get("hosts"), "shown": _dg.get("shown")})
+                    except Exception as _ld_err:  # noqa: BLE001
+                        self._log({"event": "listing_digest_failed", "turn": turn,
+                                   "error": str(_ld_err)[:200]})
                     # Partial evidence sets: reading a few of many rotated
                     # logs and concluding about "the logs" is the failure that
                     # looks most like success (core/source_sets.py).
@@ -2913,7 +4929,10 @@ class Agent:
                         from core.source_sets import (
                             format_series_nudge, partially_examined_series,
                         )
-                        if turn % IOC_PIVOT_NUDGE_EVERY == 0:
+                        from core.deferred_intents import work_order_on as _wo_on2
+                        # With the work order on, a partly read series is a
+                        # proposal the director sees (_derive_work_items).
+                        if turn % IOC_PIVOT_NUDGE_EVERY == 0 and not _wo_on2():
                             _partial = partially_examined_series(self.case_dir)
                             if _partial:
                                 self._nudge("partial_evidence_set_nudge",
@@ -2932,6 +4951,8 @@ class Agent:
                         self._log({"event": "source_set_check_failed",
                                    "turn": turn,
                                    "error": str(_ss_err)[:200]})
+                    # The work order, last: the due reads as ready calls.
+                    self._work_order_turn(turn, wrapped_up)
                 # Belief-starvation latch: successful evidence contacts with
                 # zero record_finding — hard-stop further gathering.
                 belief_latched = False
@@ -2949,15 +4970,19 @@ class Agent:
                     belief_latched = starvation_latched(
                         _bs_entries, case_dir=self.case_dir)
                     if belief_latched:
-                        self.messages.append({
-                            "role": "user",
-                            "content": format_starvation_message(
-                                contacts=belief_contacts,
-                                findings=_bs_findings(_bs_entries),
-                                dair_established=bool(
-                                    getattr(_bs_elog, "_last_dair_cid", 0)),
-                            ),
-                        })
+                        _bs_text = format_starvation_message(
+                            contacts=belief_contacts,
+                            findings=_bs_findings(_bs_entries),
+                            dair_established=bool(
+                                getattr(_bs_elog, "_last_dair_cid", 0)),
+                        )
+                        from core.envfile import env_flag
+                        if env_flag("ATLAS_REFUSAL_ACCOUNTING"):
+                            # One copy stands: each latched turn supersedes
+                            # the last message (ATLAS_REFUSAL_ACCOUNTING).
+                            self._nudge("belief_starvation_latch", _bs_text)
+                        else:
+                            self.messages.append({"role": "user", "content": _bs_text})
                         self._log({
                             "event": "belief_starvation_latch",
                             "turn": turn,
@@ -2967,6 +4992,23 @@ class Agent:
                         self.ui.warn(
                             f"belief-starvation latch "
                             f"({belief_contacts} contacts, 0 findings)")
+                    # The recording nudge: the reads in context that showed
+                    # rows and that no accepted finding cites; the latch,
+                    # when on, says more and wins.
+                    from agent.belief_starvation import RecordPace
+                    if getattr(self, "_record_pace", None) is None:
+                        self._record_pace = RecordPace()
+                    _rp_text = self._record_pace.check(
+                        _bs_entries, suppress=bool(
+                            belief_latched or wrapped_up
+                            or getattr(self, "_dair_phase", "") == "Report"))
+                    if _rp_text:
+                        self._nudge("record_nudge", _rp_text)
+                        self._log({"event": "record_nudge", "turn": turn,
+                                   "named": list(self._record_pace.named),
+                                   "blanket_findings": self._record_pace.blanket})
+                    elif _rp_text == "":
+                        self._retire_nudge("record_nudge")
                 except Exception as _bs_err:
                     self._log({
                         "event": "belief_starvation_check_failed",
@@ -3082,12 +5124,23 @@ class Agent:
                     _batch_grace_end()
                     resp = self._chat_turn_asked_again(turn)
                 except (LLMDeadlineError, LLMTransportError) as e:
+                    trigger = ("llm_deadline" if isinstance(e, LLMDeadlineError)
+                               else "llm_transport")
+                    from agent.llm import model_call_escape_on
+                    if model_call_escape_on():
+                        # The escape raises only before the run's first
+                        # answer or past the operator's wall clock: the run
+                        # stops with the error, no wrap-up, no marker, no
+                        # relaxed gates.
+                        stopped_reason = getattr(self, "_escape_stop", "") or trigger
+                        self._log({"event": trigger, "turn": turn, "error": str(e),
+                                   "stopped_reason": stopped_reason})
+                        self.ui.warn(f"agent stopped ({stopped_reason}): {e}")
+                        break
                     # A wedged model call, or a provider that stayed
                     # unreachable through the lost-turn retries, is a lost
                     # turn, not a lost run: steer into wrap-up so blockers can
                     # still be cleared and a full report written.
-                    trigger = ("llm_deadline" if isinstance(e, LLMDeadlineError)
-                               else "llm_transport")
                     self._log({"event": trigger, "turn": turn,
                                "error": str(e)})
                     self.ui.warn(f"model call exceeded its time budget: {e}"
@@ -3125,6 +5178,12 @@ class Agent:
                     "reasoning_tokens": getattr(resp, "reasoning_tokens", 0) or 0,
                     "cut_reason": getattr(resp, "cut_reason", "") or "",
                     "malformed_calls": list(getattr(resp, "malformed_calls", None) or []),
+                    # Calls that came with no arguments, with what the wire
+                    # carried for them and from which provider.
+                    **({"empty_calls": [{**c, "provider": str(getattr(getattr(self.client, "provider", None),
+                                                                      "name", "") or "")}
+                                        for c in resp.empty_calls]}
+                       if getattr(resp, "empty_calls", None) else {}),
                     # How much of this request the provider could serve from
                     # its prompt cache, and how much of the message list was
                     # byte-identical to the previous request's prefix — the
@@ -3132,6 +5191,10 @@ class Agent:
                     "cached_tokens": getattr(resp, "cached_tokens", 0) or 0,
                     "prefix_reuse": self._prefix_reuse(),
                 }
+                if getattr(self, "_last_reply_escape", ""):
+                    # The reply that followed the escape's progress summary.
+                    _assistant_record["escape"] = self._last_reply_escape
+                    self._last_reply_escape = ""
                 if not resp.tool_calls:
                     # A turn that produced no tool call is the one turn whose
                     # raw provider message actually matters: it is the only
@@ -3148,6 +5211,25 @@ class Agent:
                 if resp.content:
                     self.ui.turn(turn)
                     self.ui.assistant(resp.content)
+
+                refusal = getattr(resp, "refusal", None)
+                if refusal is not None:
+                    # Declined by the provider: its own branch, ahead of every
+                    # empty-reply rule. Not a dropped call, a cut or silence,
+                    # so no tool-list cut, no counter of theirs and no label
+                    # of theirs; the next request says what happened, once.
+                    declines += 1
+                    if declines >= PROVIDER_DECLINES_MAX:
+                        stopped_reason = "model_refusal"
+                        self._log({"event": "model_refusal_stop", "turn": turn,
+                                   "consecutive": declines})
+                        self.ui.warn(f"agent stopped: the provider declined {declines} "
+                                     "requests in a row")
+                        break
+                    self._nudge("provider_declined", _DECLINED_MSG.format(
+                        category=refusal.get("category") or "not given"))
+                    continue
+                declines = 0
 
                 # Some models write the call as text instead of using the
                 # function-calling API. run_chat_turn has recovered that
@@ -3187,6 +5269,7 @@ class Agent:
                         and self._tool_count() > tools_ok_at
                         and self._tried_to_call(resp)):
                     shrunk = None
+                    left_stable = False
                     if self._tool_probe_at:
                         # The list was past the ceiling on purpose: the
                         # test failed, and the answer is the ceiling it
@@ -3196,6 +5279,7 @@ class Agent:
                     elif tool_budget_shrinks < TOOL_BUDGET_SHRINKS_MAX:
                         tool_budget_strikes += 1
                         if tool_budget_strikes >= TOOL_BUDGET_STRIKES:
+                            left_stable = _list_stable(self.toolbox)
                             shrunk = self._shrink_tool_budget()
                             tool_budget_strikes = 0
                         if shrunk:
@@ -3204,11 +5288,13 @@ class Agent:
                             tool_budget_pending = kept
                             self._log({"event": "tool_budget_shrunk", "turn": turn,
                                        "sent": sent, "kept": kept,
-                                       "evicted": evicted})
+                                       "evicted": evicted,
+                                       **({"left_stable_list": True} if left_stable else {})})
                             self.ui.warn(
                                 f"no function call arrived with {sent} tool "
                                 f"schemas — cut to {kept} (unloaded "
-                                f"{', '.join(evicted) or 'nothing'}) and asked again")
+                                f"{', '.join(evicted) or 'nothing'}) and asked again"
+                                + ("; the tool list leaves stable mode" if left_stable else ""))
                     if shrunk is not None and not turn_tool_calls:
                         self.messages.append({"role": "user",
                                               "content": _NO_CALL_MSG})
@@ -3515,6 +5601,7 @@ class Agent:
                 # Tools that ran cleanly this turn: a corrected retry answers
                 # the failure the investigate latch is holding for that tool.
                 batch_succeeded: set[str] = set()
+                batch_reads: list[tuple[str, list[str]]] = []
                 # A turn whose every tool result came back protocol-blocked
                 # achieved nothing, but it is not "quiet" either — see the
                 # blocked-streak ladder after this loop.
@@ -3524,6 +5611,7 @@ class Agent:
                 if _sizes is None:
                     _sizes = self._recent_batch_sizes = collections.deque(maxlen=3)
                 _sizes.append(len(turn_tool_calls))
+                turn_tool_calls, reply_dups = self._split_reply_duplicates(turn, turn_tool_calls, memo)
                 batch_left = 0
                 batch_runaway = False
                 if len(turn_tool_calls) > CALLS_PER_TURN_MAX:
@@ -3557,6 +5645,7 @@ class Agent:
                 self.toolbox.tool_probe_limit = self._tool_probe_limit()
                 for tc in turn_tool_calls:
                     if tc.name == "atlas_finish":
+                        self._estate_join(turn)
                         critical_debt = self._critical_scan_debt()
                         from agent.tool_investigate import (
                             finish_blocking_issues,
@@ -3608,172 +5697,91 @@ class Agent:
                             result = "Run ended."
                             done = True
                     else:
-                        _key = memo.key(tc.name or "", tc.arguments or {})
-                        _hit = memo.get(_key)
-                        if (_hit is not None
-                                and (IDENTICAL_CALL_WINDOW <= 0
-                                     or turn - _hit.turn <= IDENTICAL_CALL_WINDOW)
-                                and not _STATEFUL_TOOL_RE.search(tc.name or "")
-                                and memoable(tc.name or "")):
-                            _hit.hits += 1
-                            if not self._result_still_in_context(_hit.tool_call_id):
-                                # The earlier result has been compacted out of
-                                # the conversation: hand it back rather than
-                                # refuse — the model is asking for data it no
-                                # longer has, and the answer costs nothing.
-                                memo.replays += 1
-                                _why, _spill = self._pointed_result_incomplete(_hit)
-                                _note = ""
-                                if _why:
-                                    # A replay of a cut view shows the same part
-                                    # again; a model that repeats the call is
-                                    # asking for the rest, so name where it is.
-                                    _note = (f" This view {_why}; repeating the call shows "
-                                             "the same part. "
-                                             + (f"The complete output is on disk at {_spill}: "
-                                                "search it with strings.strings_grep or "
-                                                "table.table_grep, " if _spill else
-                                                "Ask search.search_evidence for the detail you "
-                                                "need, ")
-                                             + "or narrow the call so the whole answer fits.")
-                                result = (f"[replayed from turn {_hit.turn}: identical call; "
-                                          "its result had been compacted out of the conversation."
-                                          f"{_note}]\n" + _hit.result)
-                                self.messages.append({"role": "tool", "tool_call_id": tc.id,
-                                                      "content": result})
-                                self._log({"event": "identical_call_replayed", "turn": turn,
-                                           "tool": tc.name, "previous_turn": _hit.turn,
-                                           "previous_call_id": _hit.trace_call_id})
-                                continue
-                            memo.pointers += 1
-                            _where = (f" (trace call id {_hit.trace_call_id})"
-                                      if _hit.trace_call_id else "")
-                            _why, _spill = self._pointed_result_incomplete(_hit)
-                            if _why:
-                                # The earlier view was cut: "read it there"
-                                # points at a part already read. Name the
-                                # cut, the complete output and the narrower
-                                # calls that fit whole.
-                                _error = (
-                                    f"{tc.name!r} with these arguments already ran at "
-                                    f"turn {_hit.turn}{_where} and {_why}. The "
-                                    "conversation holds only the part shown then, and "
-                                    "repeating the call returns that same part. "
-                                    + (f"The complete output is on disk at {_spill}: "
-                                       "search it with strings.strings_grep or "
-                                       "table.table_grep for what you need, "
-                                       if _spill else
-                                       "Ask search.search_evidence for the detail you "
-                                       "need, ")
-                                    + "or narrow the call (a subdirectory or inode, no "
-                                    "recursion, a pattern or a column) so the whole "
-                                    "answer fits.")
-                            else:
-                                _error = (f"{tc.name!r} with these arguments already "
-                                          f"succeeded at turn {_hit.turn}{_where}; a path "
-                                          "written differently is the same argument. Its "
-                                          "result is still in the conversation: read it "
-                                          "there. Change the arguments (another path, "
-                                          "inode, pattern or column), or ask "
-                                          "search.search_evidence for a detail of it.")
-                            result = json.dumps({
-                                "success": False,
-                                "gate": "identical_call",
-                                "error": _error,
-                                "previous_turn": _hit.turn,
-                                "previous_call_id": _hit.trace_call_id,
-                                **({"incomplete": _why} if _why else {}),
-                            }, indent=2)
-                            self.messages.append({"role": "tool", "tool_call_id": tc.id,
-                                                  "content": result})
-                            self._log({"event": "tool_result", "turn": turn,
-                                       "tool": tc.name, "result": result[:4000],
-                                       "gate": "identical_call"})
-                            continue
-                        # Wrap-up: exploration is rationed so the close-out
-                        # sequence is reachable before the cap.
-                        if (wrapup_rationed and not self._report_written()
-                                and not _CLOSEOUT_TOOL_RE.search(tc.name or "")):
-                            wrapup_explore_calls += 1
-                            if wrapup_explore_calls > WRAPUP_EXPLORE_CALLS:
-                                result = json.dumps({
-                                    "success": False,
-                                    "gate": "wrapup_exploration_budget",
-                                    "error": _WRAPUP_EXPLORE_REFUSAL.format(
-                                        tool=tc.name, budget=WRAPUP_EXPLORE_CALLS),
-                                }, indent=2)
-                                self.ui.warn(f"refused {tc.name} — wrap-up "
-                                             "exploration budget spent")
-                                self.messages.append({
-                                    "role": "tool", "tool_call_id": tc.id,
-                                    "content": result})
-                                self._log({"event": "tool_result", "turn": turn,
-                                           "tool": tc.name,
-                                           "result": result[:4000],
-                                           "gate": "wrapup_exploration_budget"})
-                                continue
-                        # Refuse exploratory tools while belief-starvation
-                        # latch is active (must formalise findings first).
-                        if belief_latched:
-                            try:
-                                from agent.belief_starvation import (
-                                    starvation_refusal,
-                                    tool_allowed_while_latched,
-                                )
-                                if not tool_allowed_while_latched(tc.name):
-                                    result = starvation_refusal(
-                                        tc.name,
-                                        contacts=belief_contacts,
+                        def _gates(_name, _args, tc=tc):
+                            """The conversation loop's own gates, between the
+                            memo and the run: the wrap-up ration and the
+                            belief-starvation latch."""
+                            nonlocal wrapup_explore_calls
+                            # Wrap-up: exploration is rationed so the close-out
+                            # sequence is reachable before the cap.
+                            if (wrapup_rationed and not self._report_written()
+                                    and not _CLOSEOUT_TOOL_RE.search(tc.name or "")):
+                                wrapup_explore_calls += 1
+                                if wrapup_explore_calls > WRAPUP_EXPLORE_CALLS:
+                                    result = json.dumps({
+                                        "success": False,
+                                        "gate": "wrapup_exploration_budget",
+                                        "error": _WRAPUP_EXPLORE_REFUSAL.format(
+                                            tool=tc.name, budget=WRAPUP_EXPLORE_CALLS),
+                                    }, indent=2)
+                                    self.ui.warn(f"refused {tc.name} — wrap-up "
+                                                 "exploration budget spent")
+                                    self._log({"event": "tool_result", "turn": turn,
+                                               "tool": tc.name,
+                                               "result": result[:4000],
+                                               "gate": "wrapup_exploration_budget"})
+                                    return result
+                            # Refuse exploratory tools while belief-starvation
+                            # latch is active (must formalise findings first).
+                            if belief_latched:
+                                try:
+                                    from agent.belief_starvation import (
+                                        starvation_refusal,
+                                        tool_allowed_while_latched,
                                     )
-                                    self.ui.warn(
-                                        f"refused {tc.name} — "
-                                        f"belief-starvation latch")
-                                    self.messages.append({
-                                        "role": "tool",
-                                        "tool_call_id": tc.id,
-                                        "content": result,
-                                    })
+                                    if (not tool_allowed_while_latched(tc.name)
+                                            and not self._reaches_due_item(tc.name, tc.arguments)):
+                                        result = starvation_refusal(
+                                            tc.name,
+                                            contacts=belief_contacts,
+                                        )
+                                        self.ui.warn(
+                                            f"refused {tc.name} — "
+                                            f"belief-starvation latch")
+                                        self._log({
+                                            "event": "tool_result",
+                                            "turn": turn,
+                                            "tool": tc.name,
+                                            "result": result[:4000],
+                                            "gate": "belief_starvation",
+                                        })
+                                        return result
+                                except Exception as _bs_enforce_err:
+                                    # Fail-open (the tool call proceeds below).
+                                    # A silent failure would disable the
+                                    # already-latched gate for the rest of the
+                                    # run with no trace of why, so log it the
+                                    # way the sibling latch-computation
+                                    # try/except above does.
                                     self._log({
-                                        "event": "tool_result",
+                                        "event": "belief_starvation_check_failed",
                                         "turn": turn,
                                         "tool": tc.name,
-                                        "result": result[:4000],
-                                        "gate": "belief_starvation",
+                                        "error": str(_bs_enforce_err)[:200],
                                     })
-                                    continue
-                            except Exception as _bs_enforce_err:
-                                # Fail-open (the tool call proceeds below),
-                                # but silently — this used to disable the
-                                # already-latched gate for the rest of the
-                                # run with no trace of why. Log it the same way the
-                                # sibling latch-computation try/except above
-                                # already does, so it's at least visible in
-                                # the transcript instead of vanishing.
-                                self._log({
-                                    "event": "belief_starvation_check_failed",
-                                    "turn": turn,
-                                    "tool": tc.name,
-                                    "error": str(_bs_enforce_err)[:200],
-                                })
-                        result = self._run_tool(tc)
+                            return None
+                        # A model call, counted for the finish deferral (a
+                        # finish with none since the last deferral ends the
+                        # run); Atlas's own calls through _call_once are no
+                        # model work.
+                        self._model_calls = getattr(self, "_model_calls", 0) + 1
+                        _out = self._call_once(tc.name, tc.arguments, turn=turn, tool_call_id=tc.id,
+                                               before_run=_gates, in_context=self._result_still_in_context)
+                        result = _out["result"]
+                        if _out["kind"] != "ran":
+                            self.messages.append({"role": "tool", "tool_call_id": tc.id,
+                                                  "content": result})
+                            continue
                         if tc.name.endswith("pre_report_check"):
                             wrapup_explore_calls = 0   # blockers may need probes
-                        _ran_clean = (
-                            not result.startswith(("TOOL ERROR", "ERROR", "TOOL INFO"))
-                            and '"success": false' not in result[:200]
-                            and not (_PROTOCOL_MARKER and _PROTOCOL_MARKER in result[:300]))
-                        if _ran_clean:
-                            if (not _STATEFUL_TOOL_RE.search(tc.name or "")
-                                    and memoable(tc.name or "")):
-                                memo.put(_key, turn=turn, tool_call_id=tc.id,
-                                         result=result, tool=tc.name or "",
-                                         args=tc.arguments or {})
-                        from agent.tool_investigate import classify_tool_result
-                        issue = classify_tool_result(tc.name, result)
+                        _ran_clean = _out["ran_clean"]
+                        issue = _out["issue"]
+                        from agent.tool_investigate import input_paths
                         if issue:
                             batch_issues.append(issue)
                         elif _ran_clean:
                             batch_succeeded.add(tc.name or "")
+                            batch_reads.append((tc.name or "", input_paths(tc.arguments)))
                         if tc.name.endswith("dair_assess"):
                             batch_cleared = True
                             self._note_dair_phase(result)
@@ -3803,114 +5811,9 @@ class Agent:
                                     case_dir=self.case_dir)
                             except Exception:
                                 pass
-                        # Coverage ledger: successful probes move unseen→probed
-                        if self.case_dir and issue is None:
-                            try:
-                                from core.coverage_ledger import (
-                                    observe_tool_paths,
-                                )
-                                _args_blob = ""
-                                try:
-                                    import json as _json
-                                    _args_blob = _json.dumps(
-                                        tc.arguments or {}, default=str)
-                                except Exception:
-                                    _args_blob = str(tc.arguments or "")
-                                # Args only — paths that merely appear in the
-                                # RESULT text (listings, refusals, search
-                                # hits) are not probes; feeding output here
-                                # would forge the coverage floor.
-                                # Parse JSON success — sudo_auth / success:false
-                                # bodies must not count as probes or opens.
-                                try:
-                                    from core.evidence_access import (
-                                        parse_tool_result_success,
-                                    )
-                                    _ok, _err = parse_tool_result_success(
-                                        result)
-                                except Exception:
-                                    _ok = not result.startswith((
-                                        "TOOL ERROR", "ERROR",
-                                    ))
-                                    _err = "" if _ok else result[:300]
-                                observe_tool_paths(
-                                    self.case_dir,
-                                    tool_name=tc.name,
-                                    cmd_or_args=_args_blob,
-                                    success=_ok,
-                                    result_text=result,
-                                )
-                                if _ok:
-                                    try:
-                                        from core.coverage_ledger import (
-                                            register_derived_outputs,
-                                        )
-                                        _derived = register_derived_outputs(
-                                            self.case_dir, tool_name=tc.name,
-                                            arguments=tc.arguments or {},
-                                            result_text=result)
-                                        if _derived:
-                                            self._log({
-                                                "event": "derived_outputs_registered",
-                                                "turn": turn,
-                                                "paths": _derived[:8],
-                                            })
-                                    except Exception:  # noqa: BLE001
-                                        pass
-                                # Same observation, different ledger: a call
-                                # naming both an indicator and a source is
-                                # the pivot for that pair being carried out
-                                # (core/ioc_pivots.py).
-                                if _ok:
-                                    try:
-                                        from core.ioc_pivots import (
-                                            observe_search,
-                                        )
-                                        _closed = observe_search(
-                                            self.case_dir,
-                                            blob=f"{tc.name} {_args_blob}")
-                                        if _closed:
-                                            self._log({
-                                                "event": "ioc_pivot_searched",
-                                                "turn": turn,
-                                                "closed": _closed[:8],
-                                            })
-                                    except Exception:
-                                        pass
-                                # Access stage: persist opened/access_failed
-                                # for TSK disk-open tools (mount_plan SoT).
-                                try:
-                                    from core.evidence_access import (
-                                        record_open_from_tool,
-                                    )
-                                    record_open_from_tool(
-                                        self.case_dir,
-                                        tool_name=tc.name,
-                                        cmd_or_args=_args_blob,
-                                        success=_ok,
-                                        error=_err or (
-                                            "" if _ok else result[:300]
-                                        ),
-                                    )
-                                except Exception as _acc_err:
-                                    self._log({
-                                        "event": "access_stage_write_failed",
-                                        "turn": turn,
-                                        "tool": tc.name,
-                                        "error": str(_acc_err)[:300],
-                                    })
-                            except Exception as _cov_err:
-                                # A ledger that silently stops moving is how
-                                # "coverage floor not met" ambushes the
-                                # analyst at close-out — log it.
-                                self._log({
-                                    "event": "coverage_observe_failed",
-                                    "turn": turn, "tool": tc.name,
-                                    "error": str(_cov_err)[:300]})
                     batch_executed += 1
                     if _PROTOCOL_MARKER and _PROTOCOL_MARKER in (result or ""):
                         batch_blocked += 1
-                    result = self._note_repeated_refusal(tc, result, turn)
                     self.messages.append({"role": "tool", "tool_call_id": tc.id,
                                           "content": result})
                     self._log({"event": "tool_result", "turn": turn,
@@ -3937,6 +5840,8 @@ class Agent:
                         self.ui.warn(f"{refusal_streak} consecutive refused tool calls")
                 self.toolbox.tool_probe_limit = 0
                 self._adopt_tool_probe(turn)
+                self._answer_reply_duplicates(reply_dups)
+                self._prune_unanswered_tool_calls()
                 if batch_left:
                     _bounded = dict(sent=batch_left + CALLS_PER_TURN_MAX,
                                     ran=CALLS_PER_TURN_MAX, left=batch_left)
@@ -3976,7 +5881,8 @@ class Agent:
                     named = [str(t)[:60] for t in self._last_director_tools[:6]]
                     self.messages.append({
                         "role": "user",
-                        "content": _META_ONLY_MSG.format(
+                        "content": (_META_ONLY_STABLE_MSG if _list_stable(self.toolbox)
+                                    else _META_ONLY_MSG).format(
                             streak=meta_only_streak,
                             loaded=", ".join(loaded_set) or "none",
                             tools=", ".join(named) or "no work order yet; call "
@@ -4014,7 +5920,7 @@ class Agent:
                             # Wrapped up already: the close-out clock starts
                             # here if nothing started it, and no second
                             # wrap-up message is appended.
-                            self._nudge("report_phase_stall", _REPORT_STALL_MSG)
+                            self._nudge("report_phase_stall", self._report_stall_msg())
                             if report_wrapup_turn is None:
                                 report_wrapup_turn = turn
                         elif self._push_report_phase(turn, reason="director_reask"):
@@ -4041,7 +5947,7 @@ class Agent:
                     # same batch after a clean run re-enters through the merge.
                     from agent.tool_investigate import settle_investigate_debt
                     investigate_debt = settle_investigate_debt(
-                        investigate_debt, batch_succeeded)
+                        investigate_debt, batch_succeeded, batch_reads)
                 if batch_issues:
                     from agent.tool_investigate import merge_investigate_debt
                     investigate_debt = merge_investigate_debt(
@@ -4115,6 +6021,25 @@ class Agent:
                 if done:
                     break
 
+        return self._run_end(turn, stopped_reason, finish_summary)
+
+    def _run_end(self, turn: int, stopped_reason: str, finish_summary: str) -> str:
+        """The end every loop shares: the estate join, the unsupported
+        answers reopened, the finish status and its disclosure, the stats
+        and the run_end record."""
+        memo = self._call_memo
+        run_start = self._run_start
+        # A count pass still reading its tables is waited for and applied:
+        # its indicators were marked counted when it started.
+        self._estate_join(turn)
+        # The memory batch is never awaited: still running, it is stopped
+        # here and what it did not run is disclosed (core.memory_batch).
+        try:
+            from core.memory_batch import stop as _stop_memory_batch
+            if self.case_dir:
+                _stop_memory_batch(self.case_dir)
+        except Exception:  # noqa: BLE001
+            pass
         # Before the run is classified: a task the model marked answered
         # over no current belief is not answered. Reopening it here keeps
         # the dashboard, the report and finish_status telling one story.
@@ -4131,10 +6056,19 @@ class Agent:
         except Exception:  # noqa: BLE001 - never block the close-out
             pass
         finish_status = self._finish_status(stopped_reason)
+        coverage_disclosure: dict = {}
+        try:
+            from core.deferred_intents import work_order_on
+            if work_order_on() and self.case_dir:
+                from core.investigation_exit import completion_disclosure
+                coverage_disclosure = completion_disclosure(self.case_dir)
+        except Exception:  # noqa: BLE001 - a disclosure never blocks the close-out
+            coverage_disclosure = {}
         self.stats = {
             "summary": finish_summary,
             "stopped_reason": stopped_reason,
             "finish_status": finish_status,
+            "coverage_disclosure": coverage_disclosure,
             "turns": turn,
             "duration_seconds": round(time.monotonic() - run_start, 1),
             "tool_calls": self._tool_stats,
@@ -4149,6 +6083,7 @@ class Agent:
         }
         self._log({"event": "run_end", "summary": finish_summary,
                    "finish_status": finish_status,
+                   "coverage_disclosure": coverage_disclosure,
                    "distinct_tool_calls": len(memo),
                    "identical_calls_replayed": memo.replays,
                    "identical_calls_pointed": memo.pointers,
@@ -4345,6 +6280,17 @@ class Agent:
             self._trim_context()
             _batch_grace_end()
             resp = self._chat_turn()
+            refusal = getattr(resp, "refusal", None)
+            if refusal is not None:
+                # Declined by the provider: said where the answer would have
+                # appeared, never asked again.
+                why = (refusal.get("explanation") or "").strip().rstrip(".")
+                answer = (f"The provider declined this request (category: "
+                          f"{refusal.get('category') or 'not given'})" + (f": {why}" if why else "") + ".")
+                self._log({"event": "error", "content": answer})
+                if on_event:
+                    on_event({"type": "error", "message": answer})
+                break
             tool_calls = list(resp.tool_calls)
             if not tool_calls and resp.content:
                 # Recovery is capped even when max_rounds is unlimited (the

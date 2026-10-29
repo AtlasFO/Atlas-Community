@@ -35,7 +35,7 @@ _NON_DISK_DIR_TOKENS = frozenset({
 
 _DISK_IMAGE_EXT = frozenset({
     ".e01", ".ex01", ".s01", ".l01", ".aff", ".afd", ".afm",
-    ".vmdk", ".vhd", ".vhdx", ".qcow", ".qcow2",
+    ".vmdk", ".vhd", ".vhdx", ".qcow", ".qcow2", ".vdi",
     ".dd", ".iso",
 })
 
@@ -128,6 +128,7 @@ _DISK_MAGICS = (
     (0, b"conectix"),                  # VHD, footer copy of a dynamic disk
     (0, b"QFI\xfb"),                    # QCOW
     (0, b"KDMV"),                      # VMDK sparse extent
+    (0x40, b"\x7f\x10\xda\xbe"),        # VDI (VirtualBox) image signature
     (0, b"EVF\x09\x0d\x0a\xff\x00"),    # EWF
 )
 _MEMORY_MAGICS = (

@@ -109,6 +109,8 @@ def test_clear_case_run_wipes_process_run_caches_keeps_cis(tmp_path):
         json.dumps({"failed_guesses": ["/nope"]}), encoding="utf-8",
     )
     (case / ".atlas" / "context_budget.json").write_text("{}", encoding="utf-8")
+    (case / ".atlas" / "frontier_state.json").write_text('{"mode": "frontier"}', encoding="utf-8")
+    (case / ".atlas" / "stop_record.json").write_text('{"reason": "stopped"}', encoding="utf-8")
     (case / ".atlas" / "claim_graph.json").write_text(
         json.dumps({"claims": [{"id": "c1"}]}), encoding="utf-8",
     )
@@ -119,6 +121,8 @@ def test_clear_case_run_wipes_process_run_caches_keeps_cis(tmp_path):
     assert not proj.exists()
     assert not (case / ".atlas" / "path_knowledge.json").exists()
     assert not (case / ".atlas" / "context_budget.json").exists()
+    assert not (case / ".atlas" / "frontier_state.json").exists()
+    assert not (case / ".atlas" / "stop_record.json").exists()
     assert (case / ".atlas" / "claim_graph.json").exists()
     assert (case / ".atlas" / "investigation_tasks.json").exists()
 
@@ -145,6 +149,7 @@ def test_an_output_dir_run_clears_the_mirror_not_the_case(tmp_path, monkeypatch)
     monkeypatch.setattr(cli, "_require_sudo_preflight", lambda *a, **k: None)
     monkeypatch.setattr(cli, "_apply_report_language", lambda *a, **k: None)
     monkeypatch.setattr(cli, "_run_investigation", _no_run)
+    monkeypatch.setattr(cli, "_analyst_client", lambda *a, **k: object())
     args = Namespace(fresh=True, resume=False, output_dir=str(mirror))
     with pytest.raises(_Stop):
         cli._run_locked(args, case, lock_fd=-1)
@@ -166,3 +171,13 @@ def test_a_case_under_a_handling_stop_gets_no_mirror(tmp_path):
     assert not (tmp_path / "mirror").exists()
     # The case itself as the output directory is not a mirror.
     assert _prepare_output_dir(case, str(case)) == case
+
+
+def test_a_fresh_start_clears_the_busy_marks(tmp_path):
+    from tools.misc import clear_case_run
+    case = tmp_path / "case"
+    (case / ".atlas" / "busy").mkdir(parents=True)
+    (case / "analysis").mkdir()
+    (case / ".atlas" / "busy" / "4242-1").touch()
+    clear_case_run(str(case), clear_memory=False)
+    assert not (case / ".atlas" / "busy").exists()

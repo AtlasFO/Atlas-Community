@@ -25,6 +25,9 @@ EXPECTED_ORDER = [
     # ATLAS_INSTRUCTION_TEXT_GATE=strict, so its place only matters for the
     # note it leaves on the context.
     "instruction_text_grounding",
+    # Reads the cited rows like the quotation check: a file bound to a hash
+    # must stand with it in one row before any tier argument.
+    "hash_pair_grounding",
     # Runs before evidence_strength on purpose: an access limitation already
     # recorded for this evidence is a duplicate, and saying so is cheaper and
     # more useful than a tier argument about material the analyst cannot reach.
@@ -65,6 +68,7 @@ def test_all_gates_return_none_or_dict():
     failure = run_gates(ctx)
     assert failure is None
 
+@pytest.mark.usefixtures("todays_dair")
 
 def test_dair_required_fires_before_tier_checks():
     """If no dair_call exists, dair_required must fire even for CONFIRMED

@@ -11,9 +11,9 @@ from __future__ import annotations
 def disk_open_tool_for_path(path: str) -> str:
     """Next-step disk-open tool for a concrete path."""
     lower = (path or "").lower()
-    if lower.endswith(".vmdk"):
-        return "img.vmdk_chain_info"
-    if lower.endswith((".raw", ".dd", ".img", ".vhd", ".vhdx")):
+    # A disk container is read through its raw view like a raw image; the
+    # mount plan's entry names a copy where a host has no views.
+    if lower.endswith((".raw", ".dd", ".img", ".vmdk", ".vhd", ".vhdx", ".qcow2", ".qcow", ".vdi")):
         return "tsk.mmls"
     if lower.endswith((".e01", ".ex01")):
         return "ewf.mount_full_image"
@@ -125,7 +125,7 @@ def loop_fuse_demotion_refusal(tool_name: str,
             f"{tool_name} is demoted during Triage until disk orientation "
             "via tsk.mmls (then tsk.fls). Loop/FUSE mounts (losetup/xmount/"
             "ewf.mount_ntfs) hang on sudo/password and multi-GB images — use "
-            "tsk.mmls on the exported raw (see .atlas/mount_plan.json). "
+            "tsk.mmls on the image (see .atlas/mount_plan.json). "
             "Retry losetup/xmount only in Collect/Analyze after TSK open, "
             "or when a partition offset mount is explicitly required."
         ),

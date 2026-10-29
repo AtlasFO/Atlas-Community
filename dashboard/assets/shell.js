@@ -63,6 +63,7 @@ const AtlasShell = (() => {
     { id: 'overview',  label: 'Overview',  file: 'overview.html' },
     { id: 'questions', label: 'Questions', file: 'questions.html' },
     { id: 'claims',    label: 'Case Findings', file: 'claim_view.html' },
+    { id: 'coverage',  label: 'Coverage',  file: 'coverage.html' },
     { id: 'iocs',      label: 'IoCs',      file: 'iocs.html' },
     { id: 'response',  label: 'Response',  file: 'recommendations.html' },
     { id: 'process',   label: 'Process',   file: 'dashboard.html' },
@@ -80,6 +81,8 @@ const AtlasShell = (() => {
     requiresCase: true,
     cases: [],            // [{case_id, case_dir, traces:[...]}]
     activeCase: null,     // case_dir
+    casesLoaded: false,   // the case list answered (a failed list names no case unknown)
+    missingCase: null,    // a ?case= the loaded list does not hold: shown, never replaced
     caseListeners: [],
     stopBusy: null,       // cancel function of the activity poll
     pollers: new Set(),   // every live poll() tick, so the change stream can run them
@@ -91,7 +94,7 @@ const AtlasShell = (() => {
     runningCases: null, // [{case_dir, case_id, activity}] — every live run; null until fetched
 
     timelinePlugin: false,
-    user: null,            // {id, username, email, role}
+    user: null,           // {id, username, email, role}
     viewerChatEnabled: false,
   };
 
@@ -147,6 +150,8 @@ const AtlasShell = (() => {
          page instead of leaving it silently frozen. */
   const FETCH_TIMEOUT_MS = 15000;
   const OFFLINE_AFTER_MS = 10000;
+  // How soon a case list that did not answer is asked again.
+  const CASES_RETRY_MS = 3000;
 
   // The return path keeps the fragment: a page's section lives there, and
   // a script navigation, unlike a redirect, carries none over.
@@ -392,21 +397,29 @@ const AtlasShell = (() => {
     return S.cases.find(c => c.case_dir === S.activeCase) || null;
   }
 
+  /** ``opts.keepLink``: no case is active, and the stored case and the
+   * URL's ?case= stay as they are (the not-found and list-unavailable
+   * states: the link still shows what was asked, the last case is kept). */
   function setActiveCase(caseDir, opts) {
     caseDir = caseDir || null;
     const changed = caseDir !== S.activeCase;
     S.activeCase = caseDir;
-    try {
-      if (caseDir) localStorage.setItem(LS_CASE, caseDir);
-      else localStorage.removeItem(LS_CASE);
-    } catch (_e) { /* storage may be unavailable; session still works */ }
-    // Keep the URL a shareable deep link for the current view.
-    const u = new URL(window.location.href);
-    if (caseDir) u.searchParams.set('case', caseDir);
-    else u.searchParams.delete('case');
-    history.replaceState(null, '', u.toString());
+    if (caseDir || !(opts && opts.keepLink)) {
+      S.missingCase = null;
+      try {
+        if (caseDir) localStorage.setItem(LS_CASE, caseDir);
+        else localStorage.removeItem(LS_CASE);
+      } catch (_e) { /* storage may be unavailable; session still works */ }
+      // Keep the URL a shareable deep link for the current view.
+      const u = new URL(window.location.href);
+      if (caseDir) u.searchParams.set('case', caseDir);
+      else u.searchParams.delete('case');
+      history.replaceState(null, '', u.toString());
+    }
+    syncCaseNotice();
     syncHeader();
     if (changed) renderBusy();
+    if (changed) loadCapabilities();
     if (changed || (opts && opts.force)) {
       Chat.onCaseChanged();
       for (const cb of S.caseListeners) {
@@ -417,15 +430,59 @@ const AtlasShell = (() => {
 
   function onCaseChange(cb) { S.caseListeners.push(cb); }
 
+  /** The case the page opens on: the URL's ?case= when the list holds it;
+   * with no ?case=, the stored case, then the only case. A ?case= the list
+   * does not hold is no case at all (``{missing}``), never another case: a
+   * Start run on a case the user did not ask for may act on its files. */
   function resolveInitialCase() {
     const urlCase = new URLSearchParams(window.location.search).get('case');
     let stored = null;
     try { stored = localStorage.getItem(LS_CASE); } catch (_e) { /* n/a */ }
     const known = new Set(S.cases.map(c => c.case_dir));
-    if (urlCase && known.has(urlCase)) return urlCase;   // deep link wins
-    if (stored && known.has(stored)) return stored;      // session survives
-    if (S.cases.length === 1) return S.cases[0].case_dir;
-    return null;
+    if (urlCase) return known.has(urlCase) ? { caseDir: urlCase } : { missing: urlCase };
+    if (stored && known.has(stored)) return { caseDir: stored };      // session survives
+    if (S.cases.length === 1) return { caseDir: S.cases[0].case_dir };
+    return { caseDir: null };
+  }
+
+  /** The header's notice for a ?case= that names no case: the list does not
+   * hold it, or the list is not loaded (then the list is retried, and the
+   * case is never called unknown). */
+  function syncCaseNotice() {
+    const el = document.getElementById('atlas-case-notice');
+    if (!el) return;
+    const asked = S.missingCase;
+    if (!asked) { el.hidden = true; el.innerHTML = ''; return; }
+    el.hidden = false;
+    el.innerHTML = S.casesLoaded
+      ? t('shell.caseNotFound', { case: esc(asked) })
+      : t('shell.casesUnavailable', { case: esc(asked) });
+  }
+
+  /** Open on the initial case; a ?case= the list does not name keeps the
+   * page on no case. A list that did not answer is retried until it does,
+   * and decides nothing meanwhile. */
+  function openInitialCase(retrying) {
+    const r = resolveInitialCase();
+    if (!S.casesLoaded) {
+      // No list, no verdict: the asked case and the stored one stay, and the
+      // list is asked again.
+      S.missingCase = r.missing || null;
+      setActiveCase(null, { force: !retrying, keepLink: true });
+      setTimeout(async () => {
+        await loadCases();
+        syncHeader();
+        if (!S.activeCase) openInitialCase(true);
+      }, CASES_RETRY_MS);
+      return null;
+    }
+    if (r.missing) {
+      S.missingCase = r.missing;
+      setActiveCase(null, { force: !retrying, keepLink: true });
+      return null;
+    }
+    setActiveCase(r.caseDir, { force: true });
+    return r.caseDir;
   }
 
   /* ── header / nav rendering ──────────────────────────────────────────── */
@@ -510,6 +567,7 @@ const AtlasShell = (() => {
           ${userMenu}
         </div>
       </div>
+      <div class="shell-case-notice" id="atlas-case-notice" role="alert" hidden></div>
       <nav class="shell-nav">
         ${caseTabs}
         <span class="nav-gap"></span>
@@ -571,7 +629,7 @@ const AtlasShell = (() => {
 
   async function loadCapabilities() {
     try {
-      const d = await api('capabilities');
+      const d = await api('capabilities', S.activeCase ? { case: S.activeCase } : {});
       S.timelinePlugin = !!d.timeline_plugin_active;
     } catch (_e) {
       S.timelinePlugin = false;
@@ -598,12 +656,29 @@ const AtlasShell = (() => {
     textEl.textContent = text || t('shell.offline');
   }
 
+  /** The hover card hangs from the chip's left edge. Where the header wraps
+   *  (a phone), that edge sits far enough right that the card's designed
+   *  width would run past the screen and widen the page, hidden or not: the
+   *  card then gets the room there is, down to a floor that stays readable.
+   *  The CSS min-width and max-width stand wherever the room suffices. */
+  function fitPopover() {
+    const pop = document.getElementById('atlas-activity-pop');
+    const chip = pop && pop.parentElement;
+    if (!chip || !chip.getBoundingClientRect) return;
+    const room = Math.floor(document.documentElement.clientWidth
+      - chip.getBoundingClientRect().left - 16);
+    const fit = `${Math.max(160, room)}px`;
+    pop.style.maxWidth = room < 340 ? fit : '';
+    pop.style.minWidth = room < 240 ? fit : '';
+  }
+
   /** Fill the activity chip's hover card from the running-case list. */
   function renderRunningPopover(running) {
     const pop = document.getElementById('atlas-activity-pop');
     if (!pop) return;
     if (!running.length) {
       pop.innerHTML = `<div class="ap-empty">${esc(t('shell.noRuns'))}</div>`;
+      fitPopover();
       return;
     }
     const rows = running.map(r => {
@@ -622,6 +697,7 @@ const AtlasShell = (() => {
     }).join('');
     pop.innerHTML =
       `<div class="ap-head">${esc(running.length === 1 ? t('shell.runningOne') : t('shell.runningMany', { n: running.length }))}</div>${rows}`;
+    fitPopover();
   }
 
   /** The run pill and its hover card, from the cached run list and the case
@@ -876,8 +952,10 @@ const AtlasShell = (() => {
     try {
       const data = await api('cases');
       S.cases = data.cases || [];
+      S.casesLoaded = true;
     } catch (_e) {
       S.cases = [];
+      S.casesLoaded = false;
     }
   }
 
@@ -888,6 +966,8 @@ const AtlasShell = (() => {
    */
   async function init(opts) {
     S.page = (opts && opts.page) || '';
+    // A turned phone or a resized window moves the chip: fit its card again.
+    window.addEventListener('resize', fitPopover);
     S.requiresCase = !opts || opts.requiresCase !== false;
     // The server already gates the page load itself (a session-less request
     // never reaches here) — this fetches the role/user data the nav needs to
@@ -898,9 +978,8 @@ const AtlasShell = (() => {
     Chat.build();
     await Promise.all([loadCases(), loadCapabilities()]);
     if (opts && opts.onCase) onCaseChange(opts.onCase);
-    const initial = resolveInitialCase();
-    // force:true → listeners always get the initial dispatch, even for null.
-    setActiveCase(initial, { force: true });
+    // Listeners always get the initial dispatch, even for no case.
+    const initial = openInitialCase();
     // Shell-level "Atlas working" indicator. Runs on every page, global ones
     // included: the whole point of the case-wide check is that it reports a
     // live run regardless of which case — or no case — is on screen.

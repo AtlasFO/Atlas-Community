@@ -106,7 +106,7 @@ def ensure_finding_ids(case_dir: str | os.PathLike) -> dict[str, Any]:
 
 
 def sync_after_graph_write(case_dir: str | os.PathLike) -> dict[str, Any]:
-    """Transactional follow-up: claim_graph write ⇒ finding_index catch-up (X7)."""
+    """Transactional follow-up: claim_graph write ⇒ finding_index catch-up."""
     try:
         return ensure_finding_ids(case_dir)
     except Exception:
@@ -158,10 +158,23 @@ def nodes_for_report(
     # claim's id as an alias so references to it still resolve.
     by_id = {str(n.get("id")): n for n in out}
     folded: set[str] = set()
+    try:
+        from core.conclusion_door import door_on
+        door = door_on()
+    except Exception:  # noqa: BLE001
+        door = False
     for n in out:
         if n.get("kind") != "conclusion":
             continue
         src = str(n.get("promoted_from_claim_id") or "")
+        if door:
+            # Only an identical single-basis conclusion stands for its basis:
+            # a rewritten or composite one is a finding of its own beside it.
+            basis = [str(b) for b in n.get("basis_ids") or []] or ([src] if src else [])
+            src = basis[0] if len(basis) == 1 else ""
+            if src in by_id and " ".join(str(by_id[src].get("statement") or "").split()).casefold() \
+                    != " ".join(str(n.get("statement") or "").split()).casefold():
+                src = ""
         if src and src != str(n.get("id")) and src in by_id:
             alias = by_id[src].get("finding_id")
             aliases = list(n.get("also_recorded_as") or [])

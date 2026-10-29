@@ -13,7 +13,7 @@ from tools.archives import diagnose_extraction, zip_extract
 def one_provider(monkeypatch):
     for var in ("ATLAS_AGENT_MODEL", "REASON_MODEL", "DAIR_MODEL", "ATLAS_REVIEW_MODEL",
                 "ATLAS_AGENT_PROVIDER", "REASON_BACKEND", "DAIR_BACKEND",
-                "ATLAS_REPORT_PROVIDER", "ATLAS_REVIEW_PROVIDER"):
+                "ATLAS_REPORT_PROVIDER", "ATLAS_REVIEW_PROVIDER", "VISION_MODEL", "VISION_BACKEND"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("ATLAS_PROVIDERS", "alpha,beta")
     for name, model in (("ALPHA", "vendor/alpha-model"), ("BETA", "vendor/beta-model")):
@@ -57,7 +57,24 @@ def test_reviewer_provider_outranks_reason_model(one_provider, monkeypatch):
 
 def test_unconfigured_roles_are_empty_not_guessed(one_provider):
     roles = role_models()
-    assert roles == {"analyst": "", "reason": "", "dair": "", "report": "", "review": ""}
+    assert roles == {"analyst": "", "reason": "", "dair": "", "report": "", "review": "", "vision": ""}
+
+
+def test_the_vision_role_is_recorded_as_the_describe_tool_resolves_it(one_provider, monkeypatch):
+    """The vision role is chosen on purpose: VISION_BACKEND names its
+    provider and VISION_MODEL only overrides the id (tools.images._configured).
+    A model id with no provider configures nothing there, so the run record
+    says "" too, and the role never borrows the analyst's model."""
+    monkeypatch.setenv("ATLAS_AGENT_PROVIDER", "alpha")
+    monkeypatch.setenv("VISION_MODEL", "vendor/vision-override")
+    assert role_models()["vision"] == ""
+    from tools.images import _configured
+    assert _configured() == ""
+    monkeypatch.delenv("VISION_MODEL")
+    monkeypatch.setenv("VISION_BACKEND", "beta")
+    assert role_models()["vision"] == "vendor/beta-model" == _configured()
+    monkeypatch.setenv("VISION_MODEL", "vendor/vision-override")
+    assert role_models()["vision"] == "vendor/vision-override" == _configured()
 
 
 def test_structural_damage_wins_over_the_password_guess():

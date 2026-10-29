@@ -13,6 +13,10 @@ from typing import Optional
 def check(ctx) -> Optional[dict]:
     if getattr(ctx, "tier", "") != "UNCONFIRMED":
         return None
+    # A record that replaces a standing finding (supersedes=, resolved by the
+    # supersedes_target gate) adds no note to the pile.
+    if getattr(ctx, "supersedes_entry", None):
+        return None
     log = getattr(ctx, "log", None)
     case = None
     try:

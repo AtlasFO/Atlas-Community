@@ -66,3 +66,32 @@ def any_usable_reason_call(
     tool: str,
 ) -> bool:
     return find_usable_reason_call(entries, tool) is not None
+
+
+def helper_unavailable(entries: list[dict[str, Any]] | None, tool: str) -> int:
+    """The unusable outcomes of ``tool`` since its last usable one, when
+    they reach the tool-failure latch's IDENTICAL_FAIL_LIMIT; else 0.
+
+    Outcomes, not attempts: a call still running (or left running by the
+    watchdog) has no reason_call yet and counts only once it returns, and a
+    late usable reply clears the count. Every failure path of a helper call
+    (timeout, empty or starved reply, transport error, missing backend)
+    records an unusable reason_call, so a helper that cannot answer reaches
+    the limit and the report gate records the missing step as a limitation
+    instead of waiting for it. The latch's limit, so two failures in a row (a
+    rate-limit or server-error pair) waive nothing."""
+    from agent.tool_investigate import IDENTICAL_FAIL_LIMIT
+    failed = len(failures_since_usable(entries, tool))
+    return failed if failed >= IDENTICAL_FAIL_LIMIT else 0
+
+
+def failures_since_usable(entries: list[dict[str, Any]] | None, tool: str) -> list[dict[str, Any]]:
+    """The unusable reason_call outcomes of ``tool`` after its last usable
+    one, in order. Those whose gate is "helper_unavailable" were answered
+    from the run's memory of a cut request without reaching the model."""
+    out: list[dict[str, Any]] = []
+    for entry in entries or []:
+        if entry.get("type") != "reason_call" or entry.get("tool") != tool:
+            continue
+        out = [] if is_usable_reason_call(entry) else out + [entry]
+    return out

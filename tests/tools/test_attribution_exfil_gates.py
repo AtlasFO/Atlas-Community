@@ -13,10 +13,20 @@ entries), so a synthetic ctx exercises the real logic.
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
+
 from tools._gates import GateContext
 from tools._gates import principal_attribution_grounding as pag
 from tools._gates import named_actor_attribution_grounding as nag
 from tools._gates import exfil_channel_grounding as ecg
+
+
+@pytest.fixture(autouse=True)
+def _session_vocabulary_path(monkeypatch):
+    """These tests pin the session-vocabulary pass test, the path
+    ATLAS_ATTRIBUTION_IDENTITY_ROWS off restores (the identity-row test:
+    tests/tools/test_attribution_identity_rows.py)."""
+    monkeypatch.setenv("ATLAS_ATTRIBUTION_IDENTITY_ROWS", "0")
 
 
 def _ctx(description, *, tier="CONFIRMED", supporting_evidence="",
@@ -59,19 +69,21 @@ class TestNamedActorAttributionGrounding:
         names = nag._case_subject_names(_ctx("x", by_type=by_type))
         assert names == {"Dana", "Nora"}
 
-    def test_satisfied_by_session_in_supporting_evidence(self):
-        ctx = _ctx(
-            "Dana exfiltrated the classified data",
-            supporting_evidence="Security 4778 RDP session for Dana from 10.0.0.5",
-        )
-        assert nag.check(ctx) is None
+    def test_satisfied_by_cited_session(self):
+        """The marker in a cited call's rows grounds it; the same words only in
+        supporting_evidence, the analyst's own text, do not."""
+        marker = ("Security 4778 RDP session for Dana from 10.0.0.5")
+        by_id = {61: {"type": "tool_call", "cmd": "<py>:strings_read_text", "stdout_excerpt": marker}}
+        assert nag.check(_ctx('Dana exfiltrated the classified data', input_call_ids=[61], by_call_id=by_id)) is None
+        assert nag.check(_ctx('Dana exfiltrated the classified data', supporting_evidence=marker)) is not None
 
-    def test_satisfied_by_ip_literal(self):
-        ctx = _ctx(
-            "Dana exfiltrated the classified data",
-            supporting_evidence="RDP session from 203.0.113.249",
-        )
-        assert nag.check(ctx) is None
+    def test_satisfied_by_cited_ip_literal(self):
+        """The marker in a cited call's rows grounds it; the same words only in
+        supporting_evidence, the analyst's own text, do not."""
+        marker = ("RDP session from 203.0.113.249")
+        by_id = {61: {"type": "tool_call", "cmd": "<py>:strings_read_text", "stdout_excerpt": marker}}
+        assert nag.check(_ctx('Dana exfiltrated the classified data', input_call_ids=[61], by_call_id=by_id)) is None
+        assert nag.check(_ctx('Dana exfiltrated the classified data', supporting_evidence=marker)) is not None
 
     def test_satisfied_by_session_in_lineage_entry(self):
         by_id = {61: {"cmd": "ez_evtxecmd Security.evtx",
@@ -122,15 +134,14 @@ class TestPrincipalAttributionGrounding:
         assert out is not None
         assert out["gate"] == "principal_attribution_grounding"
 
-    def test_satisfied_by_session_marker_in_supporting_evidence(self):
-        ctx = _ctx(
-            "Local admin account svc.backup01 is operated by Jane Doe",
-            supporting_evidence=(
-                "Security 4624 LogonType 10 SourceNetworkAddress 10.0.0.42 "
-                "for svc.backup01 (ez.evtxecmd)"
-            ),
-        )
-        assert pag.check(ctx) is None
+    def test_satisfied_by_cited_session_marker(self):
+        """The marker in a cited call's rows grounds it; the same words only in
+        supporting_evidence, the analyst's own text, do not."""
+        marker = ("Security 4624 LogonType 10 SourceNetworkAddress 10.0.0.42 "
+                "for svc.backup01 (ez.evtxecmd)")
+        by_id = {61: {"type": "tool_call", "cmd": "<py>:strings_read_text", "stdout_excerpt": marker}}
+        assert pag.check(_ctx('Local admin account svc.backup01 is operated by Jane Doe', input_call_ids=[61], by_call_id=by_id)) is None
+        assert pag.check(_ctx('Local admin account svc.backup01 is operated by Jane Doe', supporting_evidence=marker)) is not None
 
     def test_satisfied_by_session_marker_in_lineage_entry(self):
         by_id = {50: {"cmd": "ez_evtxecmd Security.evtx",
@@ -141,12 +152,13 @@ class TestPrincipalAttributionGrounding:
         )
         assert pag.check(ctx) is None
 
-    def test_satisfied_by_ip_literal_evidence(self):
-        ctx = _ctx(
-            "account x_admin was used by Carol",
-            supporting_evidence="RDP session from 203.0.113.249",
-        )
-        assert pag.check(ctx) is None
+    def test_satisfied_by_cited_ip_literal_evidence(self):
+        """The marker in a cited call's rows grounds it; the same words only in
+        supporting_evidence, the analyst's own text, do not."""
+        marker = ("RDP session from 203.0.113.249")
+        by_id = {61: {"type": "tool_call", "cmd": "<py>:strings_read_text", "stdout_excerpt": marker}}
+        assert pag.check(_ctx('account x_admin was used by Carol', input_call_ids=[61], by_call_id=by_id)) is None
+        assert pag.check(_ctx('account x_admin was used by Carol', supporting_evidence=marker)) is not None
 
     def test_no_account_token_does_not_fire(self):
         # 'created by process' is an attribution copula but there is no
@@ -180,19 +192,21 @@ class TestExfilChannelGrounding:
         assert out is not None
         assert out["gate"] == "exfil_channel_grounding"
 
-    def test_satisfied_by_ftp_transfer_log(self):
-        ctx = _ctx(
-            "Data exfiltrated over FTP to the staging host",
-            supporting_evidence="transfers.log records 36864 bytes written to 203.0.113.249",
-        )
-        assert ecg.check(ctx) is None
+    def test_satisfied_by_cited_ftp_transfer_log(self):
+        """The marker in a cited call's rows grounds it; the same words only in
+        supporting_evidence, the analyst's own text, do not."""
+        marker = ("transfers.log records 36864 bytes written to 203.0.113.249")
+        by_id = {61: {"type": "tool_call", "cmd": "<py>:strings_read_text", "stdout_excerpt": marker}}
+        assert ecg.check(_ctx('Data exfiltrated over FTP to the staging host', input_call_ids=[61], by_call_id=by_id)) is None
+        assert ecg.check(_ctx('Data exfiltrated over FTP to the staging host', supporting_evidence=marker)) is not None
 
-    def test_satisfied_by_removable_volume_binding(self):
-        ctx = _ctx(
-            "vacation.7z was copied to a USB removable drive for handoff",
-            supporting_evidence="LNK shows the file resided on removable volume; MountedDevices binding present",
-        )
-        assert ecg.check(ctx) is None
+    def test_satisfied_by_cited_removable_volume_binding(self):
+        """The marker in a cited call's rows grounds it; the same words only in
+        supporting_evidence, the analyst's own text, do not."""
+        marker = ("LNK shows the file resided on removable volume; MountedDevices binding present")
+        by_id = {61: {"type": "tool_call", "cmd": "<py>:strings_read_text", "stdout_excerpt": marker}}
+        assert ecg.check(_ctx('vacation.7z was copied to a USB removable drive for handoff', input_call_ids=[61], by_call_id=by_id)) is None
+        assert ecg.check(_ctx('vacation.7z was copied to a USB removable drive for handoff', supporting_evidence=marker)) is not None
 
     def test_satisfied_by_usn_write_in_lineage(self):
         by_id = {77: {"cmd": "misc_usnparser_parse $J",
@@ -271,3 +285,39 @@ class TestQuotedThingNames:
                 'The account svc_backup is operated by "Jane Doe".'):
             out = pag.check(_ctx(desc))
             assert out is not None and out["gate"] == "principal_attribution_grounding", desc
+
+
+# ── the cited call's retained output ─────────────────────────────────────────
+
+_FTP_BANNER = "input: evidence/capture.log\nmatch (JIT): ^(USER|PASS|RETR|STOR|226)\n\nT 203.0.113.80:80 -> 10.0.0.5:1589 [A]\n"
+_FTP_SPILL = _FTP_BANNER + ("  noise " * 40 + "\n") * 30 + (
+    "T 10.0.0.5:1031 -> 203.0.113.40:21 [AP]\n  STOR report_2031.zip..\n"
+    "T 203.0.113.40:21 -> 10.0.0.5:1031 [AP]\n  226 Transfer complete...\n")
+
+
+class TestLineageReadsTheRetainedOutput:
+    def _cited(self, tmp_path, spill_text):
+        spill = tmp_path / "ngrep.stdout"
+        spill.write_text(spill_text)
+        entry = {"call_id": 65, "type": "tool_call", "success": True,
+                 "cmd": "ngrep -q -I evidence/capture.log -i ^(USER|PASS|RETR|STOR|226) tcp",
+                 "stdout_excerpt": _FTP_BANNER, "stdout_file": str(spill)}
+        return _ctx("jane.doe uploaded report_2031.zip over FTP to 203.0.113.40 (exfiltrated)", tier="LIKELY",
+                    linked_call_id=65, input_call_ids=[65], by_call_id={65: entry})
+
+    def test_a_transfer_past_the_excerpt_satisfies_the_exfil_gate(self, tmp_path):
+        assert ecg.check(self._cited(tmp_path, _FTP_SPILL)) is None
+
+    def test_the_banner_and_the_pattern_echo_alone_still_refuse(self, tmp_path):
+        out = ecg.check(self._cited(tmp_path, _FTP_BANNER + ("  noise " * 40 + "\n") * 30))
+        assert out is not None and out["gate"] == "exfil_channel_grounding"
+
+    def test_the_text_is_worked_out_once_per_record(self, tmp_path, monkeypatch):
+        from tools._gates import _match
+        ctx = self._cited(tmp_path, _FTP_SPILL)
+        calls = []
+        real = _match._spilled_rows
+        monkeypatch.setattr(_match, "_spilled_rows", lambda e: calls.append(1) or real(e))
+        _match.lineage_evidence_text(ctx)
+        _match.lineage_evidence_text(ctx)
+        assert len(calls) == 1

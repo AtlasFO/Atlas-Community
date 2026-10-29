@@ -178,6 +178,38 @@ class TestTimelineTools:
         assert "2018-01-01" in cmd
 
 
+class TestMactimeReadsOnlyABodyfile:
+    """mactime prints its header for any input; a file whose first line is
+    no bodyfile line is refused before it runs."""
+
+    LINE = "0|/Users/jane.doe/notes.txt|1234|r/rrw-r--r--|0|0|512|1950000000|1950000000|1950000000|1950000000\n"
+
+    def test_a_raw_image_is_refused(self, tmp_path, mock_run):
+        from tools.sleuthkit import tsk_mactime
+        img = tmp_path / "usb.dd"
+        img.write_bytes(b"\xeb\x3c\x90EXAMPLE " + b"\x00" * 500 + b"\x55\xaa")
+        r = tsk_mactime(str(img))
+        assert r["success"] is False and r["failure_class"] == "wrong_input_kind"
+        assert not mock_run.called
+
+    def test_a_text_file_of_another_kind_is_refused(self, tmp_path, mock_run):
+        from tools.sleuthkit import tsk_mactime
+        csv = tmp_path / "timeline.csv"
+        csv.write_text("Date,Size,Type,Mode,UID,GID,Meta,File Name\n", encoding="utf-8")
+        assert tsk_mactime(str(csv))["failure_class"] == "wrong_input_kind"
+        assert not mock_run.called
+
+    def test_a_bodyfile_and_an_empty_one_run(self, tmp_path, mock_run):
+        from tools.sleuthkit import tsk_mactime
+        body = tmp_path / "body.txt"
+        body.write_text(self.LINE, encoding="utf-8")
+        empty = tmp_path / "empty.txt"
+        empty.write_text("", encoding="utf-8")
+        tsk_mactime(str(body))
+        tsk_mactime(str(empty))
+        assert mock_run.call_count == 2
+
+
 class TestHashAndSignatureTools:
     def test_tsk_hfind(self, mock_run):
         from tools.sleuthkit import tsk_hfind

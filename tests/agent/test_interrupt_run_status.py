@@ -173,3 +173,94 @@ def test_every_abnormal_ending_still_leaves_a_report(tmp_path: Path,
     text = out.read_text(encoding="utf-8")
     assert f"Written at run end ({reason})" in text
     assert load_manifest(case)["report_stage"] == "deterministic"
+
+
+# ── a SIGTERM (the dashboard's Stop) is a requested stop, not a Ctrl+C ───────
+
+@pytest.fixture
+def _sigterm_restored(monkeypatch):
+    """The run installs its own SIGTERM handler and the handler sets a
+    process-wide flag; both are put back after the test."""
+    import signal
+    from agent import cli as cli_mod
+    monkeypatch.setattr(cli_mod, "_STOP_REQUESTED", False)
+    previous = signal.getsignal(signal.SIGTERM)
+    yield
+    signal.signal(signal.SIGTERM, previous)
+
+
+def _sigterm(*_a, **_k):
+    import os
+    import signal
+    os.kill(os.getpid(), signal.SIGTERM)
+    raise AssertionError("SIGTERM was not routed through an interrupt")
+
+
+def test_a_sigterm_during_the_session_is_recorded_as_a_requested_stop(tmp_path, _sigterm_restored, capsys):
+    """A requested stop is an ending: the record says stop_requested, the
+    process leaves with one line on stderr and exit code 2 (stopped before
+    it finished), no traceback."""
+    case = _base_case(tmp_path)
+    agent = SimpleNamespace(ui=MagicMock(), stats=None, interactive=False,
+                            toolbox=SimpleNamespace(namespace_summary=lambda: "ns"),
+                            run=MagicMock(side_effect=_sigterm))
+    from agent import cli as cli_mod
+    args = SimpleNamespace(json=False, quiet=False, remote=None, output_dir=None,
+                           question=None, case_id="")
+    with patch("core.incremental.plane_a_scan",
+               return_value={"success": True, "case_id": "case"}), \
+         patch("core.evidence_inventory_gate.clear_inventory_stamp"), \
+         patch.object(cli_mod, "_configure_remote", return_value=None), \
+         patch.object(cli_mod, "_make_agent", return_value=agent), \
+         patch.object(cli_mod, "_teardown_local_mounts"), \
+         patch.object(cli_mod, "_resolve_case_question", return_value="Investigate host"), \
+         patch("agent.prompts.build_system_prompt", return_value="sys"), \
+         patch("agent.prompts.initial_user_message", return_value="user"), \
+         patch("core.paths.register_answer_keys"), \
+         patch("core.brain.answer_key.has_ground_truth", return_value=False), \
+         pytest.raises(SystemExit) as left:
+        cli_mod._run_investigation(args, case, command="run")
+    assert left.value.code == 2
+    err = capsys.readouterr().err
+    assert err.strip().splitlines()[-1].startswith("Run stopped on request") and "Traceback" not in err
+    status = json.loads((case / ".atlas" / "run_status.json").read_text(encoding="utf-8"))
+    assert status["stopped_reason"] == "stop_requested"
+    assert status["finish_status"] == "interrupted"
+
+
+def test_a_sigterm_during_the_intake_is_recorded_as_a_requested_stop(tmp_path, _sigterm_restored, capsys):
+    case = _base_case(tmp_path)
+    from agent import cli as cli_mod
+    args = SimpleNamespace(json=False, quiet=False, remote=None, output_dir=None,
+                           question=None, case_id="")
+    with patch("core.incremental.plane_a_scan", side_effect=_sigterm), \
+         pytest.raises(SystemExit) as left:
+        cli_mod._run_investigation(args, case, command="run")
+    assert left.value.code == 2
+    assert capsys.readouterr().err.strip().splitlines()[-1] == "Run stopped on request"   # no report yet
+    status = json.loads((case / ".atlas" / "run_status.json").read_text(encoding="utf-8"))
+    assert status["stopped_reason"] == "stop_requested"
+    assert status["finish_status"] == "interrupted"
+
+
+def test_a_ctrl_c_keeps_its_interrupt(tmp_path, _sigterm_restored, capsys):
+    """A Ctrl+C at the terminal is not a requested stop: the interrupt
+    propagates as before (its record says keyboard_interrupt)."""
+    case = _base_case(tmp_path)
+    from agent import cli as cli_mod
+    args = SimpleNamespace(json=False, quiet=False, remote=None, output_dir=None,
+                           question=None, case_id="")
+    with patch("core.incremental.plane_a_scan", side_effect=KeyboardInterrupt), \
+         pytest.raises(KeyboardInterrupt):
+        cli_mod._run_investigation(args, case, command="run")
+    assert "Run stopped on request" not in capsys.readouterr().err
+    status = json.loads((case / ".atlas" / "run_status.json").read_text(encoding="utf-8"))
+    assert status["stopped_reason"] == "keyboard_interrupt"
+
+
+def test_a_requested_stop_is_an_ending(tmp_path):
+    from core.run_state import prior_run_is_terminal
+    case = _base_case(tmp_path)
+    (case / ".atlas" / "run_status.json").write_text(
+        json.dumps({"stopped_reason": "stop_requested", "finish_status": ""}), encoding="utf-8")
+    assert prior_run_is_terminal(case) is True

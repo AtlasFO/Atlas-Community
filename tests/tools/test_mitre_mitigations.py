@@ -83,6 +83,8 @@ class TestDerivation:
     def _case(self, tmp_path):
         d = tmp_path / "case"
         (d / ".atlas").mkdir(parents=True)
+        # The incident frame these rows are pinned in is the brief's statement.
+        (d / "CASE.md").write_text("**Case ID:** X\n**System owner:** victim\n", encoding="utf-8")
         return d
 
     def test_a_claim_naming_techniques_earns_their_mitigations(self, tmp_path, table):
@@ -137,6 +139,8 @@ class TestFindingTextDerivation:
     def _case(self, tmp_path):
         d = tmp_path / "case"
         (d / ".atlas").mkdir(parents=True)
+        # The incident frame these rows are pinned in is the brief's statement.
+        (d / "CASE.md").write_text("**Case ID:** X\n**System owner:** victim\n", encoding="utf-8")
         return d
 
     def test_a_finding_matching_a_threat_class_earns_its_precautions(self, tmp_path):
@@ -172,3 +176,18 @@ class TestFindingTextDerivation:
         out = derive_from_finding_text(case, c, statement)
         rows = {r["id"]: r for r in build_catalog(case)["recommendations"]}
         assert out["recorded"] and any(rows[nid]["scope"] == "estate" for nid in out["recorded"])
+
+
+
+def test_no_owner_named_records_no_hardening_row(tmp_path):
+    """The neutral frame (the brief names no system owner): no owner to
+    harden for, so a claim's techniques earn no hardening row."""
+    from core.recommendations import derive_from_claim
+    case = tmp_path / "case"
+    (case / ".atlas").mkdir(parents=True)
+    (case / "CASE.md").write_text("**Case ID:** X\n", encoding="utf-8")
+    c = cg.add_claim(case, statement="Files were encrypted across the share (T1486)", confidence="CONFIRMED",
+                     host="FILE01")["node_id"]
+    assert cg.set_claim_indicators(case, c, [{"type": "host", "value": "FILE01", "side": "victim"}])["success"]
+    out = derive_from_claim(case, c)
+    assert out["recorded"] == [] and out["skipped"] == "neutral frame: no hardening row"

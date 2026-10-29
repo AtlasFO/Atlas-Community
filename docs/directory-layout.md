@@ -20,11 +20,13 @@ Atlas keeps the **application** and **bundled study data** inside the git tree.
 |------|------|
 | `hub/` | Investigator playbook (`ENTRY.md` + modules) for the Hub CLI. |
 | `agent/`, `tools/`, `core/`, `dashboard/`, `bin/` | Application code. |
+| `provider_profiles/` | One TOML file per LLM provider type (URL, auth header, thinking-level spelling, limits); checked against `schema.json`. See [llm.md](llm.md#provider-profiles). |
+| `provider_profiles.local/` | Your own provider profiles, beside the shipped ones; gitignored, like `.env`. `ATLAS_PROVIDER_PROFILES_DIR` names another folder. |
 | `rules/` | YARA rules scanned by default; drop-in — any `.yar`/`.yara` under it is compiled on the next scan ([yara-rules.md](yara-rules.md)). |
 | `case-template/` | Scaffold copied into `~/cases/<CASE_ID>`. |
 | `demo-cases/` | Bundled example studies (traces/reports; little or no evidence). |
 | `benchmarks/` | Ground-truth grading datasets. |
-| `share/.common/` | Install-time MITRE reference tables (copied into `~/cases/.common/`). |
+| `share/.common/` | Install-time MITRE reference tables (copied into `~/cases/.common/`). `shared_infrastructure.json` stays here and is read in place: the published content-delivery and front-end ranges that mark an indicator "hunt, never block" (refreshed with `devtools/build_shared_infrastructure.py` at each release). |
 | `.venv/` | Python virtualenv. |
 | `cases` | **Compat symlink → `~/cases`** (created by `install.sh`, gitignored). |
 

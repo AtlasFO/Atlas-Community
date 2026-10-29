@@ -1,8 +1,8 @@
 """The report's narrative sections go over the shared transport.
 
-They used to build their own request: no limit parameter at all, so the
-endpoint's own default decided how long a section could run; temperature sent
-whether or not the endpoint accepts it; and a 400 ended the call instead of
+A request built on its own would carry no limit parameter at all, so the
+endpoint's own default decides how long a section can run; send temperature
+whether or not the endpoint accepts it; and end the call on a 400 instead of
 teaching a retry. These tests hold that path on the shared client, and pin the
 two failure modes that must reach the caller's deterministic fallback rather
 than produce a blank or half-written section.
@@ -36,6 +36,7 @@ class _Provider:
     model = "a-model"
     base_url = "https://endpoint.example/v1"
     api_key = "k"
+    key_missing = False
 
     def headers(self):
         return {"Authorization": "Bearer k"}
@@ -84,9 +85,20 @@ class TestRequestShape:
         """A thinking model pays its thinking out of the completion limit;
         every fixed cap starved one. The endpoint's own default decides
         unless the operator states a ceiling."""
+        monkeypatch.setenv("ATLAS_ONE_ANSWER_ALLOWANCE", "0")
         _generate()
         body = sent["body"]
         assert "max_tokens" not in body and "max_completion_tokens" not in body
+        monkeypatch.setenv("ATLAS_LLM_MAX_OUTPUT_TOKENS", "4096")
+        _generate()
+        assert sent["body"].get("max_tokens") == 4096
+
+    def test_a_section_asks_under_the_one_answer_allowance(self, sent, monkeypatch):
+        """One section is one answer: the allowance bounds a runaway reply;
+        an operator ceiling below it stands."""
+        from agent.llm import ONE_ANSWER_MAX_TOKENS
+        _generate()
+        assert sent["body"].get("max_tokens") == ONE_ANSWER_MAX_TOKENS
         monkeypatch.setenv("ATLAS_LLM_MAX_OUTPUT_TOKENS", "4096")
         _generate()
         assert sent["body"].get("max_tokens") == 4096

@@ -1,10 +1,10 @@
 """The report a stopped run still owes, written from the case directory alone.
 
-The exit path used to build the whole report before writing a single byte: a
+Building the whole report before writing a single byte is fragile: a
 projection with one live model call per narrative section, each under a long
-timeout, and only then the first write. A run that died anywhere inside that
-window left ``reports/`` empty although every finding a deterministic report
-needs was already on disk.
+timeout, comes before the first write. A run that dies anywhere inside that
+window leaves ``reports/`` empty although every finding a deterministic report
+needs is already on disk.
 
 So the deterministic report is written FIRST, with no network at all, and the
 narrative projection is only ever an upgrade over a file that already exists.
@@ -56,6 +56,13 @@ STAGE_DETERMINISTIC = "deterministic"
 STAGE_UPGRADING = "upgrading"
 STAGE_COMPLETE = "complete"
 STAGE_UPGRADE_FAILED = "upgrade_failed"
+# The report is older than findings recorded after it and was not projected
+# again (written by hand, or the ending allowed no model call).
+STAGE_STALE = "stale"
+# The deliverables that are a projection of the recorded findings, so a
+# projection again over the same path loses nothing the analyst wrote.
+PROJECTED_SOURCES = frozenset({"write_projected_final_report", "misc_write_projected_final_report",
+                               CLOSE_OUT_SOURCE})
 
 
 def exit_report_path(case_dir: str | os.PathLike) -> Path:
@@ -126,17 +133,22 @@ def write_exit_report(case_dir: str | os.PathLike, reason: str, *,
     root = Path(case_dir)
     reason = str(reason or "ended")
     if not force and _report_already_written(root, agent):
-        return {"written": False, "skipped": "official_report_exists"}
+        # Every ending passes here: a report findings came after is
+        # projected again in place (refresh_stale_report).
+        return (refresh_stale_report(root, reason, allow_llm=allow_llm)
+                or {"written": False, "skipped": "official_report_exists"})
 
     # What the floor owes without a model: the next steps that rest on what
     # is still open, and the indicator files its Indicators section points
     # at, both written before it is assembled, as the close-out does.
-    _derive_next_steps(root)
-    _write_indicator_files(root)
+    from core.report_projection import report_inputs_at_render
+    if not report_inputs_at_render():   # else the render prepares them
+        _derive_next_steps(root)
+        _write_indicator_files(root)
     out = exit_report_path(root)
     out.parent.mkdir(parents=True, exist_ok=True)
-    _atomic_write(out, _with_banner(_deterministic_report(root), reason,
-                                    narrative=False))
+    _atomic_write(out, _with_gate_issues(_with_banner(_deterministic_report(root), reason,
+                                                      narrative=False), root))
     record_report_stage(root, STAGE_DETERMINISTIC, reason, path=out,
                         source=EXIT_SOURCE_ASSEMBLED)
     result: dict[str, Any] = {
@@ -159,7 +171,7 @@ def write_exit_report(case_dir: str | os.PathLike, reason: str, *,
             source = (EXIT_SOURCE_PROJECTED_FALLBACKS
                       if ((proj.get("regenerate") or {}).get("fallbacks") or [])
                       else EXIT_SOURCE_PROJECTED)
-            _atomic_write(out, _with_banner(md, reason, narrative=True))
+            _atomic_write(out, _with_gate_issues(_with_banner(md, reason, narrative=True), root))
             record_report_stage(root, STAGE_COMPLETE, reason, path=out,
                                 source=source)
             result.update(source=source, stage=STAGE_COMPLETE, upgraded=True)
@@ -174,6 +186,104 @@ def write_exit_report(case_dir: str | os.PathLike, reason: str, *,
 
     _run_report_addons(root, out)
     return result
+
+
+# What a projected report shows beside the findings: the claims and the
+# questions' answers and limitations, which a task update records.
+# ponytail: by command prefix, so a claim tool that only reads (a listing)
+# counts too; that refresh re-renders and regenerates only stale sections.
+_REPORTED_CALLS = ("<py>:claim_", "<py>:misc_update_investigation_task",
+                   "<py>:misc_supersede_investigation_task")
+
+
+def class_state_digest(case_dir) -> str:
+    """A digest of the ledger's class states (id, state, kind): what the
+    report's evidence section was rendered from, kept in the manifest at
+    assembly, so a read or a leave after the report makes it stale."""
+    import hashlib
+    try:
+        from core.coverage_ledger import load_ledger
+        classes = load_ledger(case_dir).get("classes") or {}
+    except Exception:  # noqa: BLE001
+        return ""
+    blob = "|".join(f"{cid}:{c.get('state')}:{c.get('reason_kind')}" for cid, c in sorted(classes.items())
+                    if isinstance(c, dict))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16] if blob else ""
+
+
+def _records_after(root: Path, at: str) -> int:
+    """How many findings, claim calls and task updates the case's trace
+    recorded after ``at``."""
+    try:
+        when = datetime.fromisoformat(str(at))
+        from core.execution_log import trace_entries
+        n = 0
+        for e in trace_entries(root) or []:
+            if e.get("ts") and (e.get("type") == "finding" or (
+                    e.get("type") == "tool_call" and e.get("success") is True
+                    and str(e.get("cmd") or "").startswith(_REPORTED_CALLS))):
+                try:
+                    n += datetime.fromisoformat(str(e["ts"])) > when
+                except ValueError:
+                    continue
+        return n
+    except Exception:  # noqa: BLE001 - no time to compare: nothing is stale
+        return 0
+
+
+def refresh_stale_report(case_dir: str | os.PathLike, reason: str, *,
+                         allow_llm: bool = True) -> dict[str, Any]:
+    """The case's official report projected again in place when findings,
+    claims or task updates were recorded after it was written: the
+    close-out's next steps, indicator files and projection (stale sections
+    only) onto the deliverable's own path, so one case report stays, a
+    close-out's note kept. {} when the report is current. A report the
+    analyst wrote (write_final_report) is never overwritten, nor is a
+    narrative report replaced when the ending allows no model call: then the
+    staleness is recorded in the report stage and said on the console."""
+    root = Path(case_dir)
+    try:
+        from core.report_projection import load_manifest
+        man = load_manifest(root) or {}
+    except Exception:  # noqa: BLE001
+        return {}
+    path, at = str(man.get("last_assembled_path") or ""), str(man.get("last_assembled_at") or "")
+    source = str(man.get("last_deliverable_source") or "")
+    if (not path or not at or source not in OFFICIAL_SOURCES or not Path(path).is_file()
+            or is_host_deliverable(path, root)):
+        return {}
+    newer = _records_after(root, at)
+    moved = class_state_digest(root) != str(man.get("class_state_digest") or "")
+    if not newer and not moved:
+        return {}
+    what = (f"{newer} finding(s), claim(s) or task update(s)" if newer else "") + (
+        (" and " if newer else "") + "the evidence classes' states (a read or a leave)" if moved else "")
+    if source not in PROJECTED_SOURCES or not allow_llm:
+        record_report_stage(root, STAGE_STALE, f"{reason}: {what} recorded after the report")
+        print(f"atlas: {what} were recorded after {path} was written; it is left as it is "
+              f"({'written by the analyst' if source not in PROJECTED_SOURCES else 'no model call at this ending'})",
+              file=sys.stderr)
+        return {"written": False, "stale": newer, "path": path}
+    try:
+        _prepare_inputs(root)
+        md = _projected_report(root, Path(path), allow_llm=True)
+        if source == CLOSE_OUT_SOURCE:
+            note = re.search(r"^> \*\*Closed out by Atlas \(.*$", Path(path).read_text(encoding="utf-8"), re.M)
+            md = _with_note(md, note.group(0) + "\n\n") if note else md
+        _atomic_write(Path(path), md)
+        _trace_report_write(Path(path))
+        record_report_stage(root, STAGE_COMPLETE, f"{reason}: projected again, {what} after it",
+                            path=Path(path), source=source)
+        _run_report_addons(root, Path(path))
+    except (Exception, KeyboardInterrupt) as e:  # noqa: BLE001 - the report on disk stands
+        record_report_stage(root, STAGE_STALE, f"{reason}: {what} after it; projection failed: {e}"[:300])
+        print(f"atlas: the report {path} is older than {what} and could not be projected again ({e})",
+              file=sys.stderr)
+        return {"written": False, "stale": newer, "path": path}
+    print(f"atlas: projected {path} again: {what} were recorded after it", file=sys.stderr)
+    # "written" stays for the report an ending had to write itself: the
+    # callers say "no final report was written" on it.
+    return {"written": False, "refreshed": newer, "path": path, "source": source, "stage": STAGE_COMPLETE}
 
 
 def hosts_owed_a_report(case_dir: str | os.PathLike) -> list[str]:
@@ -217,10 +327,7 @@ def close_out_reports(case_dir: str | os.PathLike, *, reason: str,
     root = Path(case_dir)
     reports = root / "reports"
     reports.mkdir(parents=True, exist_ok=True)
-    _derive_next_steps(root)
-    # The indicator list is a deliverable of its own, owed on this path as on
-    # the tool path, and written first: the reports point at it.
-    indicator_files = _write_indicator_files(root)
+    indicator_files = _prepare_inputs(root)
     targets = [(reports / f"host_{h}_report.md", h) for h in hosts_owed_a_report(root)]
     targets.append((reports / "estate_report.md", ""))
     written: list[str] = []
@@ -243,6 +350,14 @@ def close_out_reports(case_dir: str | os.PathLike, *, reason: str,
     return {"written": written, "errors": errors,
             "hosts": [h for _p, h in targets if h], "source": CLOSE_OUT_SOURCE,
             "indicator_files": indicator_files}
+
+
+def _prepare_inputs(root: Path) -> dict[str, Any]:
+    """What a projection reads beside the findings, before it runs: the next
+    steps that rest on what is still open, then the indicator list, a
+    deliverable of its own the reports point at. Local, no model call."""
+    _derive_next_steps(root)
+    return _write_indicator_files(root)
 
 
 def _derive_next_steps(root: Path) -> None:
@@ -293,6 +408,11 @@ def _with_closeout_note(markdown: str, reason: str, verdict: str) -> str:
            "limitations." if limited else "")
         + "\n\n"
     )
+    return _with_note(markdown, note)
+
+
+def _with_note(markdown: str, note: str) -> str:
+    """``note`` after the report's first paragraph, its title."""
     head, sep, tail = (markdown or "").partition("\n\n")
     return f"{head}{sep}{note}{tail}" if sep else note + (markdown or "")
 
@@ -359,7 +479,7 @@ def _deterministic_report(case_dir: Path) -> str:
         assemble_client_report, attack_timeline_readiness,
     )
     try:
-        md = assemble_client_report(case_dir)
+        md = assemble_client_report(case_dir, compose=False)
     except Exception as e:  # noqa: BLE001
         print(f"atlas: assembling the findings failed ({e})", file=sys.stderr)
         md = ""
@@ -375,6 +495,21 @@ def _deterministic_report(case_dir: Path) -> str:
     # the case is; the decision's partial stub says plainly what happened.
     return inject_degraded_sections(
         "" if decision.get("minimal_body") else md, decision)
+
+
+def _with_gate_issues(markdown: str, root: Path) -> str:
+    """The limitations code states (investigation_exit.open_limit_lines)
+    not already in the report, as bullets under its Limitations section,
+    or a new one."""
+    from core.investigation_exit import open_limit_lines
+    missing = [line for line in open_limit_lines(root) if line not in (markdown or "")]
+    if not missing:
+        return markdown
+    bullets = "".join(f"- {line}\n" for line in missing)
+    m = re.search(r"^##\s+Limitations\b[^\n]*\n+", markdown or "", re.MULTILINE | re.IGNORECASE)
+    if m:
+        return markdown[:m.end()] + bullets + "\n" + markdown[m.end():]
+    return (markdown or "").rstrip() + "\n\n## Limitations\n\n" + bullets
 
 
 def _with_banner(markdown: str, reason: str, *, narrative: bool) -> str:

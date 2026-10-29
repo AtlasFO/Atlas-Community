@@ -13,8 +13,8 @@ A finding says what happened, to whom or by whom, with which artifact,
 when. The shape held here, and only the shape: a parse clause whose
 object is a list of counts after a colon ("<artifact> parsed: N a, M b"),
 within one sentence. A conclusion that quotes counts on its way to what
-they show - "Security.evtx parsed for the window shows 95 failed logons
-from 194.61.24.102" - has no such list and is not held, nor is a clause
+they show - "Security.evtx parsed for the window shows 37 failed logons
+from 203.0.113.50" - has no such list and is not held, nor is a clause
 whose subject did the processing ("the ransomware processed the share:
 12,000 files encrypted and 3 ransom notes dropped"). Precision first: the rule reads
 English and German parse verbs and a colon-separated list, and a tally

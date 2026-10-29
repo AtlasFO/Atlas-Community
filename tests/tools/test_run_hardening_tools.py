@@ -178,6 +178,7 @@ class TestReportEntryCoverageGate:
         build_coverage_ledger(case)
         return case
 
+    @pytest.mark.usefixtures("todays_coverage")
     def test_defers_then_exhausts(self, tmp_path):
         from tools import dair
         case = self._case_with_ledger(tmp_path)
@@ -191,6 +192,7 @@ class TestReportEntryCoverageGate:
         assert all("report_entry_coverage" in n for n in notes[:3])
         assert notes[3] == ""  # deferral budget exhausted — never a deadlock
 
+    @pytest.mark.usefixtures("todays_coverage")
     def test_an_unread_image_is_ordered_read_through_its_filesystem(self, tmp_path):
         """The work order for an unseen disk image names a filesystem read,
         not a table query: a table tool cannot read an image."""

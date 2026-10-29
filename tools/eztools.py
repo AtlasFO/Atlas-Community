@@ -8,6 +8,7 @@ from fastmcp import FastMCP
 from core import (run_dotnet, run, output_safe, DEFAULT_TIMEOUT, VOL_TIMEOUT,
                   PLASO_TIMEOUT, scale_timeout)
 from core.paths import assert_output_safe
+from core.state_files import EVTX_PARSE_MEMO as _EVTX_MEMO_NAME
 
 mcp = FastMCP("eztools")
 
@@ -196,8 +197,8 @@ def _guard_output(result: dict, output_dir: str, before: dict, tool: str,
 # ── Silent-empty-result guard for the artifact parsers ───────────────────────
 #
 # EvtxECmd/PECmd/JLECmd/LECmd/RBCmd all exit 0 no matter what they were handed,
-# so "no output" reads as "the evidence is clean". Measured on this host against
-# real evidence, they split into two output families:
+# so "no output" reads as "the evidence is clean". They split into two output
+# families:
 #
 #   * EvtxECmd and RBCmd write a HEADER-ONLY CSV when nothing parsed, so
 #     checking that a file appeared is not enough — the rows have to be counted.
@@ -235,7 +236,7 @@ def _count_candidates(path: str, match) -> int:
 
     This is what distinguishes "there was nothing here to parse" from "there was
     something and none of it parsed" — the first is a true negative, the second
-    is the bug this guard exists to catch.
+    is the failure this guard exists to catch.
 
     followlinks=True because the tools themselves follow symlinked directories:
     counting 0 candidates under a symlinked subtree the tool did read would
@@ -444,13 +445,131 @@ def _attach_evtx_coverage(result: dict, output_dir: str, output_file: str) -> No
         pass
 
 
+# EvtxECmd's own report of each log it processed (public output format): a
+# "Processing <path>..." line, then "Records included: <n>" for that log.
+_EVTX_PROCESSING_RE = re.compile(r"^Processing (?P<path>.+?)\.\.\.\s*$")
+_EVTX_INCLUDED_RE = re.compile(r"^Records included:\s*(?P<n>[\d,]+)")
+
+
+def evtx_processed(stdout: str) -> list[dict]:
+    """[{"path", "rows"}] of each log EvtxECmd says it processed, in order;
+    a log without its count line has rows None."""
+    out: list[dict] = []
+    for line in str(stdout or "").splitlines():
+        line = line.strip()
+        m = _EVTX_PROCESSING_RE.match(line)
+        if m:
+            out.append({"path": m.group("path").strip(), "rows": None})
+            continue
+        n = _EVTX_INCLUDED_RE.match(line)
+        if n and out and out[-1]["rows"] is None:
+            out[-1]["rows"] = int(n.group("n").replace(",", ""))
+    return out
+
+
+def _stamp_evtx_processed(result: dict, output_dir: str, output_file: str, ids: Optional[str],
+                          window: Optional[tuple]) -> None:
+    """Stamp what the parse processed on its own trace entry, from the
+    tool's own report: ``processed`` = {output (case-relative CSV), filter
+    (the event ids and window it was run with, "" when none), files
+    [{path, rows}]}; and join the CSV's rows to the index entries they came
+    from (core.contents_index.register_exports). What the tool did not
+    report as processed is not stamped: no credit without it. Best-effort."""
+    try:
+        cid = result.get("_atlas_call_id")
+        if not cid or not result.get("success"):
+            return
+        spill = str(result.get("stdout_file") or "")
+        text = open(spill, encoding="utf-8", errors="replace").read() if spill and os.path.isfile(spill) \
+            else str(result.get("stdout") or "")
+        files = evtx_processed(text)
+        if not files:
+            return
+        from core.execution_log import log
+        from core.contents_index import _rel, register_exports
+        case = log.case_dir()
+        if not case:
+            return
+        csv = os.path.join(output_dir, output_file)
+        filt = " and ".join(x for x in (f"event ids {ids}" if ids else "",
+                                        f"window {window[0] or '...'} to {window[1] or '...'}" if window else "")
+                            if x)
+        root = Path(case)
+        log.annotate_tool_call(int(cid), processed={
+            "output": _rel(root, csv) if os.path.isfile(csv) else "",
+            "filter": filt,
+            "files": [{"path": _rel(root, f["path"]), "rows": f["rows"]} for f in files[:5000]],
+            # The stamp keeps 5000 files; a larger report says how many it had.
+            **({"files_total": len(files)} if len(files) > 5000 else {})})
+        if os.path.isfile(csv):
+            register_exports(case, [csv])
+    except Exception:  # noqa: BLE001
+        pass
+
+
+# The per-file lines of an EZ parser's own report (public output formats):
+# LECmd and JLECmd close each file with "---------- Processed <path> in <n>
+# seconds ----------"; RBCmd names each record's file "Source file: <path>".
+EZ_PROCESSED_LINE = re.compile(r"^-+\s*Processed (?P<path>.+?) in [\d.]+ seconds\s*-+\s*$")
+EZ_SOURCE_LINE = re.compile(r"^Source file:\s*(?P<path>.+?)\s*$")
+
+
+def folder_processed(stdout: str, input_path: str, line: "re.Pattern[str]") -> list[str]:
+    """The files the parser's report says it processed, each once: only an
+    existing file that is the call's input or lies below its input folder (a
+    line the evidence could forge, a record field naming another path, names
+    nothing), so never more files than the input holds."""
+    base = os.path.realpath(input_path)
+    found: list[str] = []
+    for raw in str(stdout or "").splitlines():
+        m = line.match(raw.strip())
+        if not m:
+            continue
+        real = os.path.realpath(m.group("path"))
+        if real in found or not os.path.isfile(real):
+            continue
+        if real == base or real.startswith(base.rstrip(os.sep) + os.sep):
+            found.append(real)
+    return found
+
+
+def _stamp_folder_processed(result: dict, input_path: str, line: "re.Pattern[str]") -> None:
+    """Stamp what a folder parse processed on its own trace entry, from the
+    tool's own report (folder_processed), in EvtxECmd's stamp format; the
+    read credit counts it (core.evidence_identity.call_reads processed).
+    Best-effort; nothing when the report names no file."""
+    try:
+        cid = result.get("_atlas_call_id")
+        if not cid or not result.get("success"):
+            return
+        spill = str(result.get("stdout_file") or "")
+        text = open(spill, encoding="utf-8", errors="replace").read() if spill and os.path.isfile(spill) \
+            else str(result.get("stdout") or "")
+        files = folder_processed(text, input_path, line)
+        if not files:
+            return
+        from core.execution_log import log
+        from core.contents_index import _rel
+        case = log.case_dir()
+        if not case:
+            return
+        root = Path(case)
+        outs = [p for p in (result.get("output_paths") or []) if isinstance(p, str)]
+        log.annotate_tool_call(int(cid), processed={
+            "output": _rel(root, outs[0]) if outs else "", "filter": "",
+            "files": [{"path": _rel(root, f), "rows": None} for f in files[:5000]],
+            **({"files_total": len(files)} if len(files) > 5000 else {})})
+    except Exception:  # noqa: BLE001
+        pass
+
+
 # ── MFT ──────────────────────────────────────────────────────────────────────
 
 _RESIDENT_MODES = {"": [], "inline": ["--ir"], "dump": ["--dr"], "both": ["--ir", "--dr"]}
 _RESIDENT_MAX_BYTES = 1_024_000   # MFTECmd's own ceiling for --rm
 
 
-@mcp.tool()
+@mcp.tool(meta={"input_names": ["$MFT"]})
 @output_safe
 def ez_mftecmd(
     mft_path: str,
@@ -504,7 +623,7 @@ def ez_mftecmd(
     return _ez(f"{EZ}/MFTECmd.dll", args, output_dir=output_dir)
 
 
-@mcp.tool()
+@mcp.tool(meta={"input_names": ["$UsnJrnl:$J"]})
 @output_safe
 def ez_mftecmd_usn(
     j_path: str,
@@ -562,8 +681,6 @@ def ez_mftecmd_dir(
 
 
 # ── Event Logs ────────────────────────────────────────────────────────────────
-
-_EVTX_MEMO_NAME = ".evtx_parse_registry.json"
 
 
 def _normalize_event_ids(event_ids) -> Optional[str]:
@@ -763,6 +880,7 @@ def ez_evtxecmd(
         if window:
             result["time_window_utc"] = {"start": sd, "end": ed}
     _attach_evtx_coverage(result, output_dir, output_file)
+    _stamp_evtx_processed(result, output_dir, output_file, ids, window)
     hint = ("EvtxECmd skips files whose signature is not 'ElfFile'. Check the "
             "logs are real .evtx and not truncated, and that --maps points at "
             "the EvtxeCmd/Maps directory.")
@@ -782,7 +900,7 @@ def ez_evtxecmd(
 
 # ── Registry ──────────────────────────────────────────────────────────────────
 
-@mcp.tool()
+@mcp.tool(meta={"input_names": ["SYSTEM", "SOFTWARE", "SAM", "SECURITY", "NTUSER.DAT", "UsrClass.dat", "*.hve"]})
 @output_safe
 def ez_recmd_hive(
     hive_path: str,
@@ -839,7 +957,7 @@ def ez_recmd_batch(
 
 # ── Amcache & AppCompat ───────────────────────────────────────────────────────
 
-@mcp.tool()
+@mcp.tool(meta={"input_names": ["Amcache.hve"]})
 @output_safe
 def ez_amcacheparser(
     amcache_path: str,
@@ -861,7 +979,7 @@ def ez_amcacheparser(
     return _ez(f"{EZ}/AmcacheParser.dll", args, output_dir=output_dir)
 
 
-@mcp.tool()
+@mcp.tool(meta={"input_names": ["SYSTEM"]})
 @output_safe
 def ez_appcompatcacheparser(
     system_hive: str,
@@ -885,7 +1003,7 @@ def ez_appcompatcacheparser(
 
 # ── SRUM ─────────────────────────────────────
 
-@mcp.tool()
+@mcp.tool(meta={"input_names": ["SRUDB.dat"]})
 @output_safe
 def ez_srumecmd(
     srum_path: str,
@@ -1016,7 +1134,7 @@ def _prefetch_fallback(prefetch_path: str, output_dir: str, output_file: str) ->
     }
 
 
-@mcp.tool()
+@mcp.tool(meta={"input_names": ["*.pf"]})
 @output_safe
 def ez_pecmd(
     prefetch_path: str,
@@ -1064,7 +1182,7 @@ def ez_pecmd(
 
 # ── Jump Lists & LNK ──────────────────────────────────────────────────────────
 
-@mcp.tool()
+@mcp.tool(meta={"input_names": ["*.automaticDestinations-ms", "*.customDestinations-ms"]})
 @output_safe
 def ez_jlecmd(
     jump_list_path: str,
@@ -1097,6 +1215,7 @@ def ez_jlecmd(
     flag = "-d" if os.path.isdir(jump_list_path) else "-f"
     args = [flag, jump_list_path, "--csv", output_dir, "--csvf", output_file]
     result = _ez(f"{EZ}/JLECmd.dll", args, output_dir=output_dir)
+    _stamp_folder_processed(result, jump_list_path, EZ_PROCESSED_LINE)
     return _guard_parsed_output(
         result, output_dir, before, "JLECmd", jump_list_path,
         _suffix_match(".automaticdestinations-ms", ".customdestinations-ms"),
@@ -1107,7 +1226,7 @@ def ez_jlecmd(
              "directory itself to pick up both.")
 
 
-@mcp.tool()
+@mcp.tool(meta={"input_names": ["*.lnk"]})
 @output_safe
 def ez_lecmd(
     lnk_path: str,
@@ -1134,6 +1253,7 @@ def ez_lecmd(
     flag = "-d" if os.path.isdir(lnk_path) else "-f"
     args = [flag, lnk_path, "--csv", output_dir, "--csvf", output_file]
     result = _ez(f"{EZ}/LECmd.dll", args, output_dir=output_dir)
+    _stamp_folder_processed(result, lnk_path, EZ_PROCESSED_LINE)
     return _guard_parsed_output(
         result, output_dir, before, "LECmd", lnk_path,
         _suffix_match(".lnk"), ".lnk shortcut",
@@ -1143,7 +1263,7 @@ def ez_lecmd(
 
 # ── Shellbags ─────────────────────────────────────────────────────────────────
 
-@mcp.tool()
+@mcp.tool(meta={"input_names": ["UsrClass.dat"]})
 @output_safe
 def ez_sbecmd(
     usrclass_path: str,
@@ -1163,7 +1283,7 @@ def ez_sbecmd(
 
 # ── Recycle Bin ───────────────────────────────────────────────────────────────
 
-@mcp.tool()
+@mcp.tool(meta={"input_names": ["$I??????", "$I??????.*"]})
 @output_safe
 def ez_rbcmd(
     recycle_bin_path: str,
@@ -1196,6 +1316,7 @@ def ez_rbcmd(
     flag = "-d" if os.path.isdir(recycle_bin_path) else "-f"
     args = [flag, recycle_bin_path, "--csv", output_dir, "--csvf", output_file]
     result = _ez(f"{EZ}/RBCmd.dll", args, output_dir=output_dir)
+    _stamp_folder_processed(result, recycle_bin_path, EZ_SOURCE_LINE)
     return _guard_parsed_output(
         result, output_dir, before, "RBCmd", recycle_bin_path,
         _is_recycle_record, "$I Recycle Bin record",
@@ -1206,7 +1327,7 @@ def ez_rbcmd(
 
 # ── Windows Timeline ──────────────────────────────────────────────────────────
 
-@mcp.tool()
+@mcp.tool(meta={"input_names": ["ActivitiesCache.db"]})
 @output_safe
 def ez_wxtcmd(
     timeline_db: str,
@@ -1247,7 +1368,7 @@ def ez_wxtcmd(
 
 # ── SQLite ────────────────────────────────────────────────────────────────────
 
-@mcp.tool()
+@mcp.tool(meta={"input_names": ["*.sqlite", "*.sqlite3", "History", "Cookies", "Login Data", "Web Data"]})
 @output_safe
 def ez_sqlecmd(
     db_path: str,
@@ -1382,7 +1503,7 @@ def ez_bstrings(
 
 # ── RLA (Registry Log Analysis) ──────────────────────────────────────────────
 
-@mcp.tool()
+@mcp.tool(meta={"input_names": ["SYSTEM", "SOFTWARE", "SAM", "SECURITY", "NTUSER.DAT", "UsrClass.dat", "*.hve"]})
 @output_safe
 def ez_rla(
     hive_path: str,
@@ -1446,7 +1567,7 @@ def ez_rla(
 
 # ── RecentFileCacheParser ─────────────────────────────────────────────────────
 
-@mcp.tool()
+@mcp.tool(meta={"input_names": ["RecentFileCache.bcf"]})
 @output_safe
 def ez_recentfilecache(
     rfc_path: str,

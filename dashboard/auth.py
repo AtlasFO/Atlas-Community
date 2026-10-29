@@ -468,21 +468,31 @@ def get_session_user(token: str) -> Optional[User]:
         return None
     with _connect() as conn:
         row = conn.execute(
-            "SELECT user_id, expires_at, created_at FROM sessions "
+            "SELECT user_id, expires_at, created_at, last_seen_at FROM sessions "
             "WHERE token = ?", (token,)).fetchone()
-    if row is None or _is_expired(row["expires_at"]):
+    if row is None:
+        return None
+    # The limits as they are now, not as they were when the stored deadline
+    # was written: an admin who shortens the idle or the absolute limit ends
+    # the sessions past it on their next request, not one request later.
+    # The stored deadline stays in the minimum, so a longer limit never
+    # revives a session that has already ended.
+    now = datetime.now(timezone.utc)
+    created = datetime.fromisoformat(row["created_at"])
+    last_seen = datetime.fromisoformat(row["last_seen_at"] or row["created_at"])
+    hard_stop = created + timedelta(hours=session_max_hours())
+    if now >= min(datetime.fromisoformat(row["expires_at"]),
+                  last_seen + timedelta(hours=session_idle_hours()), hard_stop):
         return None
     user = get_user_by_id(row["user_id"])
     if user is None or not user.is_active:
         return None
     # Sliding expiry: this request pushes the idle deadline out again, never
     # past the absolute cap counted from login.
-    hard_stop = (datetime.fromisoformat(row["created_at"])
-                 + timedelta(hours=session_max_hours())).isoformat()
-    expires_at = min(_expires_iso(hours=session_idle_hours()), hard_stop)
+    expires_at = min(now + timedelta(hours=session_idle_hours()), hard_stop).isoformat()
     with _write_lock, _connect() as conn:
         conn.execute("UPDATE sessions SET last_seen_at = ?, expires_at = ? "
-                     "WHERE token = ?", (_now_iso(), expires_at, token))
+                     "WHERE token = ?", (now.isoformat(), expires_at, token))
         conn.commit()
     return user
 
@@ -725,6 +735,7 @@ ROUTE_MIN_ROLE: dict[str, str] = {
     "report_export": "viewer",
     "report_bundle": "viewer",
     "case/iocs": "viewer",
+    "case/coverage": "viewer",
     "case/recommendations": "viewer",
     "case/recommendations/state": "analyst",
     "timeline_template": "viewer",

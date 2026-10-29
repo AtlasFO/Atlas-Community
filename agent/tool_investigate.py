@@ -8,7 +8,7 @@ failure is diagnosed and retried or dispositioned via dair_assess.
 Identical analyst-error / tool_error failures (e.g. ``event_ids="(4624, 4625)"``
 or the same ``tsk.sigfind`` argv failing repeatedly) are fingerprinted: after
 ``IDENTICAL_FAIL_LIMIT`` repeats the latch stops blocking ``atlas_finish`` and
-nudges reformulation so one bad command cannot burn the turn budget (B6).
+nudges reformulation so one bad command cannot burn the turn budget.
 """
 from __future__ import annotations
 
@@ -51,6 +51,7 @@ _WORKFLOW_GATES = frozenset({
     "named_actor_attribution_grounding",
     "external_knowledge_grounding",
     "exfil_channel_grounding",
+    "hash_pair_grounding",
     "interactive_injection_grounding",
     "temporal_negative_grounding",
     "mitre_technique_validation",
@@ -113,6 +114,18 @@ def issue_fingerprint(issue: dict[str, Any]) -> str:
     ])
 
 
+def _helper_role(name: str) -> bool:
+    """The tool asks one of Atlas's own model roles (core.effort.ROLES: the
+    director and the reasoning roles), not a tool that reads evidence. The
+    registered name doubles its namespace in one form (reason_reason_plan)."""
+    from core.effort import ROLES
+    roles = {r.key for r in ROLES} - {"agent", "report"}
+    ns, _, rest = name.partition("_")
+    if rest.startswith(ns + "_"):
+        name = rest
+    return name in roles or ns in roles
+
+
 def classify_tool_result(tool_name: str, result: str) -> dict[str, Any] | None:
     """Return an investigate issue dict, or None if the result is fine / workflow."""
     name = tool_name or ""
@@ -153,6 +166,21 @@ def classify_tool_result(tool_name: str, result: str) -> dict[str, Any] | None:
         "path_not_found",
     ):
         return None
+    # A helper role that timed out or answered empty did not fail on the
+    # analyst's arguments: a narrower retry cannot help, and its debt must not
+    # hold the finish. Non-blocking; a plain retry is what lets the report gate
+    # see the helper as unavailable (core.reason_outcome.helper_unavailable)
+    # and record the missing step as a limitation.
+    if _helper_role(name) and data.get("success") is False and (
+            gate in ("empty_reason_response", "reply_length_cut", "helper_unavailable", "scan_timeout")
+            or data.get("timed_out") or data.get("incomplete")
+            or "empty" in str(data.get("error") or "").lower()):
+        return {
+            "tool": name,
+            "kind": "helper_unavailable",
+            "summary": str(data.get("error") or "no usable answer from the helper model")[:180],
+            "blocking_finish": False,
+        }
     # empty_reason_response is NOT a silent workflow skip — the model burned
     # tokens and produced no usable conclusion. Surface as investigate debt.
     if gate == "empty_reason_response" or (
@@ -169,7 +197,15 @@ def classify_tool_result(tool_name: str, result: str) -> dict[str, Any] | None:
             "blocking_finish": True,
         }
 
-    incomplete = bool(data.get("incomplete") or data.get("wall_clock_timed_out"))
+    from core.deferred_intents import incomplete_read_debt_on
+    # A run cut by a time bound is an incomplete read whichever tool ran it:
+    # the executor marks it timed_out.
+    # A batch carries its calls' results: a sub-call cut by a time bound is
+    # the batch's incomplete read too.
+    subs = [r for r in data.get("results") or [] if isinstance(r, dict)]
+    incomplete = bool(data.get("incomplete") or data.get("wall_clock_timed_out")
+                      or (incomplete_read_debt_on()
+                          and (data.get("timed_out") or any(r.get("timed_out") for r in subs))))
     truncated = bool(data.get("truncated"))
     success = data.get("success")
     err = str(data.get("error") or data.get("stderr") or "")
@@ -189,7 +225,10 @@ def classify_tool_result(tool_name: str, result: str) -> dict[str, Any] | None:
     if truncated and data.get("artifact_paths"):
         return None
 
-    if truncated and _CRITICAL_TOOL_RE.search(name):
+    # A display cut of a named tool's output: no finish debt while incomplete
+    # reads are debts (a claim resting on it is judged at record time by the
+    # truncation gates).
+    if truncated and _CRITICAL_TOOL_RE.search(name) and not incomplete_read_debt_on():
         return {
             "tool": name,
             "kind": "truncated_critical",
@@ -214,7 +253,7 @@ def classify_tool_result(tool_name: str, result: str) -> dict[str, Any] | None:
                 issue["hint"] = hint[:200]
             elif "event_ids" in err.lower():
                 issue["hint"] = (
-                    "Use event_ids='4624,4625' (digits and commas only; "
+                    "Use event_ids='1000,1001' (digits and commas only; "
                     "no parentheses)."
                 )
             return issue
@@ -226,7 +265,7 @@ def classify_tool_result(tool_name: str, result: str) -> dict[str, Any] | None:
                 "blocking_finish": True,
             }
         # Disk FS / critical tool failures (sigfind, icat, …) — fingerprint so
-        # identical argv storms exhaust (B6 / X4). Do not latch every soft
+        # identical argv storms exhaust. Do not latch every soft
         # success:false (many are already handled as workflow gates above).
         _diskish = re.search(
             r"(?:tsk_|sleuth|sigfind|icat|fls|indxparse|mmls|mactime|ils)",
@@ -299,9 +338,40 @@ def merge_investigate_debt(
     return out
 
 
+def input_paths(args: dict | None) -> list[str]:
+    """The input files a call names (core.paths.INPUT_PATH_PARAM_NAMES)."""
+    from core.paths import INPUT_PATH_PARAM_NAMES
+    out: list[str] = []
+    for k in INPUT_PATH_PARAM_NAMES:
+        v = (args or {}).get(k)
+        if isinstance(v, str) and v.strip():
+            out.append(v.strip())
+    return out
+
+
+def _same_file(a: str, b: str) -> bool:
+    import os
+    try:
+        return os.path.realpath(a) == os.path.realpath(b)
+    except (OSError, ValueError):
+        return a == b
+
+
+def _holds(folder: str, path: str) -> bool:
+    """A folder a parser was run over holds the file (a parse of a folder
+    reads every file of its kind in it)."""
+    import os
+    try:
+        root = os.path.realpath(folder)
+        return os.path.isdir(root) and os.path.realpath(path).startswith(root.rstrip(os.sep) + os.sep)
+    except (OSError, ValueError):
+        return False
+
+
 def settle_investigate_debt(
     issues: list[dict[str, Any]] | None,
     succeeded: Iterable[str],
+    reads: Iterable[tuple[str, list[str]]] = (),
 ) -> list[dict[str, Any]]:
     """Drop the issues whose tool has since run cleanly.
 
@@ -309,9 +379,28 @@ def settle_investigate_debt(
     that retry. Without this the latch replayed the failure every turn after
     the retry had already succeeded, and a model that kept answering "already
     handled" without a call was counted as quiet until the run ended.
+
+    With ATLAS_INPROCESS_DEADLINE a call cut at its deadline is also settled
+    by a clean call of another tool that reads the same input's content
+    (``reads``: tool name and input paths of each clean call;
+    core.input_kind.reads_kind): the native parser of the same log. A hash
+    or a listing of the file reads nothing of its content and settles
+    nothing.
     """
     done = {name for name in succeeded if name}
-    return [i for i in (issues or []) if i.get("tool") not in done]
+    left = [i for i in (issues or []) if i.get("tool") not in done]
+    from core.timeout import inprocess_deadline_on
+    reads = list(reads or ())
+    if not reads or not inprocess_deadline_on():
+        return left
+    from core.input_kind import reads_kind
+
+    def settled(issue: dict[str, Any]) -> bool:
+        if issue.get("kind") != "incomplete_scan":
+            return False
+        return any(reads_kind(tool, cut) is True and (_same_file(path, cut) or _holds(path, cut))
+                   for cut in issue.get("inputs") or () for tool, paths in reads for path in paths)
+    return [i for i in left if not settled(i)]
 
 
 def finish_blocking_issues(
@@ -336,6 +425,15 @@ def format_investigate_message(issues: list[dict[str, Any]]) -> str:
             f"- {issue.get('tool')}: [{issue.get('kind')}] "
             f"{issue.get('summary')}"
         )
+        if issue.get("kind") == "helper_unavailable":
+            line += ("\n  The helper model gave no usable answer (a timeout or an empty "
+                     "reply, not your arguments: a narrower call does not help). This "
+                     "does not block atlas_finish. If the step is still needed, call it "
+                     f"again as it was; after {IDENTICAL_FAIL_LIMIT} failures in a row "
+                     "reason.pre_report_check records a missing plan or synthesis as a "
+                     "documented limitation instead of requiring it.")
+            lines.append(line)
+            continue
         if issue.get("hint"):
             line += f"\n  FIX: {issue['hint']}"
         rc = int(issue.get("repeat_count") or 1)
@@ -353,6 +451,8 @@ def format_investigate_message(issues: list[dict[str, Any]]) -> str:
             )
         lines.append(line)
     body = "\n".join(lines)
+    if all(i.get("kind") == "helper_unavailable" for i in issues[:5]):
+        return f"[tool-failure investigate] A helper call failed:\n{body}"
     return (
         "[tool-failure investigate] The last tool batch had "
         f"{n} failure(s)/incomplete scan(s) that must be handled BEFORE new "

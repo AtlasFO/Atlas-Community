@@ -370,6 +370,8 @@ def _run_train(case_dir, args, review_result):
     fake_reviewer.review.return_value = review_result
     with patch.object(cli, "_run_investigation",
                       return_value=_fake_agent()) as run_inv, \
+         patch.object(cli, "_analyst_client",
+                      return_value=MagicMock(model="analyst-model")), \
          patch.object(cli, "_build_reviewer_client",
                       return_value=MagicMock(model="reviewer-model")), \
          patch("tools.misc.clear_case_run",
@@ -403,6 +405,8 @@ def test_train_output_dir_clears_mirror_not_case(case_dir, tmp_path):
     fake_reviewer.review.return_value = GOOD_REVIEW_RESULT
     with patch.object(cli, "_run_investigation",
                       return_value=_fake_agent()), \
+         patch.object(cli, "_analyst_client",
+                      return_value=MagicMock(model="analyst-model")), \
          patch.object(cli, "_build_reviewer_client",
                       return_value=MagicMock(model="reviewer-model")), \
          patch("tools.misc.clear_case_run",
@@ -588,3 +592,51 @@ def test_live_and_meta_reviews_are_not_treated_as_the_final_report(case_dir):
     (case_dir / "reports" / "PYTEST_Final_Report.md").write_text(
         "real report", encoding="utf-8")
     assert find_latest_report(case_dir).name == "PYTEST_Final_Report.md"
+
+
+def test_a_review_cut_twice_gives_no_verdict(case_dir):
+    """Half a review is no grade: a reply still cut at the one-answer
+    allowance after its re-ask is not parsed for a verdict, even one that
+    reads STRONG."""
+    from agent.llm import ChatResponse
+
+    class CutClient:
+        model = "reviewer-model"
+
+        def __init__(self):
+            self.n = 0
+
+        def chat(self, messages, **kw):
+            self.n += 1
+            return ChatResponse(content=STRONG_REVIEW, finish_reason="length")
+
+        def next_lower_level(self, role, level=None):
+            return "low"
+    client = CutClient()
+    result = Reviewer(client, case_dir, UI(quiet=True)).review(RUN_STATS)
+    assert result["verdict"] == "NEEDS WORK" and client.n == 2
+    assert result["review"].startswith("[The review reply was cut at the one-answer allowance twice")
+
+
+def test_the_recorded_objective_is_the_question_when_none_is_given(case_dir, monkeypatch):
+    """A run started without -q still has its questions: the objective it
+    recorded for its own trace. The review grades against them, never
+    against "(not provided)"; an objective recorded for another trace is
+    not used."""
+    import json
+    from core.run_state import record_objective
+    (case_dir / ".atlas").mkdir()
+    trace = case_dir / "analysis" / "CASE-A_trace.json"
+    trace.write_text(json.dumps({"case_id": "PYTEST", "entries": []}), encoding="utf-8")
+    record_objective(case_dir, text="Investigate the following open requests:\n- task-0001: Which account was abused?",
+                     source="tasks", trace_path=str(trace))
+    reviewer, client = _reviewer(case_dir)
+    monkeypatch.setattr("agent.review.active_trace_path", lambda: trace)
+    reviewer.review(RUN_STATS)
+    context = client.messages[1]["content"]
+    assert "Which account was abused?" in context and "(not provided)" not in context
+    other = case_dir / "analysis" / "OTHER_trace.json"
+    other.write_text(json.dumps({"case_id": "PYTEST", "entries": []}), encoding="utf-8")
+    reviewer, client = _reviewer(case_dir)
+    reviewer.review(RUN_STATS, trace_path=other)
+    assert "(not provided)" in client.messages[1]["content"]

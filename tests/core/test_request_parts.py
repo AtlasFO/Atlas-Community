@@ -35,12 +35,12 @@ class TestSplit:
         assert len(parts) == 1 and parts[0]["kind"] == "relation" and parts[0]["type"] == "relation"
 
     def test_guidance_is_dropped_and_a_parenthesised_list_is_opened(self):
-        parts = rp.split_request("Baseline — both operating systems; the server's local time (beware: the VM clocks "
-                                 "are set one hour off — a config quirk, not timestomping).")
+        parts = rp.split_request("Baseline — both operating systems; the server's local time (beware: the host clocks "
+                                 "drift by several minutes — a sync fault, not tampering).")
         assert [p["text"] for p in parts] == ["both operating systems", "the server's local time"]
-        parts = rp.split_request("Intent — locate and characterise the planning material (manifesto, plan documents, "
-                                 "presentation) and the web-search history that shows premeditation.")
-        assert [p["text"] for p in parts][:4] == ["the planning material", "manifesto", "plan documents", "presentation"]
+        parts = rp.split_request("Intent — locate and characterise the planning material (outline, plan documents, "
+                                 "presentation) and the web-search history that shows preparation.")
+        assert [p["text"] for p in parts][:4] == ["the planning material", "outline", "plan documents", "presentation"]
         assert parts[-1]["text"].startswith("the web-search history") and parts[-1]["type"] == "list"
 
     def test_children_are_the_parts_and_an_umbrella_is_one_narrative_part(self):
@@ -97,7 +97,7 @@ class TestStatus:
 
 
 class TestAssign:
-    NET = _node("N1", "Network: delivery IP is 194.61.24.102 (external, attacker host 'attacker-vm'); C2 IP is 10.90.90.90 (internal).", kind="conclusion")
+    NET = _node("N1", "Network: delivery IP is 203.0.113.44 (external, attacker host 'attacker-vm'); C2 IP is 10.0.0.90 (internal).", kind="conclusion")
 
     def _task(self, text):
         t = {"text": text, "status": "open", "related_claim_ids": []}
@@ -107,33 +107,33 @@ class TestAssign:
     def test_two_parts_of_one_kind_take_their_own_values(self):
         t = self._task("Network — the delivery IP and the C2 IP.")
         assert rp.assign(t, {"N1": self.NET}, ["N1"]) == ["p1", "p2"]
-        assert [p["value"] for p in t["parts"]] == ["194.61.24.102", "10.90.90.90"]
+        assert [p["value"] for p in t["parts"]] == ["203.0.113.44", "10.0.0.90"]
         assert rp.derive_status(t) == "answered"
 
     def test_a_value_of_the_right_kind_in_the_wrong_clause_does_not_answer(self):
         t = self._task("Device and system baseline — install date, timezone.")
-        acq = _node("C1", "Device and system baseline: the seized evidence is an EnCase image. Acquired 2004-09-20 10:00 UTC by the examiner.")
+        acq = _node("C1", "Device and system baseline: the seized evidence is an EnCase image. Acquired 2031-09-20 10:00 UTC by the examiner.")
         assert rp.assign(t, {"C1": acq}, ["C1"]) == []
-        inst = _node("C2", "Windows XP was installed on 2004-08-19 22:48:27 UTC (SOFTWARE InstallDate).")
+        inst = _node("C2", "Windows XP was installed on 2031-08-19 21:05:40 UTC (SOFTWARE InstallDate).")
         assert rp.assign(t, {"C1": acq, "C2": inst}, ["C1", "C2"]) == ["p1"]
-        assert t["parts"][0]["value"] == "2004-08-19 22:48:27 UTC" and t["parts"][1]["status"] == "open"
+        assert t["parts"][0]["value"] == "2031-08-19 21:05:40 UTC" and t["parts"][1]["status"] == "open"
 
     def test_observations_answer_and_gaps_and_absences_do_not(self):
         t = self._task("Baseline — timezone.")
-        obs = _node("O1", "The time zone of the notebook is Central Standard Time (SYSTEM TimeZoneInformation).", kind="observation")
+        obs = _node("O1", "The time zone of the notebook is Pacific Standard Time (SYSTEM TimeZoneInformation).", kind="observation")
         gap = _node("C9", "Absence hypothesis: the timezone was never examined, 3 unexamined categories.")
         assert rp.assign(t, {"C9": gap}, ["C9"]) == []
         assert rp.assign(t, {"O1": obs}, ["O1"]) == ["p1"]
 
     def test_lexical_parts_close_only_on_the_analysts_update(self):
         t = self._task("Malware — whether the machine carries viruses.")
-        det = _node("C3", "ClamAV detected Win.Trojan.Cain-9 in Abel.dll on the notebook.")
+        det = _node("C3", "ClamAV detected Win.Trojan.Example-9 in helper.dll on the notebook.")
         assert rp.assign(t, {"C3": det}, ["C3"]) == []
         assert rp.assign(t, {"C3": det}, ["C3"], lenient=True) == ["p1"]
 
     def test_a_reading_never_closes_a_lexical_part(self):
         t = self._task("Malware — whether the machine carries viruses.")
-        text = "ClamAV detected Win.Trojan.Cain-9 in Abel.dll on the notebook."
+        text = "ClamAV detected Win.Trojan.Example-9 in helper.dll on the notebook."
         obs = _node("O3", text, kind="observation")
         det = _node("C3", text)
         assert rp.assign(t, {"O3": obs}, ["O3"], lenient=True) == []
@@ -142,7 +142,7 @@ class TestAssign:
     def test_a_relation_part_needs_a_named_belief_that_states_the_relation(self):
         t = self._task("Cross-evidence link — prove the connection between USB content and network traffic.")
         diary = _node("C1", "The diary carved from the USB key holds the anti-forensics narrative.")
-        same = _node("C2", "rhino1.jpg carved from the USB key is identical to the rhino1.jpg uploaded in the FTP session of the network capture.")
+        same = _node("C2", "photo1.jpg carved from the USB key is identical to the photo1.jpg uploaded in the FTP session of the network capture.")
         assert rp.assign(t, {"C1": diary, "C2": same}, ["C1", "C2"], lenient=True) == []
         assert rp.assign(t, {"C1": diary, "C2": same}, ["C1"], explicit={"p1": ["C1"]}) == []
         assert rp.assign(t, {"C1": diary, "C2": same}, ["C2"], explicit={"p1": ["C2"]}) == ["p1"]
@@ -152,11 +152,23 @@ class TestAssign:
         nodes = {"N1": self.NET}
         rp.assign(t, nodes, ["N1"])
         nodes["N1"] = dict(self.NET, status="superseded")
-        nodes["N2"] = _node("N2", "Network: delivery IP is 194.61.24.102; the C2 IP could not be established.", kind="conclusion")
+        nodes["N2"] = _node("N2", "Network: delivery IP is 203.0.113.44; the C2 IP could not be established.", kind="conclusion")
         assert rp.carry(t, "N1", "N2", nodes) == ["p1", "p2"]
         assert t["parts"][0]["status"] == "answered" and t["parts"][1]["status"] == "open"
         nodes["N2"]["status"] = "withdrawn"
         assert rp.clear_gone(t, nodes) == ["p1"]
+
+    def test_the_analysts_close_survives_a_supersession_that_still_answers_the_part(self):
+        t = self._task("Network — the delivery IP and the C2 IP.")
+        nodes = {"N1": self.NET}
+        rp.assign(t, nodes, ["N1"])
+        for p in t["parts"]:
+            p["closed_by"] = "analyst"   # as update_task stamps a close that names N1
+        nodes["N1"] = dict(self.NET, status="superseded")
+        nodes["N2"] = _node("N2", "Network: delivery IP is 203.0.113.44; the C2 IP could not be established.", kind="conclusion")
+        rp.carry(t, "N1", "N2", nodes)
+        assert t["parts"][0]["status"] == "answered" and t["parts"][0]["closed_by"] == "analyst"
+        assert t["parts"][1]["status"] == "open" and "closed_by" not in t["parts"][1]
 
     def test_a_limitation_and_the_summary(self):
         t = self._task("Baseline — timezone, accounts.")
@@ -190,11 +202,15 @@ class TestLimitationsThroughTheTool:
         from core.claim_graph import add_claim
         from core.investigation_tasks import update_task
         case, tid = self._case(tmp_path)
-        cid = add_claim(case, "The time zone of the notebook is Central Standard Time (SYSTEM TimeZoneInformation).",
+        cid = add_claim(case, "The time zone of the notebook is Pacific Standard Time (SYSTEM TimeZoneInformation).",
                         confidence="LIKELY", enforce_validation=False)["node_id"]
         r = update_task(case, tid, status="answered", related_claim_ids=[cid])
         assert not r["success"] and r["gate"] == "task_parts_open"
-        assert "p2 accounts (needs a value of kind account)" in r["error"] and any("answered: Central Standard Time" in x for x in r["parts"])
+        assert "p2 accounts (needs a value of kind account)" in r["error"]
+        # Nothing is recorded by a refused call: the parts printed are the
+        # saved ones; what the call would have set is said in the error.
+        assert "p1 would be answered: Pacific Standard Time" in r["error"]
+        assert not any("answered: Pacific Standard Time" in x for x in r["parts"])
         r = update_task(case, tid, status="partial", related_claim_ids=[cid])
         assert r["success"] and r["task"]["status"] == "partial"
 
@@ -222,7 +238,8 @@ class TestLimitationsThroughTheTool:
         })
         bad = update_task(case, tid, parts={"p2": {"limitation": {
             "basis": "examined", "reason": "the SAM hive was parsed and lists no user account", "call_ids": [12]}}})
-        assert not bad["success"] and "successful reader call" in bad["error"]
+        assert not bad["success"] and "needs a successful read of the source" in bad["error"]
+        assert "call 12 names the source without reading its content" in bad["error"]
         good = update_task(case, tid, parts={"p2": {"limitation": {
             "basis": "examined", "reason": "the SAM hive was parsed and lists no user account", "call_ids": [13]}}})
         assert good["success"] and good["task"]["parts"][1]["limitation"]["call_ids"] == [13]
@@ -247,7 +264,10 @@ class TestLimitationsThroughTheTool:
 
 
 class TestReportPartLines:
-    def test_the_answers_section_lists_each_part(self, tmp_path):
+    def test_the_answers_section_lists_each_part(self, tmp_path, monkeypatch):
+        # The deterministic part lines (no composed answer; a composed one
+        # prints its own part lines, tests/core/test_answer_compose.py).
+        monkeypatch.setenv("ATLAS_ANSWER_COMPOSE", "0")
         from core.claim_graph import add_claim
         from core.investigation_tasks import reconcile_case_md, update_task
         from core.report_assemble import assemble_client_report
@@ -256,14 +276,14 @@ class TestReportPartLines:
         (case / "CASE.md").write_text("**Case ID:** X\n\n## Investigation Requests\n"
                                       "- Network — the delivery IP and the C2 IP.\n", encoding="utf-8")
         tid = reconcile_case_md(case)["tasks"][0]["id"]
-        cid = add_claim(case, "Network: delivery IP is 194.61.24.102 (external); the C2 IP could not be established.",
+        cid = add_claim(case, "Network: delivery IP is 203.0.113.44 (external); the C2 IP could not be established.",
                         confidence="LIKELY", host="DC01", enforce_validation=False)["node_id"]
         update_task(case, tid, status="partial", related_claim_ids=[cid])
         update_task(case, tid, parts={"p2": {"limitation": {"basis": "source_absent",
                     "reason": "no proxy or firewall log covers the beacon window"}}})
         text = assemble_client_report(case)
         assert "Parts of the request" in text
-        assert "- the delivery IP: answered 194.61.24.102" in text
+        assert "- the delivery IP: answered 203.0.113.44" in text
         assert "- the C2 IP: not determined — source_absent: no proxy or firewall log covers the beacon window" in text
 
 
@@ -299,7 +319,7 @@ class TestStandardParts:
     def test_a_per_host_part_takes_that_hosts_belief_only(self):
         task = {"text": "What happened on the hosts?", "status": "open", "related_claim_ids": []}
         rp.ensure_parts(task); rp.ensure_standard_parts(task, ["DC01", "WS07"])
-        first = _node("C2", "Initial attacker activity on DC01 began at 2020-09-19 02:19 UTC with an RDP logon.", host="DC01")
+        first = _node("C2", "Initial attacker activity on DC01 began at 2031-03-01 04:12 UTC with an RDP logon.", host="DC01")
         done = rp.assign(task, {"C2": first}, ["C2"])
         texts = {p["id"]: p for p in task["parts"]}
         assert [texts[i]["text"] for i in done] == ["initial activity on DC01"]
@@ -324,27 +344,27 @@ class TestReviewedFixes:
     its sub-questions."""
 
     def test_ids_and_technical_tokens_are_not_hosts_and_known_hosts_win(self):
-        text = "Device and system baseline (task-0001): the E01 image, computer name N-1A9ODN6ZXK4LQ, SP2, MD5 verified; claim C0009; DC01"
-        assert [v for v, _ in av.values(text, "host")] == ["N-1A9ODN6ZXK4LQ", "DC01"]
+        text = "Device and system baseline (task-0001): the E01 image, computer name N-3B8RTW2PL6XQ9, SP2, MD5 verified; claim C0009; DC01"
+        assert [v for v, _ in av.values(text, "host")] == ["N-3B8RTW2PL6XQ9", "DC01"]
         assert [v for v, _ in av.values(text, "host", known_hosts=["DC01"])][0] == "DC01"
-        assert av.bind("computer name", "host", "The computer name is N-1A9ODN6ZXK4LQ (task-0001).")[0] == "N-1A9ODN6ZXK4LQ"
+        assert av.bind("computer name", "host", "The computer name is N-3B8RTW2PL6XQ9 (task-0001).")[0] == "N-3B8RTW2PL6XQ9"
 
     def test_named_accounts_and_bare_files(self):
-        assert [v for v, _ in av.values("The user named jimcloudy1 owns the laptop; user creation followed", "account")] == ["jimcloudy1"]
-        assert [v for v, _ in av.values("signed URLs at signin.aws and the file rootkey.csv", "path")] == ["rootkey.csv"]
+        assert [v for v, _ in av.values("The user named jdoe1 owns the laptop; user creation followed", "account")] == ["jdoe1"]
+        assert [v for v, _ in av.values("signed URLs at signin.example and the file keys.csv", "path")] == ["keys.csv"]
 
     def test_naming_a_belief_waives_the_qualifier(self):
-        st = "Initial access to DC01 via RDP brute force from external IP 194.61.24.102 at 2020-09-19 02:21 UTC."
+        st = "Initial access to DC01 via RDP brute force from external IP 203.0.113.44 at 2031-03-01 04:14 UTC."
         assert av.bind("the source address", "ip", st) == (None, "")
-        assert av.bind("the source address", "ip", st, explicit=True)[0] == "194.61.24.102"
-        assert av.bind("when access was gained", "datetime", st, explicit=True)[0] == "2020-09-19 02:21 UTC"
+        assert av.bind("the source address", "ip", st, explicit=True)[0] == "203.0.113.44"
+        assert av.bind("when access was gained", "datetime", st, explicit=True)[0] == "2031-03-01 04:14 UTC"
         t = {"text": "How did the attacker gain access to the network?", "status": "open", "related_claim_ids": []}
         rp.ensure_parts(t); rp.ensure_standard_parts(t, [])
         node = _node("C1", st, host="DC01")
         src = next(p for p in t["parts"] if p["text"] == "the source address")
         assert rp.assign(t, {"C1": node}, ["C1"]) == []
         assert src["id"] in rp.assign(t, {"C1": node}, ["C1"], explicit={src["id"]: ["C1"]})
-        assert src["value"] == "194.61.24.102"
+        assert src["value"] == "203.0.113.44"
 
     def test_a_short_request_with_a_table_intent_takes_the_tables_parts(self):
         for text, first in (("Did Data get stolen, and if yes which one?", "data taken"),
@@ -628,3 +648,82 @@ def test_a_yes_no_part_is_answered_by_a_lead_that_asserts_it_despite_a_trailing_
     node = _node("C1", "Encryption of the share began at 2031-01-01 10:00 UTC; the ransom note could not "
                        "be recovered.")
     assert rp.assign(t, {"C1": node}, ["C1"], lenient=True) == ["p1"]
+
+
+class TestPartsWithNoWordsOfTheirOwn:
+    """A part with no words of its own ("How", "why", "for each") is judged
+    against the request's text: a linked belief through its lead, one the
+    analyst named for the part through any clause. A bare question word
+    typed by itself still needs its value read, a standard sub-question
+    never reads the request, and record-time linking closes none of them."""
+
+    @staticmethod
+    def _task(text):
+        return {"text": text, "parts": rp.split_request(text)}
+
+    @staticmethod
+    def _part(task, text):
+        return next(p for p in task["parts"] if p["text"] == text)
+
+    def test_the_tail_names_a_part_whose_core_is_only_a_presence_verb(self):
+        assert rp.part_words("Which accounts were used for lateral movement") == {"lateral", "movement"}
+        assert rp.part_words("the account used") == set()
+
+    def test_sibling_parts_stay_apart(self):
+        q = "Which accounts were used for lateral movement, and which for exfiltration?"
+        nodes = {"C1": _node("C1", "svc_backup was used for exfiltration of the finance share over SFTP."),
+                 "C2": _node("C2", "jane.doe was used for lateral movement to CORP-WS02 over RDP.")}
+        task = self._task(q)
+        part = self._part(task, "Which accounts were used for lateral movement")
+        rp.assign(task, nodes, ["C1"], explicit={part["id"]: ["C1"]}, lenient=True)
+        assert part["status"] == "open"
+        rp.assign(task, nodes, ["C2"], explicit={part["id"]: ["C2"]}, lenient=True)
+        assert part["status"] == "answered"
+
+    def test_a_named_belief_answers_why_through_a_later_clause(self):
+        q = "Which accounts were used for lateral movement, and why?"
+        reason = _node("C1", "The finance share was reachable from every workstation; jane.doe was used "
+                             "for lateral movement because its password was reused on each of them.")
+        task = self._task(q)
+        why = self._part(task, "why")
+        rp.assign(task, {"C1": reason}, ["C1"], explicit={why["id"]: ["C1"]}, lenient=True)
+        assert why["status"] == "answered" and why["bound_by"] == "analyst"
+
+    def test_a_gap_or_an_unrelated_belief_does_not_answer_it(self):
+        q = "Which accounts were used for lateral movement, and why?"
+        nodes = {"G": _node("G", "The Security logs of CORP-WS02 were not examined for lateral movement."),
+                 "U": _node("U", "Backups of the finance share were last written in 2030.")}
+        task = self._task(q)
+        why = self._part(task, "why")
+        for cid in nodes:
+            rp.assign(task, nodes, [cid], explicit={why["id"]: [cid]}, lenient=True)
+            assert why["status"] == "open", cid
+
+    def test_record_time_linking_closes_no_bare_part(self):
+        q = "How and when did the attacker reach CORP-WS01?"
+        nodes = {"C1": _node("C1", "The attacker logged on to CORP-WS01 over RDP from 203.0.113.7.")}
+        task = self._task(q)
+        rp.assign(task, nodes, ["C1"])
+        assert self._part(task, "How")["status"] == "open"
+        rp.assign(task, nodes, ["C1"], lenient=True)
+        assert self._part(task, "How")["status"] == "answered"
+
+    def test_a_bare_question_word_needs_its_value(self):
+        q = "Which accounts were used for lateral movement, and when?"
+        task = self._task(q)
+        when = self._part(task, "when")
+        no_time = _node("C1", "jane.doe was used for lateral movement to CORP-WS02 over RDP.")
+        rp.assign(task, {"C1": no_time}, ["C1"], explicit={when["id"]: ["C1"]}, lenient=True)
+        assert when["status"] == "open"
+        timed = _node("C2", "jane.doe was used for lateral movement to CORP-WS02 on 2031-03-04 at 10:12 UTC.")
+        rp.assign(task, {"C2": timed}, ["C2"], explicit={when["id"]: ["C2"]}, lenient=True)
+        assert when["status"] == "answered"
+
+    def test_a_standard_part_never_reads_the_umbrella_request(self):
+        q = "How did the attacker gain initial access to CORP-WS01?"
+        task = {"text": q, "parts": rp.standard_parts(q, [])}
+        used = self._part(task, "the account used")
+        belief = _node("C1", "The attacker gained initial access to CORP-WS01 over RDP from 203.0.113.7.",
+                       host="CORP-WS01")
+        rp.assign(task, {"C1": belief}, ["C1"], explicit={used["id"]: ["C1"]}, lenient=True)
+        assert used["status"] == "open"

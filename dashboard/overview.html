@@ -56,9 +56,12 @@
   /* Each fact is one item: a number and the word it belongs to never end up
      on different lines, whatever the width. */
   .band-run .rb-facts > span { white-space: nowrap; }
-  /* The token breakdown is the one fact allowed to fold, and only within
-     itself — on a phone it is longer than the screen. */
+  /* Two parts may fold, each only within itself, because on a phone they are
+     longer than the screen: the token breakdown, and the run's own activity
+     text (free text of any length, a long path included), which also breaks
+     inside a word rather than leave the band. */
   .band-run .rb-breakdown { white-space: normal; }
+  .band-run .rb-facts > .rb-activity { white-space: normal; overflow-wrap: anywhere; min-width: 0; }
   .band-run .rb-facts b {
     color: var(--fg-0); font-weight: 600; font-variant-numeric: tabular-nums;
   }
@@ -662,6 +665,77 @@ function ribbonHtml(timeline, caseDir, trace) {
 // the status band; returns the markup plus whether the run is live, because
 // the band's own border reports that too.
 
+// Why a run ended, as the activity panel and the run strip say it.
+const STOP_REASON_LABELS = {
+  // The child records this when the dashboard's Stop (SIGTERM) ended it: a
+  // requested end, not a failure, so it is not shown in the error colour.
+  stop_requested: 'Run stopped on request',
+  llm_error: 'Run stopped — LLM error',
+  crashed: 'Run stopped — unexpected error',
+  keyboard_interrupt: 'Run interrupted (Ctrl+C)',
+  turn_cap: 'Run stopped — turn limit reached',
+  wall_clock: 'Run stopped — time limit reached',
+  llm_deadline: 'Run stopped — LLM deadline reached',
+  token_cap: 'Run stopped — token budget reached',
+  gate_deadlock: 'Run stopped — every tool call was being refused (protocol deadlock)',
+  model_refusal: 'Run stopped — the model provider declined three requests in a row',
+  died: 'Run process ended without recording an exit',
+  quiet: 'Run stopped — no progress detected',
+  // Distinct from `quiet`: the model kept producing turns but never
+  // emitted the dair_assess call that re-opens the blocked forensic
+  // tools, so evidence work could not continue. Actionable — a rerun
+  // usually clears it; "no progress detected" read like "nothing left
+  // to do" and hid that.
+  stall: 'Run stopped — stalled on a protocol gate (DAIR re-engage)',
+  finish_deferred: 'Run stopped — the finish was held back and nothing followed',
+  // The server's undecided_end (run_manager) and the activity panel's
+  // last_stop (read_models): content classes with neither a read credited
+  // nor a reason recorded make the run a stopped one, never a finished one.
+  undecided_evidence: 'Run stopped — content classes have neither a read nor a reason',
+};
+// The exit codes atlas run documents (agent/cli.py, the run command's
+// epilog, and its sys.exit(4) for a finish without complete coverage).
+const EXIT_LABELS = {
+  0: 'Run finished',
+  1: 'Run ended: model or configuration error',
+  2: 'Run stopped before it finished',
+  4: 'Run finished, coverage incomplete',
+};
+
+// How a run this dashboard started ended. A run that reached one of the
+// loop's endings ("finished_itself", decided by the server with the rule the
+// exit code uses) is "finished" even when a stop came a moment after; a stop
+// someone pressed is said as such, also when the child ended before it could
+// record why (a stop in its first seconds); then the run's own recorded
+// reason; then the documented exit codes in words, any other code as a number.
+function endedLabel(st) {
+  const reason = String(st.stopped_reason || '');
+  if (st.finished_itself) {
+    return st.returncode === 4 ? EXIT_LABELS[4] : 'Run finished';
+  }
+  if (st.stop_requested_at) {
+    return st.stop_requested_by ? `Run stopped by ${st.stop_requested_by}` : 'Run stopped';
+  }
+  if (st.undecided_end) return STOP_REASON_LABELS.undecided_evidence;
+  if (STOP_REASON_LABELS[reason]) return STOP_REASON_LABELS[reason];
+  if (st.returncode === null || st.returncode === undefined) return 'Run ended';
+  return EXIT_LABELS[st.returncode] || `Run ended (exit code ${st.returncode})`;
+}
+
+// The activity panel's line for why the last run ended, from the run's own
+// record (read_models.activity_projection's last_stop), so it survives a
+// dashboard restart. A requested stop is not shown as an error.
+function stopLineHtml(act) {
+  const stop = act && act.last_stop;
+  const label = stop ? STOP_REASON_LABELS[stop.reason] : null;
+  if (!label) return '';
+  const colour = stop.reason === 'stop_requested' ? 'var(--fg-1)' : 'var(--bad)';
+  return `<div class="activity-line" style="color:${colour};">
+        <strong>${esc(label)}</strong>${stop.error
+          ? `<div class="small" style="color:var(--fg-1);margin-top:3px;">${esc(stop.error)}</div>` : ''}
+      </div>`;
+}
+
 function runStripHtml(st, act) {
   if (!st) return '';
   const running = !!st.running;
@@ -672,9 +746,12 @@ function runStripHtml(st, act) {
   // must stay blocked (a second `atlas run` over the same case would race
   // it) and Stop must too — run_manager has no process handle to signal.
   const external = !!st.external;
+  // A stopped run still writes its report on the way out (up to the stop
+  // grace period); while it does, it is stopping, not in progress.
   const label = running
-    ? (external ? 'Run in progress (started via CLI)' : 'Run in progress')
-    : (st.dashboard_tracked ? 'Run finished' : 'Idle');
+    ? (external ? 'Run in progress (started via CLI)'
+       : (st.stop_requested_at ? 'Stopping: the run writes its report' : 'Run in progress'))
+    : (st.dashboard_tracked ? endedLabel(st) : 'Idle');
   const blockedTitle = external
     ? 'This run was started outside the dashboard (CLI) — it can only be started or stopped the same way.'
     : '';
@@ -703,7 +780,7 @@ function runStripHtml(st, act) {
       + ` <span class="rb-breakdown">(${(st.input_tokens || 0).toLocaleString()} in / `
       + `${(st.output_tokens || 0).toLocaleString()} out`
       + `${st.cached_tokens ? `, ${st.cached_tokens.toLocaleString()} cached` : ''})</span>`);
-    if (st.activity) facts.push(`<b>${esc(st.activity)}</b>`);
+    if (st.activity) facts.push({ cls: 'rb-activity', html: `<b>${esc(st.activity)}</b>` });
     if (st.info_count) facts.push(`${st.info_count} info`);
   }
   // Counts only, and in the run's own row of facts — the detail sits in
@@ -723,7 +800,8 @@ function runStripHtml(st, act) {
     html: `
       <div class="band-run">
         <span class="rb-state"><span class="rb-dot"></span>${esc(label)}</span>
-        <span class="rb-facts">${facts.map(f => `<span>${f}</span>`).join('')}</span>
+        <span class="rb-facts">${facts.map(f => (typeof f === 'string'
+          ? `<span>${f}</span>` : `<span class="${f.cls}">${f.html}</span>`)).join('')}</span>
         <span class="rb-actions">
           <button class="btn ok" id="run-start-btn" data-mode="${primaryMode}" title="${esc(primaryTitle)}" ${running ? 'disabled' : ''}>${primaryLabel}</button>
           <button class="btn bad" id="run-stop-btn" title="${esc(blockedTitle)}" ${(running && !external) ? '' : 'disabled'}>Stop</button>
@@ -881,7 +959,7 @@ function ensureRunOptionsHost(caseDir, initialMode) {
   host.innerHTML = `
     <form method="dialog" class="run-options-form">
       <div class="rod-head">
-        <span class="rod-title">Run options</span>
+        <span class="rod-title">Run options: ${esc(caseDir)}</span>
         <button class="rod-close" value="cancel" aria-label="Close"><svg viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
       </div>
       <div class="rod-body">
@@ -898,23 +976,45 @@ function ensureRunOptionsHost(caseDir, initialMode) {
       </div>
     </form>`;
   document.getElementById('run-opt-mode').addEventListener('change', renderRunOptionsBody);
-  // A dialog closed with "start" launches the run with whatever is on the
-  // form; any other close (Cancel, Esc, the X) discards it. Reading a
-  // display:none check at start time, as the old panel did, could not tell
-  // "configured and dismissed" from "never opened".
-  host.addEventListener('close', () => {
-    if (host.returnValue === 'start') startRun(RUN_OPTIONS_CASE, collectRunOptions());
-  });
   renderRunOptionsBody();
 }
+
+// A dialog closed with "start" launches the run with whatever is on the
+// form; any other close (Cancel, Esc, the X) discards it. Reading a
+// display:none check at start time cannot tell "configured and
+// dismissed" from "never opened". The <dialog> is static and outlives
+// every case the page shows, so its handler is registered once
+// here, not per case (each would start the run once more). returnValue
+// survives a close, and Esc leaves it as it was, so it is cleared when read
+// and before each opening: a dismissal never repeats the last Start.
+(() => {
+  const host = document.getElementById('run-options-panel-host');
+  if (!host) return;
+  host.addEventListener('close', () => {
+    const start = host.returnValue === 'start';
+    host.returnValue = '';
+    if (start && RUN_OPTIONS_CASE) startRun(RUN_OPTIONS_CASE, collectRunOptions());
+  });
+})();
 
 async function startRun(caseDir, payload) {
   const startBtn = document.getElementById('run-start-btn');
   if (startBtn) startBtn.disabled = true;
+  const body = { case: caseDir, mode: payload.mode, options: payload.options };
   try {
-    await AtlasShell.apiPost('case/run/start', {
-      case: caseDir, mode: payload.mode, options: payload.options,
-    });
+    try {
+      await AtlasShell.apiPost('case/run/start', body);
+    } catch (e) {
+      // A start that removes the case's working files goes ahead only with
+      // the case typed by the user (the API asks for it and checks it).
+      if (!(e.data && e.data.confirm_case_required)) throw e;
+      const typed = prompt(`${e.message}.\n\nType the case folder name "${caseDir}" to start over:`);
+      if (typed === null) {
+        if (startBtn) startBtn.disabled = false;
+        return;
+      }
+      await AtlasShell.apiPost('case/run/start', { ...body, confirm_case: typed.trim() });
+    }
     await refresh();
   } catch (e) {
     alert(e.message);
@@ -944,6 +1044,7 @@ function wireRunControls(caseDir) {
       }
       // showModal (not show): the backdrop, Esc-to-close and focus trapping
       // are the point — this used to be a panel below the fold.
+      host.returnValue = '';
       if (typeof host.showModal === 'function') host.showModal();
       else host.setAttribute('open', '');   // very old browsers: inline dialog
     });
@@ -1067,7 +1168,11 @@ function render(ov, st) {
   if (kindCounts.claim) beliefBits.push(`${kindCounts.claim} claims`);
   if (claims.needs_review) beliefBits.push(`${claims.needs_review} need review`);
 
+  // The groups that make up the indicator count, and the rows listed beside
+  // it (own assets, review before use, named but not seen), which the IoCs
+  // tab shows too but the count, the report and the export leave out.
   const iocGroups = (iocs.groups || []).map(g => `${g.title} ${g.count}`).join(' · ');
+  const iocOthers = (iocs.others || []).map(g => `${g.title} ${g.count}`).join(' · ');
   const strip = runStripHtml(st, act);
   const band = `
     <div class="band ${strip && strip.live ? 'live' : ''}">
@@ -1093,6 +1198,7 @@ function render(ov, st) {
           <div class="f-l">Indicators</div>
           <div class="f-sub" title="${esc(iocGroups)}">${iocGroups
             ? esc(iocGroups) : 'none attributed yet'}</div>
+          ${iocOthers ? `<div class="f-sub dim" title="${esc(iocOthers)}">also listed: ${esc(iocOthers)}</div>` : ''}
         </a>
         <a class="band-cell" href="recommendations.html?case=${encodeURIComponent(cd)}">
           <div class="f-v" ${resp.open_now ? 'style="color:var(--bad)"' : ''}>${resp.open || 0}</div>
@@ -1166,6 +1272,7 @@ function render(ov, st) {
   const iocHtml = iocRows.length
     ? `<div class="chips">${(iocs.groups || []).map(g =>
           `<span class="pill">${esc(g.title)} ${g.count}</span>`).join('')}</div>`
+      + (iocOthers ? `<div class="dim small" style="margin:4px 0 6px;">Also listed, not counted: ${esc(iocOthers)}</div>` : '')
       + iocRows.map(r => `
         <div class="ioc-line">
           <span class="val">${esc(r.value)}</span>
@@ -1191,32 +1298,12 @@ function render(ov, st) {
   // already did for a clean finish) — a token/context-limit rejection from
   // the LLM API is the common real case and used to leave zero trace of
   // itself anywhere in the dashboard.
-  const STOP_REASON_LABELS = {
-    llm_error: 'Run stopped — LLM error',
-    crashed: 'Run stopped — unexpected error',
-    keyboard_interrupt: 'Run interrupted (Ctrl+C)',
-    turn_cap: 'Run stopped — turn limit reached',
-    wall_clock: 'Run stopped — time limit reached',
-    llm_deadline: 'Run stopped — LLM deadline reached',
-    token_cap: 'Run stopped — token budget reached',
-    gate_deadlock: 'Run stopped — every tool call was being refused (protocol deadlock)',
-    died: 'Run process ended without recording an exit',
-    quiet: 'Run stopped — no progress detected',
-    // Distinct from `quiet`: the model kept producing turns but never
-    // emitted the dair_assess call that re-opens the blocked forensic
-    // tools, so evidence work could not continue. Actionable — a rerun
-    // usually clears it; "no progress detected" read like "nothing left
-    // to do" and hid that.
-    stall: 'Run stopped — stalled on a protocol gate (DAIR re-engage)',
-  };
-  const stopLabel = act.last_stop ? STOP_REASON_LABELS[act.last_stop.reason] : null;
-  const lastStopHtml = stopLabel
-    ? `<div class="activity-line" style="color:var(--bad);">
-        <strong>${esc(stopLabel)}</strong>${act.last_stop.error
-          ? `<div class="small" style="color:var(--fg-1);margin-top:3px;">${esc(act.last_stop.error)}</div>` : ''}
-      </div>`
-    : '';
+  const lastStopHtml = stopLineHtml(act);
   const activityHtml = `
+    ${working && act.escape_alert
+      ? `<div class="activity-line" style="color:var(--bad);"><strong>Model calls keep failing</strong> — the run
+          waits and asks again by itself: ${esc(act.current_tool || '')}</div>`
+      : ''}
     ${working
       ? (act.logs_stale
           ? `<div class="activity-line"><strong>Run in progress</strong> — waiting on

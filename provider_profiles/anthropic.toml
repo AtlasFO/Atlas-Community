@@ -1,0 +1,93 @@
+#:schema ./schema.json
+# Atlas provider profile: what Atlas knows about one kind of LLM provider.
+# Every field: docs/llm.md, "Provider profiles", and provider_profiles/schema.json.
+# To change a field, put a file of the same name in provider_profiles.local/
+# (`atlas provider profile init <id>` copies this one there) and keep only the
+# lines you change: the rest, and later fixes to them, come from this file.
+# A file there fails when its id is not its file name, when it sets [env] or
+# implicit, or when it is named custom.toml (the fallback cannot be changed).
+# Source: https://platform.claude.com/docs/en/build-with-claude/streaming, .../prompt-caching,
+# .../refusals-and-fallback, and the Messages API reference.
+# Format version of this file; leave it at 1.
+schema = 1
+# Must equal the file name without .toml.
+id = "anthropic"
+# Position in the setup menu; lower comes first.
+order = 40
+# Name shown in the setup menu and on the Settings page.
+label = "Anthropic"
+# One line shown under the label in the menu.
+description = "api.anthropic.com — Claude through the native Messages API."
+# Shown when this profile is chosen: what to know before saving.
+notes = """\
+Prompt caching on (the system frame with the tools, the brief, and the history up to the last \
+tool result, each a 5-minute entry). Thinking levels are low, medium, high, xhigh and max; \
+minimal and none are sent as low, and no thinking switch is sent. A refusal by Anthropic's safety \
+classifiers ends that turn and is shown in the trace and the token ledger. Claude Haiku 4.5 and \
+Sonnet 4.5 take no effort setting, so no level is sent for them; Opus 4.6 to 4.8 and Sonnet 4.6 \
+think only when a request asks, which this profile does not."""
+# How these facts were checked: "live", "docs" (vendor documentation only) or "" (no fixed endpoint).
+evidence = "docs"
+# Wire format: "chat" (Chat Completions), "responses" (OpenAI Responses) or "messages" (Anthropic Messages).
+dialect = "messages"
+
+[connection]
+# Prefills the base URL field; a provider uses the URL saved with it.
+base_url = "https://api.anthropic.com/v1"
+models_paging = "after_id"          # the model list pages: 20 a page unless asked for up to 1000
+
+[auth]
+# Header that carries the key (default Authorization).
+header = "x-api-key"
+# Text before the key ("Bearer " on Authorization by default; none on another header).
+prefix = ""
+
+[headers]
+# Sent on every request as a static header; a key never goes here.
+anthropic-version = "2023-06-01"
+
+[request]
+temperature = false                  # current models refuse a non-default temperature
+# Input tokens per minute count input_tokens and cache_creation_input_tokens, not
+# cache_read_input_tokens, on every model the API serves (the rate-limits page: Claude
+# Haiku 3.5, the exception, is retired except on Google Cloud).
+rate_limit_counts_cache_reads = false
+# The Messages API states no limit on how many tools a request may carry (its
+# documented limits are 10,000 deferred tools and 4 MB of rendered tool text).
+# Above Atlas's common 128 the window bounds the list, one schema per 2,000
+# tokens: a 1M-window model lists all of Atlas's tools from the first turn of
+# an analysis run and the list never changes, so a tool change never re-sends
+# the cached prompt; a 200K model keeps 128. The first turn then writes about
+# 145K tokens, which the input-tokens-per-minute limit counts.
+max_tools = 1000
+
+[reasoning]
+control = "output_config"            # output_config: {effort}
+# Atlas level = value sent. Only listed levels can be pinned; Auto always can.
+levels = { none = "low", minimal = "low", low = "low", medium = "medium", high = "high", xhigh = "xhigh", max = "max" }
+
+# Forced tool use (tool_choice "any") is a 400 on these models: auto is sent instead.
+[models."claude-sonnet-5-5*".request]
+# tool_choice values refused here; Atlas sends auto instead.
+tool_choice_rejected = ["required"]
+
+[models."claude-opus-5-5*".request]
+# tool_choice values refused here; Atlas sends auto instead.
+tool_choice_rejected = ["required"]
+
+[models."claude-fable-5-1*".request]
+# tool_choice values refused here; Atlas sends auto instead.
+tool_choice_rejected = ["required"]
+
+[models."claude-mythos-5-1*".request]
+# tool_choice values refused here; Atlas sends auto instead.
+tool_choice_rejected = ["required"]
+
+# These take thinking only as a token budget, which Atlas does not send.
+[models."claude-haiku-4-5*".reasoning]
+# How a thinking level is sent: reasoning_effort, reasoning_object, thinking_type, enable_thinking, output_config or none.
+control = "none"
+
+[models."claude-sonnet-4-5*".reasoning]
+# How a thinking level is sent: reasoning_effort, reasoning_object, thinking_type, enable_thinking, output_config or none.
+control = "none"

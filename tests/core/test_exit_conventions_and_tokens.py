@@ -36,21 +36,24 @@ def test_a_real_error_on_exit_one_stays_a_failure():
     assert result["success"] is False
 
 
-def test_silent_mmls_answer_still_applies_under_sudo():
+def test_a_silent_mmls_exit_stays_a_failure_under_sudo():
+    """mmls's silent exit 1 is "no volume system" or "nothing it reads";
+    the executor asserts neither (tools.sleuthkit.tsk_mmls looks at the
+    first sector)."""
     result = {"success": False, "exit_code": 1, "stdout": "", "stderr": "",
               "cmd": "sudo mmls /evidence/disk.dd"}
     _apply_exit_conventions(result)
-    assert result["success"] is True and "partition table" in result["stdout"]
+    assert result["success"] is False and result["stdout"] == ""
 
 
 def test_credential_pair_is_not_an_artifact_path():
-    assert artifact_tokens("FTP credentials gnome/gnome123 used on the server") == set()
+    assert artifact_tokens("FTP credentials ftpuser/pass123 used on the server") == set()
 
 
 def test_a_slash_separated_list_of_words_is_not_a_path():
     """"System/lsass/svchost created 01:22" names processes, not files; a
     path of three segments needs something path-shaped in it."""
-    assert artifact_tokens("System/lsass/svchost created 2020-09-19T01:22") == set()
+    assert artifact_tokens("System/lsass/svchost created 2031-03-01T01:22") == set()
     assert artifact_tokens("permissions read/write/execute on the share") == set()
     assert artifact_tokens("ports 215/38088/38090 open on the host") == set()
     # Anchored, numbered or file-ending runs are still paths.
@@ -80,22 +83,22 @@ def test_a_mail_store_is_an_artifact_a_finding_and_a_listing_can_share():
     a finding with nothing but the fragments of a spaced Windows path, and
     a listing that printed every store was refused as unrelated to it."""
     finding = ("Newsgroup subscriptions under Local Settings\\Application Data"
-               "\\Microsoft\\Outlook Express\\{GUID}: alt.2600.dbx, "
-               "alt.binaries.hacking.beginner.dbx; contacts in user.wab")
-    listing = ("r/r 11443-128-4:\talt.2600.dbx\nr/r 11444-128-4:\t"
-               "alt.binaries.hacking.beginner.dbx\nr/r 11460-128-3:\tFolders.dbx")
+               "\\Microsoft\\Outlook Express\\{GUID}: alt.test.dbx, "
+               "alt.binaries.example.beginner.dbx; contacts in user.wab")
+    listing = ("r/r 500-128-1:\talt.test.dbx\nr/r 501-128-1:\t"
+               "alt.binaries.example.beginner.dbx\nr/r 502-128-1:\tFolders.dbx")
     shared = artifact_tokens(finding) & artifact_tokens(listing)
     # A multi-dot name is kept whole on both sides (the last label is the
     # extension); what must hold is that the two texts share the store.
-    assert "alt.binaries.hacking.beginner.dbx" in shared
+    assert "alt.binaries.example.beginner.dbx" in shared
     assert shared - {"data", "outlook"}
     assert "user.wab" in artifact_tokens(finding)
-    assert "gnome123" not in artifact_tokens("login gnome/gnome123 seen in rhino.log")
+    assert "pass123" not in artifact_tokens("login ftpuser/pass123 seen in capture.log")
 
 
 def test_real_relative_paths_still_count():
     assert {"carved", "x.bin"} <= artifact_tokens("carved to exports/carved/x.bin")
-    assert "rhino.log" in artifact_tokens("packets in evidence/rhino.log")
+    assert "capture.log" in artifact_tokens("packets in evidence/capture.log")
     assert {"config", "system"} <= artifact_tokens("hive Windows/System32/config/SYSTEM")
     assert "notes.txt" in artifact_tokens("see docs/notes.txt for details")
 
@@ -124,19 +127,19 @@ def test_windows_profile_directories_are_places_not_artifacts():
     "data", and a call that read the store is not unrelated for lacking
     those words."""
     toks = artifact_tokens(
-        r"24 .dbx files in C:\Documents and Settings\Mr. Evil\Local Settings\Application Data"
-        r"\Identities\{3D}\Microsoft\Outlook Express\alt.2600.dbx")
+        r"6 .dbx files in C:\Documents and Settings\Mr. Roe\Local Settings\Application Data"
+        r"\Identities\{3D}\Microsoft\Outlook Express\alt.test.dbx")
     for place in ("documents and settings", "local settings", "application data",
                   "identities", "microsoft", "data", "settings"):
         assert place not in toks, place
-    assert "alt.2600.dbx" in toks and "mr. evil" in toks and "outlook express" in toks
+    assert "alt.test.dbx" in toks and "mr. roe" in toks and "outlook express" in toks
 
 
 def test_a_windows_path_with_spaces_is_one_path_and_prose_after_it_is_not():
     from core.entities import extract
-    ents = extract(r"ClamAV flagged C:\Program Files\Cain\Abel.dll (inode 9958). Abel is part of Cain")
-    assert "path:c:/program files/cain/abel.dll" in ents
-    assert "file:abel.dll" in ents
+    ents = extract(r"ClamAV flagged C:\Program Files\Suite\Helper.dll (inode 311). Helper is part of Suite")
+    assert "path:c:/program files/suite/helper.dll" in ents
+    assert "file:helper.dll" in ents
     assert not any(e.startswith("path:") and "inode" in e for e in ents)
     toks = artifact_tokens(r"copied to C:\Users\bob and later D:\backup\x.zip")
     assert {"bob", "backup", "x.zip"} <= toks and "and later" not in toks

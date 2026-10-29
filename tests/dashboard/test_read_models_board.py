@@ -46,6 +46,19 @@ class TestHosts:
         assert board["C0003"]["hosts"] == []
 
 
+class TestMoment:
+    def test_the_first_moment_a_statement_states_orders_the_time_layout(self, tmp_path):
+        case = _write(tmp_path, {
+            "C0001": _claim(1, "svc_backup logged on to CORP-DC01 at 2031-03-11T02:47:10Z from CORP-WS07"),
+            "C0002": _claim(2, "jane.doe opened invoice.docm at 2031-03-10 14:02; it ran at 2031-03-10 14:03"),
+            "C0003": _claim(3, "No moment stated here"),
+        })
+        board = read_models.evidence_board(case)["board"]
+        assert board["C0001"]["t"] == "2031-03-11 02:47:10"
+        assert board["C0002"]["t"] == "2031-03-10 14:02:00"
+        assert board["C0003"]["t"] == ""
+
+
 class TestVersionChains:
     def test_same_statement_recorded_again_is_a_newer_version(self, tmp_path):
         case = _write(tmp_path, {

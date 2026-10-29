@@ -1,5 +1,8 @@
 fastmcp>=4.0.10
 httpx>=0.28.1
+python-magic>=0.4.27   # tools.media_types: a file's content type by libmagic (install.sh's `file` package brings libmagic1); the name route stands in without it
+Pillow>=10.3.0         # tools.images_decode: decoding and downsizing carved pictures in a child process; 10.0.1 took the libwebp fix (CVE-2023-4863), 10.3.0 the later ones
+jsonschema>=4.0      # provider profiles: provider_profiles/schema.json (draft 2020-12); fastmcp pulls it in too
 
 # Dashboard HTTP layer (dashboard/app.py + dashboard/serve.py). fastmcp
 # already pulls these in transitively; declared here because the dashboard
@@ -50,7 +53,7 @@ machinae>=1.4.11          # enrichment.machinae_lookup — multi-source IOC look
 libscca-python>=20260527   # ez.pecmd fallback — prefetch parsing off Windows
 pefile>=2024.8.26        # misc.pe_scanner — PE header, section and import triage
 usnparser>=4.1.5          # misc.usnparser_parse — NTFS $UsnJrnl:$J parsing (usn.py)
-pyhindsight>=20260600     # misc.hindsight_chrome — Chrome/Chromium profile parsing
+pyhindsight>=20260600     # misc.hindsight_chrome — Chrome/Chromium profile parsing; imports ccl_chromium_reader (not on PyPI), which install.sh pins and installs after this step
 pe-carver>=2.0.0        # misc.pe_carver — carve PE files from raw data (-f/-o CLI)
 python-evtx>=0.8.1      # misc.evtx_dump / misc.evtx_filter — EVTX records without .NET (the Evtx package; its console scripts are not used)
 analyzeMFT>=3.1.1       # misc.analyzemft_parse — $MFT to CSV without .NET (analyzemft CLI)

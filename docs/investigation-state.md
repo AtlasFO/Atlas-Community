@@ -49,7 +49,10 @@ Do not add another JSON for “open questions” without retiring one of the row
     investigation_memory.json     # Lightweight investigation memory (not chat)
     investigation_tasks.json      # CASE.md work queue materialization (V1)
     investigation_plan.json       # Pre-execution orchestration checklist
-    mount_plan.json               # Detected disk images + mount actions
+    mount_plan.json               # Detected disk images + mount actions (and each raw view's state)
+    contents_index.db             # What every disk image holds, listed once at intake
+    coverage_ledger.json          # Evidence items and content classes with their disposition
+    incident_map.db               # Hosts, accounts, files, endpoints, timed events, labels
     rerun_brief.md                # Continuity brief for the AI investigator
     milestones.json               # Advisory high-level milestones
     run_history/
@@ -82,6 +85,33 @@ Updated by `claim.*` tools and fail-open mirror from `misc.record_finding`.
 Fingerprints of files under `evidence/` (content hash, size, mtime, inode, `full` vs `sampled` mode). Used to detect added / changed / removed / touched units on `atlas rerun`.
 
 Distinct from `analysis/evidence_index.db` (FTS over **tool output**).
+
+### `contents_index.db`
+
+SQLite (stdlib). One entry per file and place from three origins: listed
+inside a disk image by The Sleuth Kit (`fls -r -m /` per filesystem volume),
+named by a full-volume listing among the exports, or a source an export parsed
+that no image lists. It joins what each export parsed (rows, time span, hosts,
+parser kinds, event-log channels with their event ids) to the image entry it
+came from, and records the copies a read made. It is a pointer and a
+disclosure, never a floor: nothing in it asks for a read. Read by
+`tsk.index_find`, the host view and the Evidence Gaps. See
+[architecture-case-driven.md](architecture-case-driven.md#files-inside-images).
+
+### `coverage_ledger.json`
+
+Every evidence item handed over and the content classes inside it, each with a
+disposition (open, read, partial, parsed, left), its reason and the calls that
+prove it. The dashboard's Coverage tab and the report's *Evidence not analysed*
+read it. See [architecture-investigation.md](architecture-investigation.md#6-coverage-the-work-order-and-the-incident-map).
+
+### `incident_map.db`
+
+SQLite (stdlib), beside the claim graph and kept in step with it:
+entities, the timed events that connect them and the attacker, benign or
+unknown labels the model sets, each citing a belief or the calls that show it,
+with an append-only change feed. Beliefs stay in the claim graph. The frontier
+loop (`ATLAS_LOOP=frontier`) follows the feed.
 
 ### `dependency_index.json`
 
@@ -178,6 +208,7 @@ reports/
 - **`diff_report.md`:** append-only, structured from fingerprints (claims, confidence, conflicts, analyst context, evidence) — **not** Markdown wording diffs.
 - **No material change:** journal + a short `diff_report.md` note; **no** new `rerun_NNNN/`.
 - **`atlas report`:** prefers `reports/latest`.
+- **A fresh run archives them:** `atlas run` on a finished case (or with `--fresh`) and `atlas train` move the whole of `reports/` (the flat deliverables and every snapshot, with `.atlas/report_snapshots_index.json`) and the previous trace to `.atlas/run_history/trace-<UTC stamp>/` before the new run starts; they are never kept in place beside the new run's reports. `analysis/` and `exports/` are deleted. The start message names the archive. `atlas run --resume` and `atlas rerun` keep everything in place.
 
 Assemble helper: `atlas rerun --assemble-report` (still valid; promote runs at end of persist `atlas rerun`).
 

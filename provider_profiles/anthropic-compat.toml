@@ -1,0 +1,63 @@
+#:schema ./schema.json
+# Atlas provider profile: what Atlas knows about one kind of LLM provider.
+# Every field: docs/llm.md, "Provider profiles", and provider_profiles/schema.json.
+# To change a field, put a file of the same name in provider_profiles.local/
+# (`atlas provider profile init <id>` copies this one there) and keep only the
+# lines you change: the rest, and later fixes to them, come from this file.
+# A file there fails when its id is not its file name, when it sets [env] or
+# implicit, or when it is named custom.toml (the fallback cannot be changed).
+# Source: https://platform.claude.com/docs/en/cli-sdks-libraries/libraries/openai-sdk
+# Format version of this file; leave it at 1.
+schema = 1
+# Must equal the file name without .toml.
+id = "anthropic-compat"
+# Position in the setup menu; lower comes first.
+order = 41
+# Name shown in the setup menu and on the Settings page.
+label = "Anthropic (OpenAI-compatible layer)"
+# One line shown under the label in the menu.
+description = "api.anthropic.com — Claude through Anthropic's OpenAI SDK layer."
+# Shown when this profile is chosen: what to know before saving.
+notes = """\
+Anthropic calls this layer test-grade, and it supports no prompt caching: use the Anthropic \
+profile for runs. reasoning_effort is ignored here, so no thinking level is sent and the models \
+think at their own default."""
+# How these facts were checked: "live", "docs" (vendor documentation only) or "" (no fixed endpoint).
+evidence = "docs"
+# Wire format: "chat" (Chat Completions), "responses" (OpenAI Responses) or "messages" (Anthropic Messages).
+dialect = "chat"
+
+[connection]
+# Prefills the base URL field; a provider uses the URL saved with it.
+base_url = "https://api.anthropic.com/v1"
+models_paging = "after_id"          # the model list pages: 20 a page unless asked for up to 1000
+
+# The model list (GET /models) is Anthropic's native API, which refuses a request without it.
+[headers]
+# Sent on every request as a static header; a key never goes here.
+anthropic-version = "2023-06-01"
+
+[request]
+# false where the vendor refuses a sampling temperature, so none is sent.
+temperature = false
+
+[reasoning]
+# How a thinking level is sent: reasoning_effort, reasoning_object, thinking_type, enable_thinking, output_config or none.
+control = "none"
+
+# Forced tool use (tool_choice "required") is a 400 on these models here too: auto is sent instead.
+[models."claude-sonnet-5-5*".request]
+# tool_choice values refused here; Atlas sends auto instead.
+tool_choice_rejected = ["required"]
+
+[models."claude-opus-5-5*".request]
+# tool_choice values refused here; Atlas sends auto instead.
+tool_choice_rejected = ["required"]
+
+[models."claude-fable-5-1*".request]
+# tool_choice values refused here; Atlas sends auto instead.
+tool_choice_rejected = ["required"]
+
+[models."claude-mythos-5-1*".request]
+# tool_choice values refused here; Atlas sends auto instead.
+tool_choice_rejected = ["required"]

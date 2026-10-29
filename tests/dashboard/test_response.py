@@ -17,6 +17,8 @@ ROOT = Path(__file__).resolve().parents[2]
 def case(tmp_path):
     d = tmp_path / "CASE-1"
     (d / ".atlas").mkdir(parents=True)
+    # The incident frame these rows are pinned in is the brief's statement.
+    (d / "CASE.md").write_text("**Case ID:** X\n**System owner:** victim\n", encoding="utf-8")
     return d
 
 

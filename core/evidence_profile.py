@@ -21,7 +21,7 @@ from typing import Any, Iterable
 
 # 1.1: a file a disk or memory tool may read lists both in "classes" and
 # the profile names it under "ambiguous"; an older profile is rebuilt.
-SCHEMA_VERSION = "1.1"
+SCHEMA_VERSION = "1.2"
 PROFILE_NAME = "evidence_profile.json"
 
 _LOCK = threading.RLock()
@@ -54,6 +54,7 @@ _EXT_CLASS: dict[str, str] = {
     ".vhdx": "disk",
     ".qcow": "disk",
     ".qcow2": "disk",
+    ".vdi": "disk",
     ".dd": "disk",
     ".raw": "disk",
     ".img": "disk",
@@ -258,6 +259,96 @@ def path_classes(path: Path, declared: str = "") -> tuple[str, ...]:
     return ("file",)
 
 
+# The classes a file inside an image is counted under by its suffix alone:
+# a suffix that names its format whatever folder holds it. Disk, memory and
+# tabular are left out: inside an image a .bin, .dmp or .csv is as often a
+# program's own file as evidence, and their class is read from the bytes,
+# which the listing does not hold.
+_INSIDE_IMAGE_CLASSES = ("windows_eventlog", "email", "pcap")
+
+
+def _derived_signature(case_dir: str | os.PathLike) -> str:
+    """A digest of the derived files the profile reads (_iter_derived_files:
+    each one's relative path, size and mtime). The run's own writes under
+    analysis/ and exports/ (the trace document, the run's files) are not
+    among them, so they never make the profile stale; a new or changed
+    parser output does."""
+    import hashlib
+    root = Path(case_dir).resolve()
+    h = hashlib.sha1()
+    for p in _iter_derived_files(root):
+        try:
+            st = p.stat()
+            rel = p.relative_to(root)
+        except (OSError, ValueError):
+            continue
+        h.update(f"{rel}|{st.st_size}|{st.st_mtime_ns}\n".encode("utf-8"))
+    return h.hexdigest()
+
+
+def _listing_generation(case_dir: str | os.PathLike) -> int:
+    try:
+        from core.contents_index import listing_generation
+        return listing_generation(case_dir)
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def inside_images_on() -> bool:
+    """ATLAS_PROFILE_INSIDE_IMAGES: a class whose files the contents index
+    lists inside the case's images is present, not absent."""
+    from core.envfile import env_flag
+    return env_flag("ATLAS_PROFILE_INSIDE_IMAGES", True)
+
+
+def inside_images(case_dir: str | os.PathLike) -> dict[str, dict[str, Any]]:
+    """``{class: {"files": n, "hosts": m}}`` for the files the contents index
+    lists inside the images (live, not deleted, not a version), by suffix;
+    {} without an index."""
+    try:
+        from core.contents_index import _connect, index_on
+        if not index_on():
+            return {}
+        con = _connect(case_dir)
+    except Exception:  # noqa: BLE001
+        return {}
+    if con is None:
+        return {}
+    by_class: dict[str, list[str]] = {}
+    for suffix, cls in _EXT_CLASS.items():
+        if cls in _INSIDE_IMAGE_CLASSES:
+            by_class.setdefault(cls, []).append(suffix)
+    out: dict[str, dict[str, Any]] = {}
+    try:
+        for cls, suffixes in by_class.items():
+            like = " OR ".join("lower(name) LIKE ?" for _ in suffixes)
+            where = (f"origin = 'image' AND is_dir = 0 AND deleted = 0 AND version_of IS NULL AND ({like})")
+            args = [f"%{s}" for s in suffixes]
+            row = con.execute(f"SELECT COUNT(*), COUNT(DISTINCT host) FROM entries WHERE {where}", args).fetchone()
+            if row and row[0]:
+                out[cls] = {"files": int(row[0]), "hosts": int(row[1])}
+                # The directory holding most of them, so the reader can tell
+                # a class's files from a program's same-suffix files.
+                top: dict[str, int] = {}
+                for (path,) in con.execute(f"SELECT path FROM entries WHERE {where}", args):
+                    d = str(path).rpartition("/")[0]
+                    top[d] = top.get(d, 0) + 1
+                if top:
+                    out[cls]["example_dir"] = max(top.items(), key=lambda kv: (kv[1], kv[0]))[0]
+    except Exception:  # noqa: BLE001
+        return {}
+    finally:
+        con.close()
+    return out
+
+
+def inside_text(n: dict[str, Any]) -> str:
+    """One class's inside-images line."""
+    where = f" (most under {n['example_dir']})" if n.get("example_dir") else ""
+    return (f"{n.get('files', 0):,} files inside {n.get('hosts', 0)} hosts' images{where}; "
+            "tsk.index_find(host, pattern) lists them")
+
+
 def classify_path(path: Path, declared: str = "") -> str:
     """Return the primary artifact class for a single file path."""
     return path_classes(path, declared)[0]
@@ -310,8 +401,8 @@ def live_hosts_configured() -> bool:
         return bool(list_configured_hosts())
     except Exception:
         candidates = [
+            # The one file core.ssh reads (DEFAULT_HOSTS_CONFIG).
             Path.home() / "cases" / ".common" / "live_hosts.json",
-            Path("/home/sansforensics/cases/.common/live_hosts.json"),
         ]
         for path in candidates:
             if not path.is_file():
@@ -384,6 +475,9 @@ def build_evidence_profile(case_dir: str | os.PathLike) -> dict[str, Any]:
     if derived_counts:
         present = sorted(set(present) | set(derived_counts))
 
+    inside = inside_images(case) if inside_images_on() else {}
+    if inside:
+        present = sorted(set(present) | set(inside))
     absent = [c for c in _TRACKED_CLASSES if c not in present]
     return {
         "schema_version": SCHEMA_VERSION,
@@ -400,6 +494,9 @@ def build_evidence_profile(case_dir: str | os.PathLike) -> dict[str, Any]:
         "derived_counts": dict(derived_counts),
         "derived_samples": derived_samples,
         "derived_file_count": int(sum(derived_counts.values())),
+        "inside_images": inside,
+        "listing_generation": _listing_generation(case),
+        "derived_signature": _derived_signature(case),
         "notes": [
             "Profile is factual inventory only — not an investigation plan.",
             "Choose tools whose required evidence classes intersect present_classes.",
@@ -443,18 +540,57 @@ def ensure_evidence_profile(
     evidence tree) is newer than the cached profile — closes the
     stale-profile class without requiring callers to remember refresh=True.
     """
+    root = str(Path(case_dir).resolve())
     with _LOCK:
         if not refresh:
+            # The profile read last for this case, keyed by the signals the
+            # staleness rule reads: unchanged, the same dict is handed back
+            # without a load, and never a rebuild inside the loop.
+            key = _profile_key(root)
+            hit = _PROFILE_MEMO.get(root)
+            if hit is not None and hit[0] == key:
+                return hit[1]
             existing = load_profile(case_dir)
             if (existing and existing.get("present_classes") is not None
                     and not _profile_is_stale(case_dir, existing)):
+                _remember(root, key, existing)
                 return existing
         profile = build_evidence_profile(case_dir)
         try:
             save_profile(case_dir, profile)
         except OSError:
             pass
+        _remember(root, _profile_key(root), profile)
         return profile
+
+
+def _remember(root: str, key: tuple, profile: dict[str, Any]) -> None:
+    """One entry per case; a long-lived process (the dashboard) serving many
+    cases keeps a bounded number."""
+    if len(_PROFILE_MEMO) > 64:
+        _PROFILE_MEMO.clear()
+    _PROFILE_MEMO[root] = (key, profile)
+
+
+# {case root: (the signals read last, the profile)}: one entry per case.
+_PROFILE_MEMO: dict[str, tuple[tuple, dict[str, Any]]] = {}
+
+
+def _profile_key(root: str) -> tuple:
+    """The signals _profile_is_stale reads, as one tuple: the profile file,
+    the brief, the catalog, the evidence tree, the listing generation and
+    the derived files' signature."""
+    r = Path(root)
+
+    def stat(p: Path) -> tuple:
+        try:
+            st = p.stat()
+            return (st.st_mtime_ns, st.st_size)
+        except OSError:
+            return ()
+    return (stat(profile_path(r)), stat(r / "CASE.md"), stat(r / "CLAUDE.md"),
+            stat(r / ".atlas" / "evidence_catalog.json"), stat(r / "evidence"),
+            _listing_generation(r) if inside_images_on() else -1, _derived_signature(r))
 
 
 def _profile_is_stale(
@@ -480,6 +616,11 @@ def _profile_is_stale(
         except OSError:
             pass
 
+    # The contents index lists what the images hold (inside_images): a new
+    # listing, not a write of the index database (reads write to it).
+    if inside_images_on() and int(profile.get("listing_generation") or 0) != _listing_generation(root):
+        return True
+
     # Catalog is updated by Plane A on evidence change — authoritative signal.
     cat = root / ".atlas" / "evidence_catalog.json"
     try:
@@ -499,14 +640,13 @@ def _profile_is_stale(
 
     # Artifacts the run extracts land in analysis/ and exports/, never in
     # evidence/ — without this the profile stayed frozen at intake for the
-    # whole run and kept reporting tabular/windows_eventlog as absent.
-    for sub in ("analysis", "exports"):
-        d = root / sub
-        try:
-            if d.is_dir() and d.stat().st_mtime > profile_mtime + 0.01:
-                return True
-        except OSError:
-            pass
+    # whole run and kept reporting tabular/windows_eventlog as absent. The
+    # signal is the derived files themselves (their paths, sizes and
+    # mtimes), not the folders' mtimes: the run rewrites its trace document
+    # under analysis/ every turn, which bumped the folder and rebuilt the
+    # profile each turn for nothing.
+    if str(profile.get("derived_signature") or "") != _derived_signature(root):
+        return True
 
     # Catalog unit count vs profile file_count (when both present)
     try:
@@ -545,6 +685,10 @@ def format_profile_for_prompt(profile: dict[str, Any]) -> str:
         f"- files scanned: {profile.get('file_count', 0)}",
         f"- present classes: {', '.join(present) if present else '(none)'}",
         f"- absent classes: {', '.join(absent) if absent else '(none)'}",
+    ]
+    for cls, n in sorted((profile.get("inside_images") or {}).items()):
+        lines.append(f"- {cls}: {inside_text(n)}")
+    lines += [
         "",
         "Counts:",
     ]
@@ -578,6 +722,7 @@ def format_profile_for_prompt(profile: dict[str, Any]) -> str:
     lines += [
         "",
         "Rules:",
+        *_brief_rule(),
         "- FIRST after start_execution_log: misc.inventory_evidence "
         "  (hard gate). It returns what exists, what is already parsed, "
         "  what still needs processing, and what to skip — follow "
@@ -586,8 +731,8 @@ def format_profile_for_prompt(profile: dict[str, Any]) -> str:
         "- Do not invent missing evidence (no EVTX parsing without event logs/",
         "  a disk image that could contain them; no EWF mount without a disk image;",
         "  no Volatility without memory; no PCAP tools without captures).",
-        "- Prefer already-parsed exports (assessment.already_processed) with "
-        "  table.* before re-running path parsers on raw sources.",
+        _framed("profile_rule", "- Prefer already-parsed exports (assessment.already_processed) with "
+                "  table.* before re-running path parsers on raw sources."),
         "- When unsure of a basename, call misc.list_evidence_dir — do not guess",
         "  MFT.csv / USNJRNL.csv. Listing alone does not unlock the gate.",
         "- Loading an incompatible namespace still fails at the evidence-compat",
@@ -659,3 +804,18 @@ def high_value_tabular_index(
         if len(out) >= limit:
             break
     return out
+
+
+def _framed(key: str, today: str) -> str:
+    """A framing sentence from core.evidence_framing, or the plain text with
+    ATLAS_EVIDENCE_FRAMING off."""
+    from core.evidence_framing import framing_lines, framing_on
+    if not framing_on():
+        return today
+    return framing_lines()[key]
+
+
+def _brief_rule() -> list[str]:
+    """The brief above the defaults, first among the rules."""
+    from core.evidence_framing import framing_lines, framing_on
+    return ["- " + framing_lines()["brief"]] if framing_on() else []

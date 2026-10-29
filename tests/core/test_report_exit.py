@@ -465,3 +465,105 @@ def test_a_case_with_an_official_report_is_left_untouched(tmp_path, monkeypatch)
                         lambda *a, **k: (_ for _ in ()).throw(AssertionError("touched")))
     assert write_exit_report(case, "manual", allow_llm=False)["written"] is False
     assert not (case / "reports" / "T_iocs.md").exists()
+
+
+def _deliverable(case, monkeypatch, source, entry=None):
+    """A case report written by ``source`` long before a finding (or
+    ``entry``) the live trace recorded."""
+    from core.execution_log import ExecutionLog
+    from core.report_projection import save_manifest
+    (case / "reports").mkdir(exist_ok=True)
+    out = case / "reports" / "T_investigation_report.md"
+    out.write_text("# The report\n" + "x" * 128, encoding="utf-8")
+    report_exit.record_report_stage(case, report_exit.STAGE_COMPLETE, "written", path=out, source=source)
+    man = load_manifest(case)
+    man["last_assembled_at"] = "2001-01-01T00:00:00+00:00"
+    save_manifest(case, man)
+    (case / "analysis").mkdir(exist_ok=True)
+    log = ExecutionLog()
+    log.configure("T", str(case / "analysis" / "T_trace.json"), save_session=False)
+    log._entries.append(entry or {"type": "finding", "call_id": 9, "ts": "2031-03-16T10:00:00+00:00"})
+    monkeypatch.setattr("core.execution_log.log", log)
+    monkeypatch.setattr(report_exit, "_run_report_addons", lambda *_a: None)
+    return out
+
+
+def test_a_projected_report_findings_came_after_is_projected_again_in_place(tmp_path, monkeypatch):
+    import core.investigation_state as inv
+    case = _case(tmp_path)
+    out = _deliverable(case, monkeypatch, "write_projected_final_report")
+    calls = []
+    monkeypatch.setattr(inv, "project_report_from_state",
+                        lambda root, **kw: calls.append(kw) or _projection_stub(root, **kw))
+    res = write_exit_report(case, "finished", allow_llm=True)
+    assert res == {"written": False, "refreshed": 1, "path": str(out),
+                   "source": "write_projected_final_report", "stage": "complete"}
+    assert out.read_text(encoding="utf-8").startswith("# Report") and not (case / "reports" / "estate_report.md").exists()
+    assert calls[0]["regenerate_stale"] is True and calls[0]["force_regenerate_all"] is False
+    assert load_manifest(case)["last_assembled_path"] == str(out)
+
+
+@pytest.mark.parametrize("source, allow_llm", [("write_final_report", True), ("write_projected_final_report", False)])
+def test_a_hand_written_report_or_an_ending_without_a_model_is_only_marked_stale(tmp_path, monkeypatch, capsys,
+                                                                                 source, allow_llm):
+    case = _case(tmp_path)
+    out = _deliverable(case, monkeypatch, source)
+    _no_projection(monkeypatch)
+    res = write_exit_report(case, "quiet", allow_llm=allow_llm)
+    assert res == {"written": False, "stale": 1, "path": str(out)}
+    assert out.read_text(encoding="utf-8").startswith("# The report")
+    assert load_manifest(case)["report_stage"] == "stale"
+    assert "1 finding(s), claim(s) or task update(s) were recorded after" in capsys.readouterr().err
+
+
+def test_a_current_report_is_left_alone(tmp_path, monkeypatch):
+    case = _case(tmp_path)
+    out = _deliverable(case, monkeypatch, "write_projected_final_report")
+    from core.report_projection import save_manifest
+    man = load_manifest(case)
+    man["last_assembled_at"] = "2031-03-16T11:00:00+00:00"
+    save_manifest(case, man)
+    _no_projection(monkeypatch)
+    assert write_exit_report(case, "finished", allow_llm=True) == {"written": False, "skipped": "official_report_exists"}
+    assert out.read_text(encoding="utf-8").startswith("# The report")
+
+
+def test_the_refresh_prepares_the_next_steps_and_indicators_first_and_keeps_the_close_out_note(tmp_path, monkeypatch):
+    import core.investigation_state as inv
+    case = _case(tmp_path)
+    out = _deliverable(case, monkeypatch, report_exit.CLOSE_OUT_SOURCE)
+    out.write_text("# The report\n\n> **Closed out by Atlas (gate_ready).** the old note\n\nbody\n", encoding="utf-8")
+    order = []
+    monkeypatch.setattr(report_exit, "_derive_next_steps", lambda _r: order.append("next steps"))
+    monkeypatch.setattr(report_exit, "_write_indicator_files", lambda _r: order.append("indicators") or {})
+    monkeypatch.setattr(inv, "project_report_from_state",
+                        lambda root, **kw: order.append("projection") or _projection_stub(root, **kw))
+    assert write_exit_report(case, "quiet", allow_llm=True)["refreshed"] == 1
+    assert order == ["next steps", "indicators", "projection"]
+    assert out.read_text(encoding="utf-8") == ("# Report\n\n> **Closed out by Atlas (gate_ready).** the old note\n\n"
+                                               "body for T_investigation_report.md\n")
+
+
+@pytest.mark.parametrize("cmd, success, refreshed", [
+    ("<py>:misc_update_investigation_task", True, 1),      # an answer or a limitation
+    ("<py>:claim_add_claim", True, 1),
+    ("<py>:misc_update_investigation_task", False, 0),     # refused: nothing changed
+    ("<py>:strings_read_text", True, 0),                   # a read changes no section
+])
+def test_a_claim_or_a_task_update_after_the_report_refreshes_it(tmp_path, monkeypatch, cmd, success, refreshed):
+    import core.investigation_state as inv
+    case = _case(tmp_path)
+    _deliverable(case, monkeypatch, "write_projected_final_report",
+                 {"type": "tool_call", "call_id": 9, "ts": "2031-03-16T10:00:00+00:00", "cmd": cmd, "success": success})
+    monkeypatch.setattr(inv, "project_report_from_state", _projection_stub)
+    assert write_exit_report(case, "finished", allow_llm=True).get("refreshed", 0) == refreshed
+
+
+def test_write_report_on_a_stale_projected_report_refreshes_it_and_exits_cleanly(tmp_path, monkeypatch, capsys):
+    import core.investigation_state as inv
+    from agent import cli
+    case = _case(tmp_path)
+    out = _deliverable(case, monkeypatch, "write_projected_final_report")
+    monkeypatch.setattr(inv, "project_report_from_state", _projection_stub)
+    cli.cmd_write_report(types.SimpleNamespace(case=str(case), force=False, no_llm=False))   # no SystemExit
+    assert out.read_text(encoding="utf-8").startswith("# Report") and "projected" in capsys.readouterr().err

@@ -44,8 +44,12 @@ Two ways to install Atlas — pick one:
      safety net against filling the disk mid-run, not a sizing guide.
    - Network access to:
      - An LLM backend — the Telekom LLM Hub, OpenAI, a local server, or any
-       other OpenAI-compatible endpoint (required for investigations; see
+       other OpenAI-compatible endpoint, or Anthropic's own API (required for investigations; see
        `docs/llm.md`)
+     - `pypi.org` and `files.pythonhosted.org` — `install.sh` runs
+       `pip install -r requirements.txt` (and the dev requirements) into the
+       venv, so the Python packages (including Pillow, python-magic and
+       pyhindsight) cannot be installed without them
      - `apt` / GitHub and the tools' own download sites (the installer
        downloads the tools no distribution packages: Chainsaw, Hayabusa,
        RegRipper, INDXParse, odl.py, Detect It Easy, Velociraptor and jphide
@@ -113,7 +117,14 @@ What it does (idempotent — safe to re-run):
   (only needed for EZ Tools, not fatal if absent)
 - Installs missing apt packages (venv, pip, sleuthkit, ewf/bde/vshadow tools, pst/pff
   tools, libesedb/libevt exporters, foremost, scalpel, testdisk, clamav, exiftool,
-  ssdeep, hashdeep, steghide, outguess, qemu-utils, tcpdump, ngrep, …)
+  ssdeep, hashdeep, steghide, outguess, qemu-utils, gawk, tcpdump, ngrep, …).
+  `qemu-utils` also serves the read-only raw views of VMDK, VHD, VHDX, QCOW2 and VDI
+  containers, which need `/dev/fuse` (without it a raw copy is made instead)
+- Installs the Python packages from `requirements.txt` (pip, from PyPI) and a few that
+  are not on PyPI, at pinned commits from GitHub: INDXParse, and the two Chromium
+  readers behind `misc.hindsight_chrome` (`ccl_chromium_reader`, `ccl_simplesnappy`,
+  installed `--no-deps` with Brotli and zstd, then proved by importing
+  pyhindsight's Chrome module; a failure there is a warning, never an abort)
 - Installs Volatility 3 (pip) and Plaso (GIFT PPA on Ubuntu, pip elsewhere) — the two big
   pieces a SIFT box would otherwise have provided
 - Installs the tools no distribution packages. At the versions pinned in
@@ -156,9 +167,9 @@ Easiest: the interactive wizard (also offered by `install.sh` itself):
 bin/atlas provider setup
 ```
 
-Walks you through the Telekom LLM Hub, OpenAI, a local/self-hosted server,
-or any other OpenAI-compatible endpoint, and tests the connection before
-saving. Nothing is pre-selected. The dashboard's **Settings → Providers** section
+Walks you through a menu of provider profiles (the Telekom LLM Hub, OpenAI,
+OpenRouter, Anthropic, a local/self-hosted server, or any other
+OpenAI-compatible endpoint) and tests the connection before saving. Nothing is pre-selected. The dashboard's **Settings → Providers** section
 does the same and assigns each model role to a provider. Manual alternative:
 
 ```bash

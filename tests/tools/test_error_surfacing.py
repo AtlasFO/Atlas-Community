@@ -1,7 +1,7 @@
 """Tests for the global error-surfacing pipeline.
 
 Every error class — pure-Python tool exception, trace write failure,
-gate-logic bug, dashboard discovery exception — must now reach (a) the
+gate-logic bug, dashboard discovery exception — must reach (a) the
 trace as a `tool_call` or `system_error` entry AND (b) the agent as a
 structured `ToolError`. These tests pin that contract in place.
 """
@@ -99,10 +99,10 @@ class TestToolBodyExceptionCapture:
                 assert te.__cause__ is original
 
     def test_cancellation_writes_call_abandoned(self, tmp_path):
-        """Client cancellation (asyncio.CancelledError) used to slip past the
-        global capture because it derives from BaseException, not Exception.
-        That made every client-side timeout on a long-running tool a silent
-        failure. Now it lands as a call_abandoned entry, then re-raises so
+        """Client cancellation (asyncio.CancelledError) would slip past the
+        global capture because it derives from BaseException, not Exception,
+        making every client-side timeout on a long-running tool a silent
+        failure. It lands as a call_abandoned entry, then re-raises so
         asyncio still unwinds correctly."""
         from core.middleware import NarrationMiddleware
 
@@ -221,8 +221,8 @@ class TestTraceWriteBubbleUp:
                 l.record_tool_call("vol psscan", True, False, 0, 0)
 
     def test_log_tool_re_raises_on_trace_failure(self, tmp_path):
-        """core/executor.py:_log_tool used to swallow trace-write failures and
-        return _atlas_call_id=0. Now it re-raises so the middleware can wrap
+        """core/executor.py:_log_tool must not swallow trace-write failures and
+        return _atlas_call_id=0. It re-raises so the middleware can wrap
         the failure as a ToolError the agent must see."""
         from core import executor
 
@@ -346,6 +346,7 @@ class _GateBreakingLog:
 
 
 class TestGateFailOpenVisible:
+    @pytest.mark.usefixtures("todays_dair")
     def test_gate_exception_fails_open_and_writes_system_error(self, tmp_path):
         from core import execution_log, middleware as mw_mod
 

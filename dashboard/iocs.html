@@ -234,17 +234,25 @@ function listHtml(list) {
 }
 
 function bandHtml(all) {
-  const total = all.length;
+  // One indicator count everywhere: the catalog's total, the typed rows the
+  // report and the export count. The board below also lists the case's own
+  // assets, the rows to review and the values named but not seen; they are
+  // named beside the count, not in it.
+  const counted = (State.data.groups || []).filter(g => g.counted);
+  const others = (State.data.groups || []).filter(g => !g.counted);
+  const total = State.data.total || 0;
   const byTier = {};
-  for (const i of all) byTier[tierOf(i)] = (byTier[tierOf(i)] || 0) + 1;
+  for (const g of counted) for (const i of g.iocs || []) byTier[tierOf(i)] = (byTier[tierOf(i)] || 0) + 1;
   const parts = TIERS.map(t => [t, byTier[t] || 0]).filter(p => p[1] > 0);
-  const bar = total ? `
+  const shown = parts.reduce((sum, [, n]) => sum + n, 0);
+  const bar = shown ? `
     <div class="minibar" aria-hidden="true">${parts.map(([t, n]) =>
-      `<span style="width:${(100 * n / total).toFixed(1)}%;background:${TIER_COLOR[t]}"></span>`).join('')}</div>
+      `<span style="width:${(100 * n / shown).toFixed(1)}%;background:${TIER_COLOR[t]}"></span>`).join('')}</div>
     <div class="conf-legend">${parts.map(([t, n]) =>
       `<span><span class="cdot" style="background:${TIER_COLOR[t]}"></span>${n} ${esc(t.toLowerCase())}</span>`).join('')}</div>`
     : '<div class="f-sub">nothing attributed yet</div>';
-  const groups = (State.data.groups || []).map(g => [g.title, (g.iocs || []).length]);
+  const othersSub = others.map(g => `${g.title} ${(g.iocs || []).length}`).join(' · ');
+  const groups = counted.map(g => [g.title, (g.iocs || []).length]);
   const typesSub = groups.map(([t, n]) => `${t} ${n}`).join(' · ');
   const hosts = [...new Set(all.flatMap(hostsOf))].sort();
   const owed = all.filter(owedOf).length;
@@ -255,6 +263,7 @@ function bandHtml(all) {
       <div class="band-figures">
         <div class="band-cell">
           <div class="f-v">${total}</div><div class="f-l">Indicators</div>${bar}
+          ${othersSub ? `<div class="f-sub dim" title="${esc(othersSub)}">also listed: ${esc(othersSub)}</div>` : ''}
         </div>
         <div class="band-cell">
           <div class="f-v">${groups.length}</div><div class="f-l">Types</div>
@@ -486,18 +495,27 @@ function renderSheet() {
     ? `${searched.length ? `<h4>Searched in (${searched.length})</h4>${chips(searched, 'neutral')}` : ''}
        ${pending.length ? `<h4>Still owed (${pending.length})</h4>${chips(pending, 'warn')}` : ''}`
     : '<h4>Search coverage</h4><div class="dim">No search for this indicator has been recorded.</div>';
+  const counted = Object.entries(i.counted || {}).filter(([, n]) => n > 0);
+  const shownOn = new Set(i.shown_on || []);
+  const countHtml = counted.length
+    ? `<h4>Rows counted (${counted.length} tables)</h4><div class="cov">${counted.map(([src, n]) =>
+        `<span class="pill ${shownOn.has(src) ? 'neutral' : 'warn'}" title="${esc(src)}${shownOn.has(src) ? ': rows shown by a call' : ': rows counted, never shown'}">${esc(shortPath(src))} ${n}</span>`).join('')}</div>`
+    : '';
   const calls = (i.call_ids || []).map(c => {
     const href = processHref(c);
     return href ? `<a class="cid" href="${href}" title="Open this call in the Process view">#${esc(String(c))}</a>` : `<span class="cid">#${esc(String(c))}</span>`;
   });
   document.getElementById('sheet-body').innerHTML = `
-    <div>${confPill(i.confidence)} <span class="pill neutral">${esc(ROLE_LABEL[i.role] || i.role || 'indicator')}</span> <span class="pill neutral">${esc(i.group)}</span>${hosts.length ? ` <span class="pill neutral">${esc(hosts.join(' · '))}</span>` : ''}</div>
+    <div>${confPill(i.confidence)} <span class="pill neutral">${esc(i.role_label || ROLE_LABEL[i.role] || i.role || 'indicator')}</span>${i.mark ? ` <span class="pill warn" title="${i.mark_kind === 'popular' ? 'A popular name: information only, the use is unchanged' : 'Published shared infrastructure: hunted, never blocked'}">${esc(i.mark)}</span>` : ''} <span class="pill neutral">${esc(i.group)}</span>${hosts.length ? ` <span class="pill neutral">${esc(hosts.join(' · '))}</span>` : ''}</div>
     <div class="ioc-val" style="margin-top:10px">${esc(i.value)}</div>
     ${i.explanation ? `<div class="muted" style="margin-top:4px">${esc(i.explanation)}</div>` : ''}
+    ${i.seen ? `<div class="muted" style="margin-top:4px">Seen: ${esc(i.seen)}</div>` : ''}
+    ${i.search_status ? `<div class="muted" style="margin-top:4px">Searched: ${esc(i.search_status)}</div>` : ''}
     <div style="margin-top:10px"><button type="button" class="btn ioc-copy" data-copy="${esc(i.value)}">Copy indicator</button></div>
     ${why.length ? `<h4>Why flagged</h4><ul class="why">${why.map(w => `<li>${esc(w)}</li>`).join('')}</ul>` : ''}
     <h4>Source beliefs (${(i.claim_ids || []).length > claims.length ? `${claims.length} of ${i.claim_ids.length}` : claims.length})</h4>${claimsHtml}
     ${covHtml}
+    ${countHtml}
     ${calls.length ? `<h4>Seen in the run</h4><div class="ref"><span>${calls.join(' ')}</span></div>` : ''}
     <details class="raw" style="margin-top:14px"><summary>Raw record</summary><pre>${esc(JSON.stringify(i, null, 2))}</pre></details>`;
   const btn = document.querySelector('#sheet-body .ioc-copy');

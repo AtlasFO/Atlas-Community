@@ -10,7 +10,7 @@ Separates responsibilities:
 
 ``render_markdown`` / ``assemble_report`` call ``assemble_client_report`` so
 future reports always follow the standard spine regardless of how section
-prose was previously generated.
+prose was generated.
 """
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Iterable, Any
 
 from core.report_projection import (
     GENERATOR_VERSION,
@@ -37,6 +37,42 @@ _SUMMARY_RE = re.compile(
 _ASSESSMENT_RE = re.compile(
     r"(?is)\*\*(?:Assessment|Bewertung)\*\*\s*\n+(.*?)(?=\n\*\*|\n#{2,4}\s|\Z)"
 )
+
+
+def _exec_next_steps(case_dir, language: str, *, scope: str = "case", host: str = "") -> list[str]:
+    """The summary's next steps, by code from the recorded response plan:
+    the open rows that rest on a finding (a prior-knowledge precaution
+    rests on none and is not a next step of this case), in the lifecycle
+    order of the engagement (core.recommendations.grouped: an examination
+    investigates first and contains last, an incident the reverse), at most
+    three with "+N more" for the rest; "no step recorded" when the plan
+    holds none. The model writes none: a step it would add rests on nothing
+    the plan records."""
+    from core.report_i18n import t
+    try:
+        from core.recommendations import build_catalog, grouped
+        catalog = build_catalog(case_dir)
+        rows = [r for r in (catalog.get("recommendations") or [])
+                if r.get("state") == "open" and not r.get("basis_lost")
+                and r.get("source") != "prior_knowledge"]
+        rows = [r for _phase, prow in grouped({**catalog, "recommendations": rows}) for r in prow]
+    except Exception:  # noqa: BLE001 - no plan is no step
+        rows = []
+    if scope == "host" and host:
+        h = host.strip().lower()
+        rows = [r for r in rows if r.get("scope") == "host"
+                and (not r.get("hosts") or h in (x.lower() for x in r["hosts"]))]
+    out = ["", f"**{t('exec_next_steps', language)}**", ""]
+    if not rows:
+        out.append(f"- {t('exec_no_step', language)}")
+        return out
+    for r in rows[:3]:
+        phase = t("response_phase_" + str(r.get("phase") or "investigate"), language)
+        urgency = t("response_urgency_" + str(r.get("urgency") or "soon"), language)
+        out.append(f"- {_md_inline(str(r.get('action') or ''))} ({phase}, {urgency}) — {r.get('id')}")
+    if len(rows) > 3:
+        out.append(f"- {t('exec_more_steps', language).format(n=len(rows) - 3)}")
+    return out
 
 
 def _part_lines(task: dict, fid_of: dict, language: str) -> list[str]:
@@ -405,10 +441,116 @@ def _integrity_lines(root: Path) -> list[str]:
     return lines
 
 
+def _composed_part_lines(task: dict, fids: dict, language: str, unaddressed: list[str]) -> list[str]:
+    """The part lines under a composed answer: status and citations, never
+    the binder's value (it can be wrong; the composer read the belief), the
+    part ids printed so the sentences' part citations resolve, and one
+    deterministic line per part the written answer did not address."""
+    from core.report_i18n import t
+    parts = [p for p in (task.get("parts") or []) if isinstance(p, dict)]
+    if len(parts) < 2 and not any(p.get("status") == "limited" or p.get("bound_by") == "analyst" for p in parts):
+        parts = []
+    out: list[str] = []
+    if parts:
+        out += ["", f"*{t('answer_parts_heading', language)}:*", ""]
+    for p in parts:
+        st = p.get("status")
+        pid = str(p.get("id") or "")
+        text = _md_inline(str(p.get("text") or ""))
+        if st == "answered":
+            refs = [fids.get(c) or c for c in (p.get("claim_ids") or [])]
+            state = t("answer_part_linked" if p.get("bound_by") == "analyst" else "answer_part_answered", language)
+            out.append(f"- {pid} {text}: {state}" + (f" ({', '.join(str(r) for r in refs)})" if refs else ""))
+        elif st == "limited":
+            lim = p.get("limitation") or {}
+            out.append(f"- {pid} {text}: {t('answer_part_limited', language)} — {lim.get('basis', '')}: "
+                       f"{_md_inline(str(lim.get('reason') or ''))}")
+        else:
+            out.append(f"- {pid} {text}: {t('answer_part_open', language)}")
+    by_id = {str(p.get("id") or "").lower(): p for p in (task.get("parts") or []) if isinstance(p, dict)}
+    omitted = [by_id[pid] for pid in unaddressed if pid in by_id]
+    if omitted:
+        if not parts:
+            out += [""]
+        for p in omitted:
+            out.append(f"- {p.get('id')} {_md_inline(str(p.get('text') or ''))}: {t('answer_part_unaddressed', language)}")
+    if out:
+        out.append("")
+    return out
+
+
+def _composed_text_lines(composed: dict, fids: dict, language: str) -> str:
+    """The composed sentences with their citation groups as the report prints
+    them: belief ids become F-ids (the case-wide index; a claim folded under
+    its conclusion prints the conclusion's id), part ids stay, a part-only
+    group reads as the analyst's note, a none group as not established."""
+    from core.report_i18n import t
+    pieces = []
+    for s in composed["sentences"]:
+        body = str(s["text"]).rstrip()
+        end = body[-1] if body and body[-1] in ".!?" else "."
+        if body and body[-1] in ".!?":
+            body = body[:-1].rstrip()
+        if s["none"]:
+            cite = f"[{t('answer_none_cite', language)}]"
+        else:
+            beliefs = [c for c in s["ids"] if not c.startswith(("p", "w", "v", "t"))]
+            parts = [c for c in s["ids"] if c.startswith("p")]
+            # A work order read prints as its item; a VALUES line as the
+            # indicator list it comes from.
+            others = [f"#{c[1:]}" for c in s["ids"] if c.startswith("w")]
+            if any(c.startswith("v") for c in s["ids"]):
+                others.append(t("answer_value_cite", language))
+            if any(c.startswith("t") for c in s["ids"]):
+                others.append(t("answer_window_cite", language))
+            if beliefs:
+                cite = "[" + ", ".join(parts + others + [str(fids.get(c) or c) for c in beliefs]) + "]"
+            elif parts:
+                cite = f"[{t('answer_part_cite', language)}, {', '.join(parts + others)}]"
+            else:
+                cite = "[" + ", ".join(others) + "]"
+        body = _COMPOSE_ID_RE.sub(lambda m: str(fids.get(m.group(0)) or m.group(0)), body)
+        pieces.append(f"{_md_inline(body)} {cite}{end}")
+    return " ".join(pieces)
+
+
+_COMPOSE_ID_RE = re.compile(r"\b[CNO]\d{4}\b")
+
+
+def _case_fids(root: Path, findings: list[dict[str, Any]]) -> dict:
+    """Claim id to F-id, case-wide (an answer is case-level, a per-host report
+    numbers only its host's findings), with a folded claim aliased to the
+    conclusion that absorbed it."""
+    fids: dict = {}
+    try:
+        from core.finding_index import load_index
+        fids.update((load_index(root) or {}).get("by_node_id") or {})
+    except Exception:  # noqa: BLE001
+        pass
+    for f in findings:
+        if f.get("id") and f.get("finding_id"):
+            fids.setdefault(f["id"], f["finding_id"])
+    alias_of = {}
+    for f in findings:
+        for twin in f.get("also_recorded_as") or []:
+            alias_of[str(twin)] = f.get("finding_id")
+    for nid, fid in list(fids.items()):
+        if str(fid) in alias_of and alias_of[str(fid)]:
+            fids[nid] = alias_of[str(fid)]
+    return fids
+
+
 def _answers_section(root: Path, findings: list[dict[str, Any]], language: str,
-                     narratives: dict[str, dict[str, str]] | None = None) -> list[str]:
+                     narratives: dict[str, dict[str, str]] | None = None, *,
+                     compose: bool = True, answers_stats: dict | None = None) -> list[str]:
     """Answers to the investigation questions, from the beliefs linked to
-    each — the same projection the dashboard's Questions tab shows."""
+    each — the same projection the dashboard's Questions tab shows. With
+    ATLAS_ANSWER_COMPOSE on the text is the composed answer (core.answer_synthesis
+    .compose_answer): the questions of one assembly are composed by a pool of
+    workers sharing one breaker, taken in question order; a fallback prints
+    the scaffold under a marker. ``compose=False`` makes no call: cached
+    composed answers are used, else the scaffold (the prose pass is skipped
+    on that path too)."""
     from core.report_i18n import t
     lines: list[str] = []
     try:
@@ -417,6 +559,14 @@ def _answers_section(root: Path, findings: list[dict[str, Any]], language: str,
         from core.investigation_tasks import list_tasks, tasks_path
         if tasks_path(root).is_file():
             tasks = [x for x in list_tasks(root) if x.get("status") != "dropped"]
+            for task in tasks:
+                # A host-wide question carries its depth per host beside the
+                # answer, read live (core.evidence_depth), never stored.
+                try:
+                    from core.evidence_depth import task_depth
+                    task["_depth"] = task_depth(root, task)[1]
+                except Exception:  # noqa: BLE001
+                    task["_depth"] = ""
         else:
             # The store is written when a run starts; a report rendered
             # before that (or for a case that never ran) still owes the
@@ -433,20 +583,45 @@ def _answers_section(root: Path, findings: list[dict[str, Any]], language: str,
     fid_of = {f.get("id"): f.get("finding_id") for f in findings}
     summaries = {nid: (narratives or {}).get(str(fid), {}).get("summary", "")
                  for nid, fid in fid_of.items() if fid}
+    from core.answer_synthesis import competing_questions, compose_on
+    questions = competing_questions(tasks)
+    composing = compose_on()
+    composed_by_task: dict[str, dict] = {}
+    if composing:
+        composed_by_task = _compose_all(root, tasks, graph, questions, language, allow_calls=compose)
+        if answers_stats is not None:
+            outcomes = [c.get("outcome") for c in composed_by_task.values()]
+            answers_stats.update({
+                "composed": outcomes.count("composed"), "cached": outcomes.count("cached"),
+                "fallback": outcomes.count("fallback"),
+                "fallback_reasons": sorted({str(c.get("reason") or "") for c in composed_by_task.values()
+                                            if c.get("outcome") == "fallback"}),
+            })
+        case_fids = _case_fids(root, findings)
     for i, task in enumerate(tasks, start=1):
         text = (task.get("text") or "").strip()
         if text.lower().startswith("[derived]"):
             text = text[len("[derived]"):].strip()
-        ans = answer_for_task(task, graph, summaries, language=language)
-        if ans.get("has_answer"):
+        ans = answer_for_task(task, graph, summaries, language=language, questions=questions)
+        composed = composed_by_task.get(str(task.get("id") or "")) if composing else None
+        if composed and composed.get("outcome") in ("composed", "cached"):
+            lines.extend(_composed_answer_lines(i, text, task, ans, composed, case_fids, language))
+            continue
+        if ans.get("has_answer") and compose and not composing:
             from core.answer_synthesis import synthesize_answer_text
             ans["text"] = synthesize_answer_text(
                 root, task.get("id") or f"task-{i:04d}", text, ans, language=language)
+        # A composition that fell back prints the scaffold text with one marker
+        # line under it, the way the narrative sections mark their stubs.
+        fallback = bool(composed and composed.get("outcome") == "fallback" and ans.get("has_answer"))
         conf = f" [{ans['confidence']}]" if ans.get("confidence") else ""
         lines.append(f"### Q{i} · {_md_inline(text)}{conf}")
         lines.append("")
         if ans["has_answer"]:
             lines.append(_md_inline(ans["text"]))
+            if fallback:
+                lines.append("")
+                lines.append(f"*{t('answer_fallback', language)}*")
             lines.extend(_part_lines(task, fid_of, language))
             if ans.get("shape_gap"):
                 lines.append("")
@@ -467,6 +642,179 @@ def _answers_section(root: Path, findings: list[dict[str, Any]], language: str,
             lines.append(f"*{t('not_answered', language)}*")
         lines.append("")
     return lines
+
+
+def _write_answers_stats(root: Path, stats: dict[str, Any]) -> None:
+    """The assembly's answer counts (composed, cached, fallback with its
+    reasons, and when) beside the report in the projection state, so the
+    run status record, the dashboard and the audit see them without the
+    trace and know which assembly they describe. Best effort."""
+    if not stats:
+        return
+    try:
+        import json as _json
+        from datetime import datetime, timezone
+        from core.report_projection import projection_dir
+        path = projection_dir(root) / "answers.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {**stats, "assembled_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+        path.write_text(_json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def compose_at_stop(case_dir: str | os.PathLike) -> dict[str, Any]:
+    """The answers a stopped run owes, composed before its report: the
+    composer for every question (one call each, as the close-out makes;
+    a question with no current belief makes none), its results cached, so
+    the report written next reads them. Returns the outcome counts and
+    whether the composer could be reached at all."""
+    root = Path(case_dir)
+    from core.answer_synthesis import competing_questions, compose_on
+    from core.claim_graph import load_graph
+    from core.investigation_tasks import list_tasks, tasks_path
+    if not compose_on() or not tasks_path(root).is_file():
+        return {"questions": 0, "outcomes": {}, "reached": True}
+    try:
+        from core.case_config import get_report_language
+        language = get_report_language(root)
+    except Exception:  # noqa: BLE001
+        language = "en"
+    tasks = [x for x in list_tasks(root) if x.get("status") != "dropped"]
+    composed = _compose_all(root, tasks, load_graph(root), competing_questions(tasks), language, allow_calls=True)
+    outcomes: dict[str, int] = {}
+    for res in composed.values():
+        outcomes[str(res.get("outcome") or "none")] = outcomes.get(str(res.get("outcome") or "none"), 0) + 1
+    # A fallback is an answer the composer did not give: it prints as a
+    # projection. A question with no current belief ("none") needs no call.
+    from core.report_projection import HURRY
+    return {"questions": len(tasks), "outcomes": outcomes, "reached": not outcomes.get("fallback"),
+            "hurried": HURRY.is_set()}
+
+
+def _compose_all(root: Path, tasks: list[dict], graph: dict, questions: list[str], language: str, *,
+                 allow_calls: bool) -> dict[str, dict]:
+    """compose_answer for every question of one assembly: a pool of
+    COMPOSE_WORKERS threads sharing one breaker when calls are allowed (one
+    client per worker thread), the lexicon built once, results by task id.
+    Without calls every question reads its cache or falls back, in order."""
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+    from core.answer_synthesis import (COMPOSE_WORKERS, ComposeBreaker, case_name_lexicon, compose_answer,
+                                       trace_composed)
+    lexicon = case_name_lexicon(graph) if allow_calls else frozenset()
+    breaker = ComposeBreaker()
+
+    def one(task: dict) -> tuple[str, dict]:
+        t0 = time.monotonic()
+        try:
+            res = compose_answer(root, task, graph, questions, language=language, allow_calls=allow_calls,
+                                 breaker=breaker, lexicon=lexicon)
+        except Exception as exc:  # noqa: BLE001 - a question never costs the section
+            res = {"outcome": "fallback", "reason": f"error: {type(exc).__name__}", "sheet": {}, "sentences": []}
+        trace_composed(res, time.monotonic() - t0)
+        return str(task.get("id") or ""), res
+
+    if not allow_calls or len(tasks) <= 1:
+        return dict(one(t) for t in tasks)
+    with ThreadPoolExecutor(max_workers=COMPOSE_WORKERS, thread_name_prefix="atlas-compose") as pool:
+        return dict(pool.map(one, tasks))
+
+
+def _composed_answer_lines(i: int, text: str, task: dict, ans: dict, composed: dict, fids: dict,
+                           language: str) -> list[str]:
+    """One composed answer as the report prints it (3.9 of the design): the
+    heading with the lowest tier among the lead's cited beliefs and the open
+    state for a task never closed, the sentences with their citations, the
+    part lines without values, the relevance or overview note, Supported-by
+    with the cited beliefs first, then the analyst's other links, and the
+    also-cited line for a closed task's unlinked citations."""
+    from core.report_i18n import t
+    sheet = composed.get("sheet") or {}
+    tier = composed.get("lead_tier")
+    closed = str(task.get("status") or "") in ("answered", "partial", "blocked_missing_evidence")
+    pill = (tier or "").upper()
+    if not closed and not sheet.get("overview"):
+        pill = (pill + " · " if pill else "") + t("answer_open_state", language)
+    lines = [f"### Q{i} · {_md_inline(text)}" + (f" [{pill}]" if pill else ""), ""]
+    lines.append(_composed_text_lines(composed, fids, language))
+    lines.extend(_composed_part_lines(task, fids, language, list(composed.get("parts_unaddressed") or [])))
+    if task.get("_depth"):
+        lines += ["", f"*{t('answer_depth', language)}: {_md_inline(str(task['_depth']))}*"]
+    if not sheet.get("overview"):
+        from core.answer_synthesis import answer_shape_gap
+        gap = answer_shape_gap(text, [str(s.get("text") or "") for s in composed.get("sentences") or []
+                                      if not s.get("none")], language)
+        if gap:
+            lines += ["", f"*{t('shape_' + gap, language)}*"]
+    if sheet.get("overview"):
+        lines += ["", f"*{t('overview_answer', language)}*"]
+    elif not closed:
+        lines += ["", f"*{t('relevance_answer', language)}*"]
+    cited: list[str] = []
+    for s in composed.get("sentences") or []:
+        for c in s.get("ids") or []:
+            # Parts, reads and value lines are sheet lines, not findings.
+            if not c.startswith(("p", "w", "v", "t")) and c not in cited:
+                cited.append(c)
+    attached = {c for c, how in sheet.get("beliefs") or [] if str(how).startswith("linked")}
+    attached |= set(sheet.get("linked_dropped") or [])
+    if closed:
+        attached |= {str(c) for c in (task.get("related_claim_ids") or [])}
+        for p in task.get("parts") or []:
+            if isinstance(p, dict) and p.get("closed_by") == "analyst":
+                attached |= {str(c) for c in (p.get("claim_ids") or [])}
+    supported = [str(fids.get(c) or c) for c in cited] + [
+        str(fids.get(c) or c) for c in attached if c not in cited]
+    supported = [x for x in dict.fromkeys(supported) if x]
+    if supported:
+        lines += ["", f"{t('supported_by', language)} " + " · ".join(supported)]
+    if closed:
+        also = [str(fids.get(c) or c) for c in cited if c not in attached]
+        if also:
+            lines.append(f"{t('answer_also_cited', language)} " + " · ".join(dict.fromkeys(also)))
+    lines.append("")
+    return lines
+
+
+def _sighted_indicator_lines(cat: dict[str, Any], language: str, report_scope: str,
+                             report_host: str) -> list[str]:
+    """The report's Indicators section under the sighted catalogue: the
+    block rows inline with where each was seen (a host report lists the rows
+    seen on that host), then one line counting the hunt, scope, review,
+    role-not-stated and context rows."""
+    from core.ioc_catalog import _seen_cell
+    from core.report_i18n import t
+    seen = [r for r in cat.get("iocs") or [] if r.get("standing") in ("cited", "same_host", "elsewhere")]
+    block = [r for r in seen if "block" in (r.get("use") or [])]
+    if (report_scope or "") == "host" and report_host:
+        block = [r for r in block if any(str(x.get("host") or "").lower() == report_host.lower()
+                                         for x in r.get("sightings") or [])]
+    out: list[str] = []
+    if block:
+        out += [t("ind_block_head", language), "",
+                f"| {t('ind_col_value', language)} | {t('ind_col_type', language)} | "
+                f"{t('ind_col_seen', language)} | {t('ind_col_finding', language)} |", "|---|---|---|---|"]
+        for r in block:
+            out.append("| " + " | ".join(str(c).replace("|", "\\|") for c in (
+                r.get("value"), r.get("category"), _seen_cell(r), ", ".join(r.get("claim_ids") or []))) + " |")
+        out.append("")
+    else:
+        out.append(t("ind_block_none", language))
+    review = [r for r in list(cat.get("iocs") or []) + list(cat.get("review") or [])
+              if r.get("source") == "typed" and r.get("standing") in ("elsewhere", "unlocated")
+              and "review" in (r.get("use") or [])]
+    named = [r for r in cat.get("review") or [] if r.get("source") == "prose"
+             and r.get("standing") not in ("unchecked", "")]
+    context = cat.get("context") or []
+    brief = sum(1 for r in context if "brief" in (r.get("named_by") or []))
+    marked = sum(1 for r in seen if r.get("mark"))
+    out.append(t("ind_sighted_counts", language).format(
+        hunt=sum(1 for r in seen if "hunt" in (r.get("use") or [])),
+        scope=sum(1 for r in seen if "scope" in (r.get("use") or [])),
+        review=len(review), named=len(named), context=len(context),
+        brief=t("ind_sighted_brief", language).format(n=brief) if brief else "", marked=marked))
+    return out
 
 
 def _fill_hosts(root: Path, findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -524,27 +872,42 @@ def _fold_twins(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return kept
 
 
+def _case_hosts(root) -> list[str]:
+    """The case's known hosts, [] when they cannot be read."""
+    try:
+        from core.forensic_citation import known_case_hosts
+        return list(known_case_hosts(root))
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def _build_attack_timeline_rows(
     findings: list[dict[str, Any]],
     packs: dict[str, dict[str, Any]],
     *,
     max_rows: int = 120,
     max_rows_per_finding: int = 12,
+    known_hosts: Iterable[str] = (),
+    case_dir: Any = None,
 ) -> list[dict[str, str]]:
     """Curated timeline rows from resolved evidence (not full master timeline).
 
     Keeps multiple artifact perspectives per finding (different sources /
     producers) instead of a single global type allow/deny list. Caps per
     finding so one noisy claim cannot crowd out the rest of the attack story.
+    ``known_hosts``: the case's hosts beside the findings', so a record of a
+    host no finding is about is still credited to that host.
     """
     from core.evidence_noise import (
+        envelope_rows,
         is_tool_metadata_text,
         is_weak_timeline_event_text,
         looks_like_evidence_gap_statement,
     )
 
     rows: list[dict[str, str]] = []
-    case_hosts = sorted({str(f.get("host") or "") for f in findings if f.get("host")})
+    case_hosts = sorted({str(f.get("host") or "") for f in findings if f.get("host")}
+                        | {str(h) for h in known_hosts if h})
     for f in findings:
         nid = f.get("id") or ""
         fid = f.get("finding_id") or nid
@@ -578,12 +941,25 @@ def _build_attack_timeline_rows(
             text = ev.get("text") or ""
             if is_tool_metadata_text(text) or is_weak_timeline_event_text(text):
                 continue
+            if envelope_rows(text) is not None:
+                # Atlas's own result envelope is no event: its first date is
+                # as often a tool's start time as a record's, and the
+                # resolver already cites the rows inside it.
+                continue
             parsed = _fields_from_event_text(text)
             # "++++ r/r 1234-128-4:" is not a time and a CSV header is not
             # an event; both reached the attack timeline as rows.
             ts = _valid_timestamp(ev.get("timestamp") or parsed.get("timestamp") or "") \
                 or _valid_timestamp(text)
-            host = (ev.get("host") or parsed.get("host") or claim_host or "").strip()
+            # The record's host first (the rule the Evidence bullets use,
+            # core.forensic_citation.record_host), then a host-shaped cell
+            # of a timeline row, then the claim's: a record of one host
+            # cited by a finding about another is that host's row.
+            from core.forensic_citation import looks_like_host, record_host
+            parsed_host = (parsed.get("host") or "").strip()
+            host = (record_host(ev, case_hosts, case_dir)
+                    or (parsed_host if looks_like_host(parsed_host, case_hosts) else "")
+                    or claim_host).strip()
             user = (parsed.get("user") or "").strip()
             try:
                 from core.forensic_citation import evtxecmd_fields, host_mentioned
@@ -662,6 +1038,16 @@ def _build_attack_timeline_rows(
     return list(merged.values())
 
 
+def _confidence_label(f: dict[str, Any], language: str) -> str:
+    """A finding's confidence as the report shows it; a finding Atlas has put
+    under review says so, so it is not read as a settled one."""
+    conf = str(f.get("confidence") or "UNCONFIRMED")
+    if f.get("status") == "needs_review":
+        from core.report_i18n import t
+        conf += f", {t('under_review', language)}"
+    return conf
+
+
 def _is_gap_only_finding(f: dict[str, Any]) -> bool:
     from core.evidence_noise import looks_like_evidence_gap_statement
     stmt = (f.get("statement") or "") + " " + (f.get("description") or "")
@@ -701,7 +1087,7 @@ def attack_timeline_readiness(
         host=host,
     )
     packs = resolve_nodes_evidence(root, findings)
-    rows = _build_attack_timeline_rows(findings, packs)
+    rows = _build_attack_timeline_rows(findings, packs, known_hosts=_case_hosts(root), case_dir=root)
     findings_on_timeline = {r.get("finding") for r in rows}
     findings_without_direct = []
     findings_with_refs_but_no_rows = []
@@ -769,8 +1155,11 @@ def assemble_client_report(
     *,
     report_scope: str = "case",
     report_host: str = "",
+    compose: bool = True,
 ) -> str:
-    """Build the full client Markdown report with deterministic structure."""
+    """Build the full client Markdown report with deterministic structure.
+    ``compose=False`` makes no model call for the answers (the no-model
+    paths: the exit report, the deterministic fallback)."""
     from core.case_config import get_report_language
     from core.evidence_resolver import (
         format_evidence_markdown,
@@ -782,6 +1171,11 @@ def assemble_client_report(
     from core.report_projection import bind_claims_to_sections
 
     root = Path(case_dir).resolve()
+    from core.report_projection import prepare_report_inputs, report_inputs_at_render
+    if report_inputs_at_render():
+        # The next steps and the indicator files this report shows, prepared
+        # here where every writer path assembles its report.
+        prepare_report_inputs(root)
     language = get_report_language(root)
     case_id = detect_case_id(root) or root.name
     scope = (report_scope or "case").lower()
@@ -891,12 +1285,16 @@ def assemble_client_report(
                 f"Key Findings and Detailed Findings."
             )
             parts.append("")
+    parts.extend(_exec_next_steps(root, language, scope=scope, host=host))
     parts.append("")
 
     # ---- Answers to the Investigation Questions ----
     parts.append(f"## {answers_title}")
     parts.append("")
-    parts.extend(_answers_section(root, findings, language, narratives))
+    answers_stats: dict[str, Any] = {}
+    parts.extend(_answers_section(root, findings, language, narratives, compose=compose,
+                                  answers_stats=answers_stats))
+    _write_answers_stats(root, answers_stats)
 
     # ---- 2. Scope and Evidence ----
     parts.append(f"## {titles['scope_evidence']}")
@@ -1018,7 +1416,7 @@ def assemble_client_report(
         for f in key_findings:
             fid = f.get("finding_id") or f.get("id") or "?"
             title = _short_title(f, narratives.get(str(fid)) or {}, with_host=False)
-            conf = f.get("confidence") or "UNCONFIRMED"
+            conf = _confidence_label(f, language)
             h = (f.get("host") or "—").replace("|", "/")
             when = _when_of(f.get("statement") or "") or "—"
             parts.append(
@@ -1042,12 +1440,12 @@ def assemble_client_report(
     by_node = {str(x.get("id")): x for x in findings if x.get("id")}
 
     def _fid_tier(x: dict) -> str:
-        return f"{x.get('finding_id') or x.get('id')} [{str(x.get('confidence') or 'UNCONFIRMED')}]"
+        return f"{x.get('finding_id') or x.get('id')} [{_confidence_label(x, language)}]"
 
     for f in findings:
         fid = str(f.get("finding_id") or f.get("id") or "?")
         nid = f.get("id") or ""
-        conf = str(f.get("confidence") or "UNCONFIRMED")
+        conf = _confidence_label(f, language)
         stmt = (f.get("statement") or "").strip()
         nar = narratives.get(fid) or {}
         summary = _md_inline(nar.get("summary") or "") or _md_inline(stmt)
@@ -1071,7 +1469,7 @@ def assemble_client_report(
         body = ""
         if pack:
             body = format_evidence_markdown(
-                pack, compact=True, limit=3, known_hosts=case_hosts,
+                pack, compact=True, limit=3, known_hosts=case_hosts, case_dir=root,
             ).rstrip()
         parts.append(body or "*No record could be resolved for this "
                              "finding; the trace references below remain.*")
@@ -1108,7 +1506,7 @@ def assemble_client_report(
         "raw EVTX/session dump."
     )
     parts.append("")
-    tl_rows = _build_attack_timeline_rows(findings, packs)
+    tl_rows = _build_attack_timeline_rows(findings, packs, known_hosts=_case_hosts(root), case_dir=root)
     if not tl_rows:
         parts.append(
             "*No timestamped evidence events could be deterministically "
@@ -1140,9 +1538,15 @@ def assemble_client_report(
     )
 
     def _deterministic_gap_lines() -> list[str]:
+        from core.dependency_index import COVERAGE_REVIEW_NOTE, coverage_corrected
         gap_lines: list[str] = []
         for f in findings:
             fid = f.get("finding_id") or f.get("id")
+            if coverage_corrected(f):
+                # The coverage it states is what the recount corrected: not
+                # a standing gap.
+                gap_lines.append(f"- **{fid}**: {COVERAGE_REVIEW_NOTE}")
+                continue
             for g in f.get("gaps") or []:
                 gap_lines.append(f"- **{fid}**: {_md_inline(g)}")
             if f.get("status") == "needs_review":
@@ -1166,6 +1570,72 @@ def assemble_client_report(
         item_gaps = _item_gap_lines(root, language)
     except Exception:  # noqa: BLE001
         item_gaps = []
+    # High-value artifacts the case lists that nobody read, each with the
+    # reason the run recorded, the read that failed, or that there is
+    # neither (core.artifact_value.gap_lines).
+    try:
+        from core.artifact_value import gap_lines as _artifact_gap_lines
+        item_gaps += _artifact_gap_lines(root, language, named="\n".join(item_gaps),
+                                         host=host if scope == "host" else "")
+    except Exception:  # noqa: BLE001
+        pass
+    # Indicators the findings name that were not searched for in every
+    # relevant source (core.ioc_pivots.gap_lines).
+    try:
+        from core.ioc_pivots import gap_lines as _pivot_gap_lines
+        item_gaps += _pivot_gap_lines(root, language, host=host if scope == "host" else "")
+    except Exception:  # noqa: BLE001
+        pass
+    # What code states whatever a model wrote: the report gate's issues a
+    # run ended with and the window's residual risk (hosts with attacker
+    # activity and no stated start).
+    try:
+        from core.investigation_exit import open_limit_lines
+        if scope != "host":
+            item_gaps += [f"- {line}" for line in open_limit_lines(root)]
+    except Exception:  # noqa: BLE001
+        pass
+    # The work order's planned reads not done: due, failed, moot and
+    # proposals never adopted (core.work_order.report_lines).
+    try:
+        from core.deferred_intents import work_order_on
+        if work_order_on():
+            from core.execution_log import log as _wlog
+            from core.work_order import report_lines as _order_lines
+            item_gaps += _order_lines(_wlog, str(root))
+    except Exception:  # noqa: BLE001
+        pass
+    # Findings a gate refused that were never recorded again, and those the
+    # analyst withdrew with a reason (core.work_order.refused_report_lines).
+    try:
+        if scope != "host":
+            from core.execution_log import log as _rlog
+            from core.work_order import refused_report_lines
+            item_gaps += refused_report_lines(_rlog, str(root))
+    except Exception:  # noqa: BLE001
+        pass
+    # The extracted outputs with files no call read, each such class with
+    # the count read, from the trace (core.coverage_ledger.extracted_outputs).
+    try:
+        if scope != "host":
+            from core.coverage_ledger import extracted_lines, extracted_outputs
+            item_gaps += [f"- Extracted output not wholly read: {ln}"
+                          for ln in extracted_lines(extracted_outputs(root))]
+    except Exception:  # noqa: BLE001
+        pass
+    # The pictures a vision model described (tools.images, the case switch on):
+    # named here so the reader knows which descriptions came from a model.
+    try:
+        if scope != "host":
+            item_gaps += described_picture_lines(root)
+    except Exception:  # noqa: BLE001
+        pass
+    # The pictures no model could identify by their content, and why.
+    try:
+        if scope != "host":
+            item_gaps += undescribed_picture_lines(root)
+    except Exception:  # noqa: BLE001
+        pass
     use_llm_gaps = (
         gaps_prose
         and "Supporting Evidence (deterministic)" not in gaps_prose
@@ -1199,6 +1669,36 @@ def assemble_client_report(
         else:
             parts.append(t("no_gaps", language))
             parts.append("")
+    # Every handed-over item and class left or partly read, with its checked
+    # reason (core.evidence_disposition), under the gaps.
+    try:
+        from core.evidence_disposition import disposition_on, report_lines as _ed_lines
+        if disposition_on():
+            parts.extend(_ed_lines(root, language, host=host if scope == "host" else ""))
+    except Exception:  # noqa: BLE001
+        pass
+
+    # Observations the incident map keeps: facts with their basis that serve
+    # no question and take no side. Their own section, never the answers.
+    try:
+        from core import incident_map as _im
+        _m = _im.open(root)
+        _obs = [o for o in (_m.observations() if _m is not None else [])
+                if o["text"] and (scope != "host" or str(o["host"]).casefold() == host.casefold())]
+    except Exception:  # noqa: BLE001
+        _obs = []
+    if _obs:
+        parts.append(f"## {t('observations_title', language)}")
+        parts.append("")
+        for o in _obs:
+            where = " ".join(x for x in (o["host"], o["time"]) if x)
+            calls = f" (calls {', '.join(str(c) for c in o['call_ids'][:6])})" if o["call_ids"] else ""
+            # The rows the observation rests on, beside the model's words:
+            # an observation passes no finding gate, so its basis is shown.
+            rows = "; ".join(f'"{_md_inline(q)}"' for q in o.get("quotes") or [])
+            rows = f" ({t('observation_rows', language)}: {rows})" if rows else ""
+            parts.append(f"- {where + ': ' if where else ''}{_md_inline(o['text'])}{calls}{rows}")
+        parts.append("")
 
     # ---- 7. Recommendations ----
     parts.append(f"## {titles['recommendations']}")
@@ -1223,9 +1723,12 @@ def assemble_client_report(
         _cid = detect_case_id(root) or "case"
         parts.append(f"## {t('indicators', language)}")
         parts.append("")
-        parts.append(t("ind_frame_subject" if _cat.get("frame") == "subject" else "ind_frame_incident", language))
+        parts.append(t({"subject": "ind_frame_subject", "neutral": "ind_frame_neutral"}.get(
+            str(_cat.get("frame") or ""), "ind_frame_incident"), language))
         _uses = ", ".join(f"{n} {t('use_' + u, language)}" for u, n in sorted((_cat.get("by_use") or {}).items()))
-        if _cat.get("total"):
+        if _cat.get("sighted"):
+            parts.extend(_sighted_indicator_lines(_cat, language, report_scope, report_host))
+        elif _cat.get("total"):
             parts.append(t("ind_counts", language).format(
                 total=_cat["total"], uses=_uses, affected=_cat.get("affected_total") or 0,
                 review=_cat.get("review_total") or 0))
@@ -1323,3 +1826,64 @@ def assemble_client_report(
         )
     parts.append("")
     return "\n".join(parts).rstrip() + "\n"
+
+
+def undescribed_picture_lines(root) -> list[str]:
+    """One line per extracted output's picture class (tools.images
+    .PICTURE_TYPES) while no picture can be described (tools.images
+    .unavailable): "- <n> pictures in <folder> (<class>) were not
+    identified by their content: <reason>", n the class's files, read or
+    not. [] when descriptions can run, and under a handling stop (no
+    picture of such a case is ever sent; the stop's own line says so)."""
+    from tools.images import PICTURE_TYPES, unavailable
+    try:
+        from core import handling_stop as hs
+        if hs.state(root):
+            return []
+    except Exception:  # noqa: BLE001
+        pass
+    reason = unavailable(root)
+    if not reason:
+        return []
+    from core.coverage_ledger import extracted_outputs, shown_name
+    out = []
+    for o in extracted_outputs(root):
+        for label, (_read, total) in sorted((o.get("classes") or {}).items()):
+            if str(label).lower().lstrip(".") in PICTURE_TYPES and total:
+                out.append(f"- {total} picture{'s' if total != 1 else ''} in {shown_name(o['path'], quote=False)} "
+                           f"({label}) {'were' if total != 1 else 'was'} not identified by their content: {reason}")
+    return out
+
+
+def described_picture_lines(root) -> list[str]:
+    """One line per vision model that described pictures in this run, from
+    the trace's successful images.describe calls: "- Pictures described by
+    a vision model (<model>): <paths>", the paths through shown_name;
+    [] when no call succeeded."""
+    import json as _json
+    from pathlib import Path as _Path
+    from core.coverage_ledger import _trace_or_log, listed_tool_name, shown_name
+    try:
+        # The case's trace, as every other report line reads it: a report
+        # assembled in a later process sees the same calls.
+        entries = [e for e in _trace_or_log(None, _Path(root))
+                   if e.get("type") == "tool_call" and e.get("success") is True
+                   and listed_tool_name(str(e.get("mcp_tool") or e.get("cmd") or "")) == "images_describe"]
+    except Exception:  # noqa: BLE001
+        return []
+    by_model: dict[str, list[str]] = {}
+    for e in entries:
+        try:
+            args = e.get("args")
+            args = _json.loads(args) if isinstance(args, str) else (args or {})
+        except ValueError:
+            args = {}
+        paths = args.get("image_path") if isinstance(args, dict) else None
+        paths = [paths] if isinstance(paths, str) else [str(p) for p in (paths or []) if p]
+        m = re.search(r'"model":\s*"([^"\\]{1,120})"', str(e.get("stdout_excerpt") or ""))
+        model = m.group(1) if m else "model not recorded"
+        for p in paths:
+            if p not in by_model.setdefault(model, []):
+                by_model[model].append(p)
+    return [f"- Pictures described by a vision model ({shown_name(model, quote=False)}): "
+            + ", ".join(shown_name(p) for p in paths) for model, paths in sorted(by_model.items())]

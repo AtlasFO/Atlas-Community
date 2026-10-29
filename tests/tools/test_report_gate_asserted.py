@@ -21,6 +21,14 @@ MISCITED = ("Beacon traffic to 203.0.113.9 from the workstation was established 
 SUPPORTED = "Process svc_update.exe on the workstation held an outbound connection"
 
 
+@pytest.fixture(autouse=True)
+def _lowering_path(monkeypatch):
+    """These tests pin the citation blocker, the streak and the lowering: the
+    path ATLAS_CITATION_DISCLOSURE off restores. With the switch on, the
+    report-time check discloses instead (tests/tools/test_report_citation_disclosure.py)."""
+    monkeypatch.setenv("ATLAS_CITATION_DISCLOSURE", "0")
+
+
 @pytest.fixture
 def case(tmp_path):
     (tmp_path / ".atlas").mkdir()
@@ -69,6 +77,7 @@ def _citation_issues(verdict):
     return [i for i in verdict["blocking_issues"] if "identifiers they rest on" in i]
 
 
+@pytest.mark.usefixtures("todays_report_check")
 class TestWithdrawnClaimsStopCounting:
     def test_an_asserted_miscited_finding_blocks(self, log, case):
         """The genuine catch: the cited call shows none of the finding's

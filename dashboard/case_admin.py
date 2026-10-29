@@ -18,8 +18,10 @@ function here to call — it's new code following that established pattern.
 from __future__ import annotations
 
 import datetime
+import os
 import re
 import shutil
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 
@@ -36,14 +38,20 @@ class CaseAdminError(Exception):
     """Raised for validation/precondition failures — safe to show the admin."""
 
 
-def _sync_tasks(case_dir: Path, case_id: str) -> None:
+def _sync_tasks(case_dir: Path) -> None:
     """Reconcile CASE.md's Investigation Requests into the task store right
     away, so the dashboard Questions tab reflects them immediately instead
     of only after `atlas run`/`rerun` (the only other caller of
     reconcile_case_md, in core/incremental.py). Best-effort: a case is
-    still successfully created/saved even if this sync step trips."""
+    still successfully created/saved even if this sync step trips.
+
+    The store's case id follows the rule a run uses (resolve_case_id: the
+    brief's Case ID line, else the folder name). The dashboard names a case
+    by its folder, and passing that would rewrite the id of every case whose
+    brief names another one, until the next run wrote it back."""
     try:
-        reconcile_case_md(case_dir, case_id=case_id)
+        from core.incremental import resolve_case_id
+        reconcile_case_md(case_dir, case_id=resolve_case_id(case_dir))
     except Exception:
         pass
 
@@ -119,7 +127,7 @@ def create_case(cases_root: str, case_id: str,
                     r"(## Investigation Requests\n)",
                     lambda m: m.group(1) + bullets + "\n", text, count=1)
         case_md.write_text(text, encoding="utf-8")
-    _sync_tasks(dest, case_id)
+    _sync_tasks(dest)
     if language:
         set_report_language(dest, language)
     return dest
@@ -129,12 +137,58 @@ def _timestamp() -> str:
     return datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
-def _refuse_if_running(case_dir: Path) -> None:
-    """The dashboard never holds a case's run lock itself, so a held lock is
-    always a live run (started here or from the command line)."""
-    from core import run_lock
-    if run_lock.is_locked(case_dir):
+class PurgeIncomplete(CaseAdminError):
+    """A purge moved the case out of the case list but could not remove it."""
+
+
+def _refuse_if_busy(cases_root: str, case_id: str) -> None:
+    """Refuse a delete or rename of a case with a live run before anything
+    is touched: the unmount and the chat close that come next would pull a
+    running investigation's evidence mounts and end its chat worker. The
+    manager's lock is held only to read the reason; _while_idle checks again
+    under the lock right before the folder moves."""
+    from dashboard import run_manager
+    with run_manager.MANAGER.held(cases_root, case_id) as busy:
+        pass
+    if busy:
         raise CaseAdminError("refusing: a run is in progress for this case")
+
+
+@contextmanager
+def _while_idle(cases_root: str, case_id: str):
+    """Run the block with the run manager's lock held and the case idle: a
+    run this dashboard just started counts from its spawn on (before the
+    child takes the run lock), a run from the command line by its pid or
+    its run lock, and no new start can slip in between the check and the
+    folder change."""
+    from dashboard import run_manager
+    with run_manager.MANAGER.held(cases_root, case_id) as busy:
+        if busy:
+            raise CaseAdminError("refusing: a run is in progress for this case")
+        yield
+
+
+def _refuse_other_filesystem(case_dir: Path, cases_root: str) -> None:
+    """The folder change under the run manager's lock must be a rename: a
+    case folder on another filesystem than the cases root (its own mount)
+    would be copied, evidence and all, while every status read waits."""
+    if os.stat(case_dir).st_dev != os.stat(cases_root).st_dev:
+        raise CaseAdminError("refusing: the case folder is on another filesystem "
+                             "than the cases root; move it by hand")
+
+
+def _rename(src: Path, dest: Path) -> None:
+    try:
+        os.rename(src, dest)
+    except OSError as exc:
+        raise CaseAdminError(f"could not move the case folder: {exc}") from exc
+
+
+def _close_chat(case_id: str) -> None:
+    """An Ask Atlas worker runs with the case folder as its working
+    directory; it is ended before the folder moves."""
+    from dashboard import chat
+    chat.MANAGER.close_case(case_id)
 
 
 def _refuse_if_mounted(case_dir: Path) -> None:
@@ -145,58 +199,93 @@ def _refuse_if_mounted(case_dir: Path) -> None:
             + ", ".join(result["remaining"]))
 
 
-def delete_case(cases_root: str, case_id: str, *, purge: bool = False) -> dict:
+def delete_case(cases_root: str, case_id: str, *, purge: bool = False,
+                on_committed=None) -> dict:
     """Default: moves the case directory to <cases_root>/.deleted/<id>-<ts>/
-    (recoverable). purge=True hard-deletes instead. Either way, refuses if
-    anything is still mounted under the case dir."""
+    (recoverable). purge=True removes it for good: renamed into .deleted/
+    first (the case leaves the list at once and the long removal runs
+    without any lock held), then deleted. Either way, refuses while a run
+    is live or anything is still mounted under the case dir.
+
+    `on_committed` is called once the case has left the case list (after
+    the rename), the point a purge cannot be taken back: the caller records
+    the deletion there, so a removal that fails half way is still on record."""
     src = _case_dir(cases_root, case_id)
     if not src.is_dir():
         raise CaseAdminError(f"no such case: {case_id!r}")
-    _refuse_if_running(src)
+    _refuse_if_busy(cases_root, case_id)
+    _refuse_other_filesystem(src, cases_root)
     _refuse_if_mounted(src)
-
-    if purge:
-        shutil.rmtree(src)
-        return {"success": True, "action": "purged", "case_id": case_id}
+    _close_chat(case_id)
 
     trash = Path(cases_root) / ".deleted"
     trash.mkdir(exist_ok=True)
-    dest = trash / f"{case_id}-{_timestamp()}"
-    shutil.move(str(src), str(dest))
+    dest = trash / f"{case_id}-{_timestamp()}{'-purging' if purge else ''}"
+    with _while_idle(cases_root, case_id):
+        _rename(src, dest)
+    if on_committed is not None:
+        on_committed()
+    if purge:
+        try:
+            shutil.rmtree(dest)
+        except OSError as exc:
+            raise PurgeIncomplete(
+                f"the case was moved to .deleted/{dest.name}, but removing it failed: "
+                f"{exc}; delete that folder by hand") from exc
+        return {"success": True, "action": "purged", "case_id": case_id}
     return {"success": True, "action": "moved_to_trash", "case_id": case_id,
             "location": str(dest)}
 
 
 def read_case_md(cases_root: str, case_id: str) -> dict:
-    """CASE.md content for the dashboard's view/edit panel. `exists=False`
-    with empty content if the case has no CASE.md yet (shouldn't normally
-    happen post-create_case, but a hand-made case directory can lack one)."""
+    """The brief for the dashboard's view/edit panel: the file the writer
+    replaces (CASE.md, else CLAUDE.md) and its version, which a save sends
+    back. `exists=False` with empty content if the case has no brief yet
+    (shouldn't normally happen post-create_case, but a hand-made case
+    directory can lack one)."""
+    from core.investigation_tasks import case_markdown_version, read_case_markdown
     case_dir = _case_dir(cases_root, case_id)
     if not case_dir.is_dir():
         raise CaseAdminError(f"no such case: {case_id!r}")
-    case_md = case_dir / "CASE.md"
-    if not case_md.is_file():
-        return {"exists": False, "content": ""}
-    content = case_md.read_text(encoding="utf-8")
-    return {"exists": True, "content": content, "unclosed_fence": unclosed_fence(content)}
+    exists = (case_dir / "CASE.md").is_file() or (case_dir / "CLAUDE.md").is_file()
+    content = read_case_markdown(case_dir)
+    return {"exists": exists, "content": content, "version": case_markdown_version(content),
+            "unclosed_fence": unclosed_fence(content) if exists else None}
 
 
-def write_case_md(cases_root: str, case_id: str, content: str) -> dict:
-    """Overwrites CASE.md for `case_id` — the dashboard editor's save action.
+class BriefConflict(CaseAdminError):
+    """The brief changed after the editor read it: carries what is there now."""
 
-    Unlike create_case's own CASE.md write (a fresh file with no concurrent
-    reader yet), this can race an in-progress run reading the same file —
-    write-to-temp-then-replace so a reader never sees a half-written file.
+    def __init__(self, current: str, version: str):
+        super().__init__("someone else saved the brief after you opened it")
+        self.current = current
+        self.version = version
+
+
+def write_case_md(cases_root: str, case_id: str, content: str, version: str) -> dict:
+    """Replaces the brief for `case_id` — the dashboard editor's save action.
+
+    `version` is the version of the text the editor started from (read_case_md
+    returned it). When the brief has changed since — another user's save, a
+    question added in the start dialog, `atlas rerun -q` — nothing is written
+    and BriefConflict carries the current text, so a stale tab never erases
+    someone else's change. The write itself is the shared atomic replace, so
+    a run reading the brief never sees half a file.
     """
-    from core.investigation_tasks import write_case_markdown
+    from core.investigation_tasks import CaseMarkdownConflict, write_case_markdown
     case_dir = _case_dir(cases_root, case_id)
     if not case_dir.is_dir():
         raise CaseAdminError(f"no such case: {case_id!r}")
-    write_case_markdown(case_dir, content)
-    _sync_tasks(case_dir, case_id)
+    try:
+        write_case_markdown(case_dir, content, base_version=version)
+    except CaseMarkdownConflict as exc:
+        raise BriefConflict(exc.current, exc.version) from exc
+    _sync_tasks(case_dir)
+    from core.investigation_tasks import case_markdown_version
     # A ``` line that never closes hides the rest of the brief from every
     # parser: the editor says so instead of a plain "Saved.".
-    return {"success": True, "unclosed_fence": unclosed_fence(content)}
+    return {"success": True, "version": case_markdown_version(content),
+            "unclosed_fence": unclosed_fence(content)}
 
 
 def append_to_brief(cases_root: str, case_id: str, *,
@@ -206,31 +295,37 @@ def append_to_brief(cases_root: str, case_id: str, *,
     like any other. A case without a brief yet gets the template's."""
     from core.case_autofill import append_requests, clean_bullets
     from core.case_knowledge import append_facts_text, facts_in
-    from core.investigation_tasks import parse_case_requests, write_case_markdown
+    from core.investigation_tasks import edit_case_markdown, parse_case_requests
 
     case_dir = _case_dir(cases_root, case_id)
     if not case_dir.is_dir():
         raise CaseAdminError(f"no such case: {case_id!r}")
-    case_md = case_dir / "CASE.md"
-    if case_md.is_file():
-        text = case_md.read_text(encoding="utf-8")
+    if (case_dir / "CASE.md").is_file() or (case_dir / "CLAUDE.md").is_file():
+        start_of = lambda text: text
     else:
         template = _CASE_TEMPLATE / "CASE.md"
-        text = (template.read_text(encoding="utf-8").replace("<CASE_ID>", case_id)
-                if template.is_file()
-                else f"# Case: {case_id}\n\n**Case ID:** {case_id}\n")
-    before_requests = len(parse_case_requests(text))
-    before_facts = len(facts_in(text))
-    out = append_requests(text, clean_bullets(list(requests)))
-    out = append_facts_text(out, list(facts))
+        blank = (template.read_text(encoding="utf-8").replace("<CASE_ID>", case_id)
+                 if template.is_file()
+                 else f"# Case: {case_id}\n\n**Case ID:** {case_id}\n")
+        start_of = lambda _text: blank
+
+    def _append(text: str) -> str:
+        start = start_of(text)
+        out = append_facts_text(append_requests(start, clean_bullets(list(requests))),
+                                list(facts))
+        return out if out != start else text
+
+    # Read, append and replace as one step under the brief lock: a Brief
+    # save or a rerun landing in between is kept, never overwritten.
+    text, out = edit_case_markdown(case_dir, _append)
     if out == text:
         return {"success": True, "requests_added": 0, "facts_added": 0}
-    write_case_markdown(case_dir, out)
-    _sync_tasks(case_dir, case_id)
+    _sync_tasks(case_dir)
+    start = start_of(text)
     return {
         "success": True,
-        "requests_added": len(parse_case_requests(out)) - before_requests,
-        "facts_added": len(facts_in(out)) - before_facts,
+        "requests_added": len(parse_case_requests(out)) - len(parse_case_requests(start)),
+        "facts_added": len(facts_in(out)) - len(facts_in(start)),
     }
 
 
@@ -243,16 +338,20 @@ def move_case(cases_root: str, case_id: str, new_case_id: str) -> dict:
         raise CaseAdminError(f"no such case: {case_id!r}")
     if dest.exists():
         raise CaseAdminError(f"a case named {new_case_id!r} already exists")
-    _refuse_if_running(src)
+    _refuse_if_busy(cases_root, case_id)
+    _refuse_other_filesystem(src, cases_root)
     _refuse_if_mounted(src)
+    _close_chat(case_id)
 
-    shutil.move(str(src), str(dest))
-    case_md = dest / "CASE.md"
-    if case_md.is_file():
-        text = case_md.read_text(encoding="utf-8")
-        updated = re.sub(
-            r"(\*\*Case ID:?\*\*[:\s|]+)" + re.escape(case_id) + r"\b",
-            r"\1" + new_case_id, text)
-        if updated != text:
-            case_md.write_text(updated, encoding="utf-8")
+    with _while_idle(cases_root, case_id):
+        if dest.exists():
+            raise CaseAdminError(f"a case named {new_case_id!r} already exists")
+        _rename(src, dest)
+    from core.investigation_tasks import edit_case_markdown
+    # The rename carries the brief's Case ID line along when it named the
+    # folder; the task store then follows the brief, as a run would.
+    edit_case_markdown(dest, lambda text: re.sub(
+        r"(\*\*Case ID:?\*\*[:\s|]+)" + re.escape(case_id) + r"\b",
+        lambda m: m.group(1) + new_case_id, text))
+    _sync_tasks(dest)
     return {"success": True, "case_id": new_case_id, "previous_id": case_id}

@@ -16,6 +16,7 @@ The timeout entry is also logged via `execution_log.record_call_abandoned` so
 the dashboard surfaces it as a `call_abandoned` event.
 """
 from __future__ import annotations
+import contextvars
 import functools
 import sys
 import threading
@@ -65,8 +66,12 @@ def with_tool_timeout(seconds: int | Callable[..., int],
                 except BaseException as e:  # noqa: BLE001 — re-raised after join
                     box["error"] = e
 
+            # The body runs in the caller's context (a copy): the call's action
+            # id and evidence reference reach every trace entry the body logs,
+            # so the middleware stamps them as this call's own entries.
+            ctx = contextvars.copy_context()
             t = threading.Thread(
-                target=_runner,
+                target=lambda: ctx.run(_runner),
                 daemon=True,
                 name=f"atlas-timeout:{tool_label}",
             )
@@ -112,3 +117,27 @@ def with_tool_timeout(seconds: int | Callable[..., int],
 
         return wrapper
     return deco
+
+
+def inprocess_deadline_on() -> bool:
+    """A per-call deadline in the in-process record loops
+    (ATLAS_INPROCESS_DEADLINE)."""
+    from core.envfile import env_flag
+    return env_flag("ATLAS_INPROCESS_DEADLINE", True)
+
+
+def evtx_deadline_seconds(path: str, requested: int = 0) -> int:
+    """The per-call deadline of a python-evtx record loop: the subprocess
+    rule's floor (ATLAS_DEFAULT_TIMEOUT) and never less than the event-log
+    filter's own budget, which grows with the log's size (60 s plus half a
+    second per MB, at most 900 s, at least what the call asked for). The
+    reader's throughput is records, not bytes, so the general byte rate of
+    core.paths.scale_timeout does not fit it."""
+    import os
+    from core.paths import DEFAULT_TIMEOUT
+    try:
+        size_mb = os.path.getsize(path) / (1024 * 1024)
+    except OSError:
+        size_mb = 0.0
+    budget = int(min(900, max(int(requested or 0), 60 + size_mb * 0.5)))
+    return max(int(DEFAULT_TIMEOUT), budget)

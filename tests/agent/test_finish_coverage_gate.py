@@ -33,6 +33,19 @@ def _bare_agent(case_dir: str):
 
 
 class TestFinishCoverageCheck:
+    """The deferral on the coverage ledger (ATLAS_WORK_ORDER off; with it
+    on the deferral is keyed on the work order's due items)."""
+
+    @staticmethod
+    def setup_method(_m):
+        import os
+        os.environ["ATLAS_WORK_ORDER"] = "0"
+
+    @staticmethod
+    def teardown_method(_m):
+        import os
+        os.environ.pop("ATLAS_WORK_ORDER", None)
+
     def test_first_finish_deferred_with_gaps(self, tmp_path):
         case = _case_with_open_ledger(tmp_path)
         a = _bare_agent(str(case))
@@ -40,6 +53,16 @@ class TestFinishCoverageCheck:
         assert "deferred" in msg
         assert "NOT a hard stop" in msg
         assert "vpn_auth.csv" in msg
+
+    def test_the_unread_extracted_classes_come_under_the_one_head_the_work_order_finish_uses(self, tmp_path,
+                                                                                              monkeypatch):
+        import core.coverage_ledger as cl
+        case = _case_with_open_ledger(tmp_path)
+        monkeypatch.setattr(cl, "extracted_outputs", lambda _c, **kw: [{
+            "path": "exports/carve", "made": "", "classes": {"jpg": [0, 2]}, "blocked": "", "open": ["jpg"],
+            "sample": {"jpg": "exports/carve/jpg/a.jpg"}}])
+        msg = _bare_agent(str(case))._finish_coverage_check(wall_expired=False)
+        assert cl.EXTRACTED_OPEN_HEAD + "\n  - exports/carve: read \"exports/carve/jpg/a.jpg\" (jpg, 0 of 2 read)" in msg
 
     def test_second_finish_always_passes(self, tmp_path):
         """The deferral is one-shot — it can never deadlock the run."""

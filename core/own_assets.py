@@ -77,8 +77,11 @@ def _other_side(text: str, pos: int) -> bool:
     return bool(_OTHER_SIDE_RE.search(" ".join(text[lo:pos].split()[-3:])))
 
 
-def _forms(host: str) -> list[re.Pattern[str]]:
-    h, ip = r"\b" + re.escape(host) + r"\b", r"(?P<ip>" + _IPV4 + r")"
+def _forms(name: str, alone: bool = False) -> list[re.Pattern[str]]:
+    """The apposition shapes for one host name. ``alone``: the name may not
+    sit inside a longer dashed name ("ws01" is not "OTHER-WS01")."""
+    h = (r"(?<![\w-])" + re.escape(name) + r"(?![\w-])") if alone else r"\b" + re.escape(name) + r"\b"
+    ip = r"(?P<ip>" + _IPV4 + r")"
     return [re.compile(p, re.I) for p in (
         rf"{h}\s*\(\s*(?:(?:ip|ipv4|address|adresse)\s*:?\s*)?{ip}\s*\)",
         rf"{ip}\s*\(\s*(?:(?:host|hostname|rechner)\s*:?\s*)?{h}\s*\)",
@@ -87,11 +90,28 @@ def _forms(host: str) -> list[re.Pattern[str]]:
         rf"{h}['’]s\s+(?:ip|ip address|address)\s+(?:is\s+)?{ip}\b")]
 
 
+def _short_names(hosts: list[str]) -> dict[str, str]:
+    """The names a labelled machine calls itself (forensic_citation.
+    host_name_forms) that may bind for it: a form carrying a digit
+    ("ws01" of CASE-WS01), never a bare word ("mail" of CORP-MAIL names
+    any mail server), and never one two labels share."""
+    from core.forensic_citation import host_name_forms
+    owners: dict[str, set[str]] = {}
+    for host in hosts:
+        for form in host_name_forms(host):
+            if any(c.isdigit() for c in form) and form != host.casefold():
+                owners.setdefault(form, set()).add(host)
+    return {form: next(iter(hs)) for form, hs in owners.items() if len(hs) == 1}
+
+
 def bind_appositions(statement: str, hosts: Iterable[str]) -> list[tuple[str, str]]:
-    """``(host, address)`` pairs the statement states as identities."""
+    """``(host, address)`` pairs the statement states as identities. A host
+    is written by its label or by a short name it calls itself."""
     text, out = str(statement or ""), set()
-    for host in filter(None, hosts):
-        for rx in _forms(host):
+    hosts = [h for h in hosts if h]
+    names = [(h, h, False) for h in hosts] + [(f, h, True) for f, h in _short_names(hosts).items()]
+    for name, host, alone in names:
+        for rx in _forms(name, alone):
             for m in rx.finditer(text):
                 if not _CLAUSE_END_RE.search(m.group(0)) and not _other_side(text, m.start("ip")):
                     out.add((host, m.group("ip")))

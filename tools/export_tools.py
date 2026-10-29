@@ -23,8 +23,6 @@ installed it is used as a validation pass, never as a hard dependency.
 """
 from __future__ import annotations
 
-import csv
-import io
 import json
 import os
 import re
@@ -48,29 +46,11 @@ _TIER_COLOR = {"CONFIRMED": "#ff0000", "LIKELY": "#ff6600",
 _TIER_ORDER = {"CONFIRMED": 0, "LIKELY": 1, "SUSPECTED": 2,
                "UNCONFIRMED": 3}
 
-_IOC_TIERS = {"CONFIRMED", "LIKELY"}
 
 _TID_RE = re.compile(r"\bT\d{4}(?:\.\d{3})?\b")
 
-# ── IOC extraction (Atlas-side; Mulder's lives in its renderer) ──────────────
-
-_IOC_PATTERNS: tuple[tuple[str, re.Pattern], ...] = (
-    ("sha256", re.compile(r"\b[a-fA-F0-9]{64}\b")),
-    ("sha1", re.compile(r"\b[a-fA-F0-9]{40}\b")),
-    ("md5", re.compile(r"\b[a-fA-F0-9]{32}\b")),
-    ("url", re.compile(r"\bhttps?://[^\s'\"<>)\]]+")),
-    ("email", re.compile(r"\b[\w.+-]+@[\w-]+(?:\.[\w-]+)+\b")),
-    ("ipv4", re.compile(
-        r"\b(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}"
-        r"(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\b")),
-    # Conservative TLD allowlist — a broad domain regex drowns the export
-    # in filenames and prose abbreviations.
-    ("domain", re.compile(
-        r"\b(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+"
-        r"(?:com|net|org|io|ru|cn|de|info|biz|onion|xyz|top|cc|me|co|uk|"
-        r"fr|nl|eu|su|ws|tk)\b", re.IGNORECASE)),
-)
-
+# The STIX pattern per catalogue type: an address by its family, a file hash
+# by its length, a registry key and an account by their STIX object types.
 _STIX_PATTERNS = {
     "ipv4": "[ipv4-addr:value = '{v}']",
     "ipv6": "[ipv6-addr:value = '{v}']",
@@ -80,7 +60,26 @@ _STIX_PATTERNS = {
     "sha1": "[file:hashes.'SHA-1' = '{v}']",
     "sha256": "[file:hashes.'SHA-256' = '{v}']",
     "email": "[email-addr:value = '{v}']",
+    "registry": "[windows-registry-key:key = '{v}']",
+    "account": "[user-account:account_login = '{v}']",
 }
+# The uses a STIX indicator stands for: what a responder acts on.
+_EXPORT_USES = ("block", "contain", "hunt", "request")
+
+
+def _stix_kind(row: dict) -> str:
+    kind, value = str(row.get("category") or ""), str(row.get("value") or "")
+    if kind == "ip":
+        return "ipv6" if ":" in value else "ipv4"
+    if kind == "hash":
+        return {32: "md5", 40: "sha1", 64: "sha256"}.get(len(value), "")
+    return kind if kind in _STIX_PATTERNS else ""
+
+
+def _stix_time(stamp: str, fallback: str) -> str:
+    """A catalogue time ("2031-03-01 08:12:00") as STIX's timestamp."""
+    m = re.match(r"(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})", str(stamp or ""))
+    return f"{m.group(1)}T{m.group(2)}.000Z" if m else fallback
 
 
 def _findings(trace_path: Optional[str] = None) -> tuple[str, list[dict]]:
@@ -103,41 +102,6 @@ def _findings(trace_path: Optional[str] = None) -> tuple[str, list[dict]]:
             asserted_finding_entries(
                 [e for e in log._entries if e.get("type") == "finding"],
                 log.case_dir()))
-
-
-def extract_iocs(findings: list[dict]) -> list[dict]:
-    """Classified IOCs from CONFIRMED/LIKELY finding descriptions.
-
-    Each IOC carries its tier, a description snippet as context, and the
-    finding's call_id so the export stays citable.
-    """
-    out: list[dict] = []
-    seen: set[tuple[str, str]] = set()
-    for f in findings:
-        tier = (f.get("confidence") or "").upper()
-        if tier not in _IOC_TIERS:
-            continue
-        desc = str(f.get("description") or "")
-        claimed: list[tuple[int, int]] = []  # spans already matched
-        for ioc_type, rx in _IOC_PATTERNS:
-            for m in rx.finditer(desc):
-                span = (m.start(), m.end())
-                # hashes/urls/emails claim their span so the looser ipv4/
-                # domain patterns don't re-match fragments of them
-                if any(s <= span[0] and span[1] <= e for s, e in claimed):
-                    continue
-                claimed.append(span)
-                value = m.group(0)
-                key = (ioc_type, value.lower())
-                if key in seen:
-                    continue
-                seen.add(key)
-                out.append({
-                    "type": ioc_type, "value": value, "severity": tier,
-                    "context": desc[:160],
-                    "finding_call_id": f.get("call_id"),
-                })
-    return out
 
 
 def _finding_techniques(f: dict) -> list[dict]:
@@ -218,11 +182,15 @@ def build_navigator_layer(case_id: str, findings: list[dict],
 
 # ── STIX 2.1 bundle ──────────────────────────────────────────────────────────
 
-def build_stix_bundle(case_id: str, findings: list[dict]) -> dict:
-    """STIX 2.1 bundle: identity, one indicator per unique IOC, one
-    attack-pattern per unique technique, and indicator --indicates-->
-    attack-pattern relationships for IOC/technique pairs that co-occur in
-    the same finding (Mulder's identity-as-source_ref bug fixed)."""
+def build_stix_bundle(case_id: str, findings: list[dict], catalog: dict | None = None) -> dict:
+    """STIX 2.1 bundle from the indicator catalogue (core.ioc_catalog): one
+    indicator per row a located sighting stands behind and a responder acts
+    on (block, contain, hunt or request), its valid_from the first time the
+    evidence shows it and its description the role, the standing, the
+    sighting hosts and calls, the mark and the findings; one attack-pattern
+    per technique of those findings; and indicator --indicates-->
+    attack-pattern relationships only for a row and a technique of the same
+    finding."""
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
     identity_id = f"identity--{uuid.uuid4()}"
     objects: list[dict] = [{
@@ -231,69 +199,65 @@ def build_stix_bundle(case_id: str, findings: list[dict]) -> dict:
         "name": f"Atlas Investigation {case_id}",
         "identity_class": "system",
     }]
-
-    indicator_ids: dict[str, str] = {}   # pattern → id
-    ap_ids: dict[str, str] = {}          # tid → id
+    by_claim = {str(f.get("claim_id")): f for f in findings if f.get("claim_id")}
+    indicator_ids: dict[str, str] = {}
+    ap_ids: dict[str, str] = {}
     rel_seen: set[tuple[str, str]] = set()
-
-    for f in findings:
-        if (f.get("confidence") or "").upper() not in _IOC_TIERS:
+    for row in (catalog or {}).get("iocs") or []:
+        if row.get("standing") not in ("cited", "same_host", "elsewhere"):
             continue
-        f_iocs = extract_iocs([f])
-        techs = _finding_techniques(f)
-
-        f_indicator_ids = []
-        for ioc in f_iocs:
-            tmpl = _STIX_PATTERNS.get(ioc["type"])
-            if not tmpl:
+        if not set(row.get("use") or []) & set(_EXPORT_USES):
+            continue
+        kind = _stix_kind(row)
+        if not kind:
+            continue
+        value = str(row["value"])
+        pattern = _STIX_PATTERNS[kind].format(v=value.replace("\\", "\\\\").replace("'", "\\'"))
+        if pattern not in indicator_ids:
+            ind_id = f"indicator--{uuid.uuid4()}"
+            indicator_ids[pattern] = ind_id
+            seen = "; ".join(f"{x.get('host') or 'host unresolved'} (call {x.get('call')})"
+                             for x in row.get("sightings") or [] if x.get("located"))
+            objects.append({
+                "type": "indicator", "spec_version": "2.1",
+                "id": ind_id, "created": now, "modified": now,
+                "name": value, "pattern": pattern, "pattern_type": "stix",
+                "valid_from": _stix_time(row.get("first_seen") or "", now),
+                "description": "; ".join(b for b in (
+                    f"role: {row.get('role')}", f"use: {' '.join(row.get('use') or [])}",
+                    f"standing: {row.get('standing')}", f"seen: {seen}" if seen else "",
+                    row.get("mark") or "", f"findings: {', '.join(row.get('claim_ids') or [])}") if b),
+                "created_by_ref": identity_id,
+                "labels": ["malicious-activity"],
+            })
+        ind_id = indicator_ids[pattern]
+        for cid in row.get("claim_ids") or []:
+            f = by_claim.get(str(cid))
+            if not f:
                 continue
-            pattern = tmpl.format(v=ioc["value"].replace("'", "\\'"))
-            if pattern not in indicator_ids:
-                ind_id = f"indicator--{uuid.uuid4()}"
-                indicator_ids[pattern] = ind_id
-                objects.append({
-                    "type": "indicator", "spec_version": "2.1",
-                    "id": ind_id, "created": now, "modified": now,
-                    "name": ioc["value"], "pattern": pattern,
-                    "pattern_type": "stix", "valid_from": now,
-                    "created_by_ref": identity_id,
-                    "labels": ["malicious-activity"],
-                })
-            f_indicator_ids.append(indicator_ids[pattern])
-
-        f_ap_ids = []
-        for tech in techs:
-            tid = tech["tid"]
-            if tid not in ap_ids:
-                ap_id = f"attack-pattern--{uuid.uuid4()}"
-                ap_ids[tid] = ap_id
-                objects.append({
-                    "type": "attack-pattern", "spec_version": "2.1",
-                    "id": ap_id, "created": now, "modified": now,
-                    "name": tech["name"],
-                    "external_references": [{
-                        "source_name": "mitre-attack",
-                        "external_id": tid,
-                        "url": (f"https://attack.mitre.org/techniques/"
-                                f"{tid.replace('.', '/')}/"),
-                    }],
-                })
-            f_ap_ids.append(ap_ids[tid])
-
-        # indicator --indicates--> attack-pattern, only for pairs grounded
-        # in the same finding (STIX 2.1 semantics; the Mulder bug fix).
-        for ind_id in f_indicator_ids:
-            for ap_id in f_ap_ids:
-                if (ind_id, ap_id) in rel_seen:
+            for tech in _finding_techniques(f):
+                tid = tech["tid"]
+                if tid not in ap_ids:
+                    ap_ids[tid] = f"attack-pattern--{uuid.uuid4()}"
+                    objects.append({
+                        "type": "attack-pattern", "spec_version": "2.1",
+                        "id": ap_ids[tid], "created": now, "modified": now,
+                        "name": tech["name"],
+                        "external_references": [{
+                            "source_name": "mitre-attack", "external_id": tid,
+                            "url": (f"https://attack.mitre.org/techniques/"
+                                    f"{tid.replace('.', '/')}/"),
+                        }],
+                    })
+                if (ind_id, ap_ids[tid]) in rel_seen:
                     continue
-                rel_seen.add((ind_id, ap_id))
+                rel_seen.add((ind_id, ap_ids[tid]))
                 objects.append({
                     "type": "relationship", "spec_version": "2.1",
                     "id": f"relationship--{uuid.uuid4()}",
                     "created": now, "modified": now,
                     "relationship_type": "indicates",
-                    "source_ref": ind_id,
-                    "target_ref": ap_id,
+                    "source_ref": ind_id, "target_ref": ap_ids[tid],
                 })
 
     bundle = {"type": "bundle", "id": f"bundle--{uuid.uuid4()}",
@@ -316,16 +280,6 @@ def _stix2_validate(bundle: dict) -> None:
               file=sys.stderr)
 
 
-def build_ioc_csv(iocs: list[dict]) -> str:
-    out = io.StringIO()
-    writer = csv.DictWriter(out, fieldnames=[
-        "type", "value", "severity", "context", "finding_call_id"])
-    writer.writeheader()
-    for ioc in iocs:
-        writer.writerow(ioc)
-    return out.getvalue()
-
-
 # ── file writers (shared by the MCP tools and the atlas report CLI) ──────────
 
 def write_navigator(case_id: str, findings: list[dict], output_dir: str,
@@ -346,22 +300,28 @@ def write_navigator(case_id: str, findings: list[dict], output_dir: str,
 
 
 def write_iocs(case_id: str, findings: list[dict], output_dir: str,
-               fmt: str = "all") -> dict:
+               fmt: str = "all", case_dir: str | os.PathLike | None = None) -> dict:
+    """The indicator catalogue as files: the catalogue CSV (the same rows the
+    report's indicator file exports) and a STIX bundle of its located,
+    actionable rows. ``case_dir`` is the case the catalogue is read from."""
+    from core.ioc_catalog import build_catalog, render_csv
     assert_output_safe(output_dir)
     os.makedirs(output_dir, exist_ok=True)
-    iocs = extract_iocs(findings)
-    result: dict = {"success": True, "ioc_count": len(iocs),
+    catalog = build_catalog(case_dir) if case_dir else {"iocs": []}
+    exported = [r for r in catalog.get("iocs") or []
+                if r.get("standing") in ("cited", "same_host", "elsewhere")]
+    result: dict = {"success": True, "ioc_count": len(exported),
                     "stix_path": None, "csv_path": None}
-    if not iocs:
-        result["note"] = ("no IOCs extracted from CONFIRMED/LIKELY "
-                          "findings")
+    if not exported:
+        result["note"] = ("no indicator a tool output that read evidence shows; values only named "
+                          "are listed as context in the indicator file, never exported")
     if fmt in ("csv", "all"):
         path = os.path.join(output_dir, f"{case_id}.iocs.csv")
         with open(path, "w", encoding="utf-8") as f:
-            f.write(build_ioc_csv(iocs))
+            f.write(render_csv(catalog, case_dir))
         result["csv_path"] = path
     if fmt in ("stix", "all"):
-        bundle = build_stix_bundle(case_id, findings)
+        bundle = build_stix_bundle(case_id, findings, catalog)
         path = os.path.join(output_dir, f"{case_id}.iocs.stix.json")
         with open(path, "w", encoding="utf-8") as f:
             json.dump(bundle, f, indent=2)
@@ -392,9 +352,10 @@ def export_navigator(output_dir: str = "exports",
 @output_safe
 def export_iocs(output_dir: str = "exports", fmt: str = "all") -> dict:
     """
-    Export IOCs from CONFIRMED/LIKELY findings as a STIX 2.1 bundle and/or
-    flat CSV (fmt: "stix" | "csv" | "all") for SIEM/EDR/firewall import.
-    Indicators keep their finding call_id (CSV) and are related to the
+    Export the case's indicator list as a STIX 2.1 bundle and/or flat CSV
+    (fmt: "stix" | "csv" | "all") for SIEM/EDR/firewall import: the rows a
+    tool output that read evidence shows, as the report's indicator file
+    lists them. Indicators keep their findings (CSV) and are related to the
     attack-patterns of the same finding (STIX), so the export stays
     citable. Run alongside the final report.
     """
@@ -402,4 +363,5 @@ def export_iocs(output_dir: str = "exports", fmt: str = "all") -> dict:
         return {"success": False,
                 "error": f"fmt must be stix|csv|all, got {fmt!r}"}
     case_id, findings = _findings()
-    return write_iocs(case_id, findings, output_dir, fmt=fmt)
+    from core.execution_log import log
+    return write_iocs(case_id, findings, output_dir, fmt=fmt, case_dir=log.case_dir())

@@ -208,6 +208,10 @@ def build_processing_assessment(
             )
         available.append(item)
 
+    # The framing sentences (core.evidence_framing, ATLAS_EVIDENCE_FRAMING):
+    # exports are an index of what the images hold, the images the authority.
+    from core.evidence_framing import framing_lines, framing_on
+    _framing = framing_lines() if framing_on() else {}
     catalog = {
         "policy": (
             "This is the evidence REFERENCE MAP — what exists and what you "
@@ -218,6 +222,13 @@ def build_processing_assessment(
             "keep them on the list for later. Do not invent paths that are "
             "not in the catalog. Do not claim evidence is missing when it "
             "is listed here or under already_processed / class samples."
+        ) if not _framing else (
+            "This is the evidence REFERENCE MAP — what exists and what you "
+            "can fall back on. Analyze what is relevant to the case "
+            "questions and incident time window. Items wholly outside the "
+            "window (e.g. VPN logs with no overlap to the attack period) "
+            "or clearly unrelated may be deferred without deep analysis; "
+            "keep them on the list for later. " + _framing["policy_tail"]
         ),
         "files_indexed": int(file_count or 0),
         "top_level": available,
@@ -228,8 +239,9 @@ def build_processing_assessment(
             "opening every file.",
             "Defer out-of-window / unrelated items with a short reason; "
             "they remain available if pivots need them later.",
-            "Prefer already_processed exports when they cover an artifact "
-            "family; re-parse raw sources only for a proven gap.",
+            ("Prefer already_processed exports when they cover an artifact "
+             "family; re-parse raw sources only for a proven gap.") if not _framing
+            else _framing["relevance"],
             "skip[] is only for ABSENT media classes (no memory → no vol), "
             "never for present files you chose not to deep-dive yet.",
         ],
@@ -240,9 +252,10 @@ def build_processing_assessment(
         "available": has_parsed,
         "paths": parsed,
         "what_to_do": (
-            "Primary fallbacks for common artifact families — query/read "
-            "these finished exports when relevant. Do NOT re-run path "
-            "parsers on their raw sources unless you prove a coverage gap."
+            (("Primary fallbacks for common artifact families — query/read "
+              "these finished exports when relevant. Do NOT re-run path "
+              "parsers on their raw sources unless you prove a coverage gap.")
+             if not _framing else _framing["already_processed"])
             if has_parsed else
             "No high-value parsed exports indexed — list directories and "
             "use class samples when those areas become relevant."
@@ -292,7 +305,7 @@ def build_processing_assessment(
                 "reason": (
                     "Parsed event-log exports present — use those when "
                     "relevant; re-parse raw EVTX only for a proven gap."
-                ),
+                ) if not _framing else _framing["eventlog_reason"],
                 "example_parsed": evtx_parsed[:5],
                 "raw_count": (counts or {}).get("windows_eventlog"),
             })
@@ -401,7 +414,7 @@ def build_processing_assessment(
         if cls in _ABSENT_SKIP
     ]
 
-    first_actions: list[str] = [
+    first_actions: list[str] = ([_framing["brief"]] if _framing else []) + [
         "Use catalog.top_level + already_processed as the evidence map "
         "you can fall back on.",
         "Scope deep analysis by case questions and time window — defer "
@@ -411,7 +424,7 @@ def build_processing_assessment(
         first_actions.append(
             "When an artifact family is relevant, start from "
             "already_processed.paths (query/read); do not re-parse raw "
-            "sources without a proven gap."
+            "sources without a proven gap." if not _framing else _framing["first_action"]
         )
     if "tabular" in present_set:
         first_actions.append(
@@ -427,6 +440,7 @@ def build_processing_assessment(
         first_actions.append(
             "Address needs_processing only when those classes become "
             "relevant and parsed exports do not cover the question."
+            if not _framing else _framing["needs_processing"]
         )
     if skip:
         first_actions.append(
@@ -437,7 +451,7 @@ def build_processing_assessment(
     return {
         "what_exists": what_exists,
         "catalog": catalog,
-        # Back-compat alias used in earlier prompts/tests
+        # Alias of "catalog" for consumers that read the old key.
         "coverage": catalog,
         "already_processed": already_processed,
         "no_processing_needed": reparse_not_required,
@@ -451,7 +465,7 @@ def build_processing_assessment(
             "Relevance/time-window scopes depth. "
             "Prefer already_processed over re-parse. "
             "Skip only absent media."
-        ),
+        ) if not _framing else _framing["rule"],
     }
 
 
@@ -470,6 +484,7 @@ def build_evidence_inventory(case_dir: str | os.PathLike) -> dict[str, Any]:
         declared_kinds,
         ensure_evidence_profile,
         high_value_tabular_index,
+        inside_text,
         present_class_set,
     )
 
@@ -556,6 +571,7 @@ def build_evidence_inventory(case_dir: str | os.PathLike) -> dict[str, Any]:
         "assessment": assessment,
         "present_classes": present,
         "absent_classes": absent,
+        "inside_images": {cls: inside_text(n) for cls, n in sorted((profile.get("inside_images") or {}).items())},
         "counts": counts,
         "samples_by_class": samples,
         "high_value_parsed": high_value,

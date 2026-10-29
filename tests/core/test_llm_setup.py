@@ -12,15 +12,15 @@ from core import providers
 
 class TestPresets:
     def test_every_preset_is_reachable_by_id(self):
-        for p in ls.PRESETS:
-            assert ls.preset(p.id) is p
+        for p in ls.presets():
+            assert ls.preset(p.id) == p
 
     def test_unknown_preset_raises_with_known_ids_listed(self):
         with pytest.raises(KeyError, match="llmhub"):
             ls.preset("does-not-exist")
 
     def test_no_preset_is_pre_selected(self):
-        assert sum(1 for p in ls.PRESETS if p.default_choice) == 0
+        assert all(not hasattr(p, "default_choice") for p in ls.presets())   # none is pre-selected
 
     def test_llmhub_remains_a_selectable_preset(self):
         hub = ls.preset("llmhub")
@@ -44,7 +44,7 @@ class TestPresets:
 
 class TestValidateName:
     def test_default_name_always_valid(self):
-        assert ls.validate_name(providers.DEFAULT_NAME) is None
+        assert ls.validate_name("llmhub") is None
 
     def test_empty_name_rejected(self):
         assert ls.validate_name("") is not None
@@ -61,7 +61,7 @@ class TestValidateName:
 
 class TestKeyEnvVar:
     def test_default_provider_uses_llmhub_var(self):
-        assert ls.key_env_var(providers.DEFAULT_NAME) == "LLMHUB_API_KEY"
+        assert ls.key_env_var("llmhub") == "LLMHUB_API_KEY"
 
     def test_named_provider_uses_provider_var(self):
         assert ls.key_env_var("my-gateway") == "ATLAS_PROVIDER_MY_GATEWAY_API_KEY"
@@ -90,6 +90,8 @@ class TestRegisterProviderUpdates:
         assert updates == {
             "ATLAS_PROVIDER_MY_OPENAI_BASE_URL": "https://api.openai.com/v1",
             "ATLAS_PROVIDER_MY_OPENAI_MODEL": "gpt-4o",
+            # The profile is remembered, so the provider binds to it.
+            "ATLAS_PROVIDER_MY_OPENAI_PRESET": "openai",
         }
 
     def test_named_provider_defaults_to_preset_id_when_no_name_given(self):
@@ -132,7 +134,7 @@ class TestDeclaredProvidersUpdate:
         assert ls.declared_providers_update(["already-there"], "already-there") == {}
 
     def test_default_name_is_never_added(self):
-        assert ls.declared_providers_update([], providers.DEFAULT_NAME) == {}
+        assert ls.declared_providers_update([], "llmhub") == {}
 
     def test_empty_existing_list(self):
         assert ls.declared_providers_update([], "first") == {
@@ -140,9 +142,15 @@ class TestDeclaredProvidersUpdate:
         }
 
 
+def _all_roles():
+    """The roles `provider use --role all` assigns: every role but the ones
+    chosen on purpose (the vision role's model must take images)."""
+    return tuple(r for r in ls.PROVIDER_ROLE_VARS if r not in ls.ROLES_CHOSEN_ON_PURPOSE)
+
+
 class TestRoleUpdates:
     def test_all_roles(self):
-        updates = ls.role_updates("gw", tuple(ls.PROVIDER_ROLE_VARS), env={})
+        updates = ls.role_updates("gw", _all_roles(), env={})
         assert updates == {
             "ATLAS_AGENT_PROVIDER": "gw",
             "ATLAS_REVIEW_PROVIDER": "gw",
@@ -162,9 +170,8 @@ class TestRoleUpdates:
         assert ls.role_updates("gw", ("not-a-real-role",)) == {}
 
     def test_unchecking_a_role_clears_its_env_var(self, monkeypatch):
-        # This is the actual dashboard bug: previously role_updates() only
-        # ever added assignments, never removed one — unchecking a role for
-        # a provider that currently has it had zero effect on .env.
+        # role_updates() must also remove assignments: unchecking a role for
+        # a provider that currently has it has to change .env.
         monkeypatch.setenv("ATLAS_AGENT_PROVIDER", "gw")
         updates = ls.role_updates("gw", ())
         assert updates == {"ATLAS_AGENT_PROVIDER": ""}
@@ -194,9 +201,11 @@ class TestRoleModelOverrides:
     def test_every_assigned_role_with_an_override_is_cleared(self):
         env = {"ATLAS_AGENT_MODEL": "a", "REASON_MODEL": "b",
                "DAIR_MODEL": "c", "ATLAS_REVIEW_MODEL": "d"}
-        updates = ls.role_updates("gw", tuple(ls.PROVIDER_ROLE_VARS), env=env)
-        for var in ls.ROLE_MODEL_VARS.values():
-            assert updates[var] == ""
+        updates = ls.role_updates("gw", _all_roles(), env=env)
+        for role, var in ls.ROLE_MODEL_VARS.items():
+            if role in _all_roles():
+                assert updates[var] == ""
+        assert "VISION_MODEL" not in updates                     # not assigned by "all": left alone
 
     def test_override_of_an_unassigned_role_is_left_alone(self):
         updates = ls.role_updates("gw", ("reason",),
@@ -279,7 +288,7 @@ def _openai_shape(content, finish_reason="stop", completion_tokens=2,
 
 
 def _gateway_shape(content, thinking="", reasoning_tokens=0):
-    """The other shape in the wild: no completion_tokens_details object, the
+    """The other shape a gateway returns: no completion_tokens_details object, the
     count straight on usage, and the thinking itself in a message field."""
     message = {"role": "assistant", "content": content, "tool_calls": None}
     if thinking:
@@ -382,11 +391,11 @@ class TestProbeCapabilities:
 
 class TestPresetProfiles:
     def test_vendor_presets_declare_their_shape(self):
-        assert ls.preset_profile("deepseek")["echo_fields"] == ("reasoning_content",)
-        assert ls.preset_profile("zai")["thinking_control"] == "thinking_type"
-        assert ls.preset_profile("openrouter")["thinking_control"] == "reasoning_object"
-        assert ls.preset_profile("custom") == {}
-        assert ls.preset_profile("nope") == {}
+        from core import provider_profiles as pp
+        assert pp.get("deepseek").request_shape()["echo_fields"] == ("reasoning_content",)
+        assert pp.get("zai").request_shape()["thinking_control"] == "thinking_type"
+        assert pp.get("openrouter").request_shape()["thinking_control"] == "reasoning_object"
+        assert pp.get("custom").request_shape() == {}
 
     def test_thinking_is_written_only_when_pinned(self):
         auto = ls.register_provider_updates(ls.SetupChoice(
@@ -403,3 +412,25 @@ class TestPresetProfiles:
             ls.register_provider_updates(ls.SetupChoice(
                 preset_id="custom", name="gw", base_url="https://gw.example/v1",
                 thinking="max"))
+
+
+def test_the_vision_role_is_chosen_on_purpose_never_by_all():
+    import core.llm_setup as ls
+    assert ls.PROVIDER_ROLE_VARS["vision"] == "VISION_BACKEND" and ls.ROLE_MODEL_VARS["vision"] == "VISION_MODEL"
+    assert set(ls.ROLES_CHOSEN_ON_PURPOSE) <= set(ls.PROVIDER_ROLE_VARS)
+    caps = ls.CapabilityProbe(ok=True, answered=True, tool_calling=True)
+    assert "vision" not in caps.roles_allowed() and "analyst" in caps.roles_allowed()
+    everything = [r for r in ls.PROVIDER_ROLE_VARS if r not in ls.ROLES_CHOSEN_ON_PURPOSE]   # what --role all takes
+    assert "vision" not in everything and "reason" in everything
+
+
+def test_role_models_records_the_vision_role(monkeypatch):
+    from core import providers
+    monkeypatch.setenv("VISION_MODEL", "example/vision-small")
+    monkeypatch.delenv("VISION_BACKEND", raising=False)
+    assert providers.role_models()["vision"] == ""          # an id with no provider configures no vision role
+    monkeypatch.setenv("VISION_BACKEND", "example")
+    assert providers.role_models()["vision"] == "example/vision-small"
+    monkeypatch.delenv("VISION_MODEL")
+    monkeypatch.delenv("VISION_BACKEND", raising=False)
+    assert providers.role_models()["vision"] == ""

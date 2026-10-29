@@ -15,6 +15,8 @@ import zlib
 from typing import Optional
 
 from fastmcp import FastMCP
+
+from tools import media_types as MT
 from core import DEFAULT_TIMEOUT, output_safe
 from core.paths import assert_output_safe
 from core.timeout import with_tool_timeout
@@ -23,22 +25,6 @@ mcp = FastMCP("deob")
 
 # Cap on returned text so a decode of a large blob can never blow the context.
 _PREVIEW_CAP = 8000
-
-
-def _record_marker(tool_name: str, success: bool, summary: dict) -> None:
-    """Log an in-process tool call to the execution trace, mirroring the
-    convention in tools/network.py so the audit story stays complete."""
-    try:
-        import json
-        from core.execution_log import log
-        log.record_tool_call(
-            cmd=f"<py>:{tool_name}",
-            success=success, truncated=False, retries=0,
-            exit_code=0 if success else 1, stderr="", elapsed_seconds=0.0,
-            stdout_excerpt=json.dumps(summary, sort_keys=True)[:600],
-        )
-    except Exception:
-        pass
 
 
 def _printable_ratio(data: bytes) -> float:
@@ -102,14 +88,11 @@ def decode_chain(data: str, operations: list[str]) -> dict:
             current = _apply_op(current, op)
         except Exception as e:
             stages.append({"op": op, "success": False, "error": str(e)})
-            _record_marker("deob_decode_chain", False,
-                           {"failed_op": op, "stages": len(stages)})
             return {"success": False, "stages": stages,
                     "error": f"operation '{op}' failed: {e}"}
         stages.append({"op": op, "success": True,
                        "printable_ratio": round(_printable_ratio(current), 3),
                        "preview": _preview(current)})
-    _record_marker("deob_decode_chain", True, {"ops": operations})
     return {"success": True, "operations": operations, "stages": stages,
             "result": _preview(current)}
 
@@ -178,8 +161,6 @@ def xor_bruteforce(
         "printable_ratio": round(_printable_ratio(dec), 3),
         "preview": _preview(dec[:512]),
     } for s, hits, key, dec in scored[:10]]
-    _record_marker("deob_xor_bruteforce", True,
-                   {"file": file_path, "best_key": top[0]["key_hex"] if top else None})
     return {"success": True, "file": file_path, "bytes_scanned": len(data),
             "candidates": top}
 
@@ -226,8 +207,6 @@ def base64_hunt(file_path: str, min_len: int = 16) -> dict:
         })
         if len(found) >= 50:
             break
-    _record_marker("deob_base64_hunt", True,
-                   {"file": file_path, "count": len(found)})
     return {"success": True, "file": file_path, "count": len(found),
             "blobs": found}
 
@@ -271,13 +250,11 @@ def powershell_decode(command_line: str) -> dict:
             break
     layers.append({"pass": "normalized", "result": _preview(text.encode())})
 
-    _record_marker("deob_powershell_decode", True,
-                   {"had_encodedcommand": bool(enc), "layers": len(layers)})
     return {"success": True, "encoded_command_found": bool(enc),
             "layers": layers, "result": _preview(text.encode())}
 
 
-@mcp.tool()
+@mcp.tool(meta={"reads": list(MT.JAVASCRIPT)})
 @output_safe
 @with_tool_timeout(DEFAULT_TIMEOUT, label="deob_js_beautify")
 def js_beautify(file_path: str, output_path: Optional[str] = None) -> dict:
@@ -302,10 +279,8 @@ def js_beautify(file_path: str, output_path: Optional[str] = None) -> dict:
         assert_output_safe(output_path)
         with open(output_path, "w", encoding="utf-8") as fh:
             fh.write(pretty)
-        _record_marker("deob_js_beautify", True, {"output_path": output_path})
         return {"success": True, "file": file_path, "output_path": output_path,
                 "lines": pretty.count("\n") + 1}
-    _record_marker("deob_js_beautify", True, {"file": file_path})
     return {"success": True, "file": file_path, "result": _preview(pretty.encode())}
 
 

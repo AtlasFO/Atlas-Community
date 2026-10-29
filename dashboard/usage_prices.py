@@ -24,6 +24,9 @@ from dashboard import auth
 MODELS = "llm_price_models"
 PRICES = "llm_prices"
 CURRENCY = "llm_price_currency"
+# The label the spend is shown in. Vendors publish their prices in USD and
+# the list holds them as published; a label never converts a price.
+DEFAULT_CURRENCY = "USD"
 AUTOREMOVE = "llm_price_autoremove"
 
 _lock = threading.Lock()
@@ -67,7 +70,7 @@ def configured_keys() -> Optional[set[str]]:
 
 
 def _zero(price: dict) -> bool:
-    return not any(float(price.get(f) or 0) for f in ("input", "cached", "output"))
+    return not any(float(price.get(f) or 0) for f in ("input", "cached", "cache_write", "output"))
 
 
 def _relabel(models: dict, prices: dict) -> bool:
@@ -129,7 +132,7 @@ def _payload(models: dict, prices: dict, seen: set[str]) -> dict:
                      "configured": bool(models[key].get("configured")),
                      "used": key in seen})
     listed = {r["key"] for r in rows}
-    return {"currency": auth.get_setting(CURRENCY, "EUR") or "EUR",
+    return {"currency": auth.get_setting(CURRENCY, DEFAULT_CURRENCY) or DEFAULT_CURRENCY,
             "autoremove": autoremove(),
             "prices": {k: v for k, v in prices.items() if k in listed},
             "models": rows}
@@ -149,31 +152,53 @@ def delete(key: str) -> None:
         _store(PRICES, prices)
 
 
+# Per million tokens: input and output required; cache reads and writes
+# optional (billed at the input price when empty). A model priced higher for
+# a long prompt names the length (long_over, in input tokens, cached ones
+# included) and its own four prices, input and output required.
+_FIELDS = ("input", "cached", "cache_write", "output")
+_OPTIONAL = ("cached", "cache_write")
+
+
+def _number(key: str, field: str, value: Any) -> float:
+    try:
+        n = float(value)
+    except (TypeError, ValueError):
+        raise PriceError(f"{key}: {field} is not a number") from None
+    if not math.isfinite(n) or n < 0:
+        raise PriceError(f"{key}: {field} must be a finite number of at least 0")
+    return n
+
+
 def clean_prices(raw: Any) -> dict:
     """The prices as the page sends them, checked: {key: {input, cached,
-    output}}, input and output required, cached optional, all finite and
-    not negative."""
+    cache_write, output}} and, for a long-prompt price, long_over and the
+    same four as long_*; all finite and not negative."""
     if not isinstance(raw, dict):
         raise PriceError("prices must be an object keyed by provider|model")
     clean = {}
     for key, val in raw.items():
         if not isinstance(key, str) or "|" not in key or not isinstance(val, dict):
             raise PriceError(f"bad price entry {key!r}")
-        entry = {}
-        for f in ("input", "cached", "output"):
-            v = val.get(f)
-            if v in (None, ""):
-                if f == "cached":
-                    entry[f] = None
-                    continue
-                raise PriceError(f"{key}: {f} price missing")
-            try:
-                n = float(v)
-            except (TypeError, ValueError):
-                raise PriceError(f"{key}: {f} is not a number") from None
-            if not math.isfinite(n) or n < 0:
-                raise PriceError(f"{key}: {f} must be a finite number of at least 0")
-            entry[f] = n
+        entry: dict = {}
+        long_set = any(val.get(f"long_{f}") not in (None, "") for f in _FIELDS)
+        tiers = ("", "long_") if long_set or val.get("long_over") not in (None, "") else ("",)
+        for prefix in tiers:
+            for f in _FIELDS:
+                name, v = prefix + f, val.get(prefix + f)
+                if v in (None, ""):
+                    if f in _OPTIONAL:
+                        entry[name] = None
+                        continue
+                    raise PriceError(f"{key}: {name} price missing")
+                entry[name] = _number(key, name, v)
+        if len(tiers) == 2:
+            over = val.get("long_over")
+            if over in (None, "") or _number(key, "long_over", over) < 1 \
+                    or float(over) != int(float(over)):
+                raise PriceError(f"{key}: a long-prompt price needs the prompt length it starts above "
+                                 f"(long_over, a whole number of tokens)")
+            entry["long_over"] = int(float(over))
         clean[key] = entry
     return clean
 
@@ -185,6 +210,7 @@ def save(body: dict) -> None:
         if "prices" in body:
             _store(PRICES, clean_prices(body.get("prices")))
         if "currency" in body:
-            auth.set_setting(CURRENCY, str(body.get("currency") or "EUR").strip()[:12] or "EUR")
+            auth.set_setting(CURRENCY, str(body.get("currency") or DEFAULT_CURRENCY).strip()[:12]
+                             or DEFAULT_CURRENCY)
         if "autoremove" in body:
             auth.set_setting(AUTOREMOVE, "1" if body.get("autoremove") is True else "0")

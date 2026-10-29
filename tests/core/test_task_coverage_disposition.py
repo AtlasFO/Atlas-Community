@@ -1,5 +1,7 @@
-"""B8 — task answered requires relevant HV disposition; soft floor no waiver."""
+"""A task answered requires a relevant HV disposition; the soft floor is no waiver."""
 from __future__ import annotations
+
+import pytest
 
 import json
 from pathlib import Path
@@ -37,6 +39,7 @@ def _inv(case: Path, paths: list[str]) -> None:
         encoding="utf-8",
     )
 
+@pytest.mark.usefixtures("todays_coverage")
 
 def test_catch_all_answered_refused_until_disposed(tmp_path: Path):
     case = tmp_path / "PR"

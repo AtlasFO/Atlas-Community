@@ -48,7 +48,12 @@ def _save_hash_cache(cache: dict) -> None:
 
 
 def _cache_key(stat_result, abs_path: str) -> str:
-    return f"{abs_path}|{stat_result.st_size}|{int(stat_result.st_mtime)}"
+    # Device, inode, size, mtime and ctime: an archive extractor restores a
+    # member's mtime, so two files written to one path with one size and
+    # second would share a key without the inode and the ctime (which no
+    # extractor sets). The strings cache keys the same way.
+    return (f"{abs_path}|{stat_result.st_dev}|{stat_result.st_ino}|{stat_result.st_size}|"
+            f"{int(stat_result.st_mtime)}|{int(stat_result.st_ctime)}")
 
 
 def _case_dir() -> str:
@@ -168,54 +173,129 @@ def hash_directory(
     if algorithm not in algo_map:
         return {"success": False, "error": f"Unknown algorithm: {algorithm}"}
 
-    hasher_cls = algo_map[algorithm]
     results = []
     errors = []
     pattern = "**/*" if recursive else "*"
     files = glob.glob(os.path.join(directory, pattern), recursive=recursive)
+    case_dir = _case_dir() if algorithm == "sha256" else ""
+    cache_hits = 0
+    matches: dict = {}
+    pending: list[tuple[str, str]] = []
+
+    def _record(rows: list[tuple[str, str]]) -> None:
+        # Recorded in batches, so a call cut by its timeout (the thread runs
+        # on) has its finished files in the hash index at once.
+        if case_dir and rows:
+            try:
+                from core import hash_index
+                matches.update(hash_index.record(case_dir, rows))
+            except Exception:  # noqa: BLE001 - the listing stands without the index
+                pass
 
     for fpath in files:
         if not os.path.isfile(fpath):
             continue
         try:
-            h = hasher_cls()
-            with open(fpath, "rb") as f:
-                for chunk in iter(lambda: f.read(65536), b""):
-                    h.update(chunk)
-            results.append({"file": fpath, algorithm: h.hexdigest()})
+            abs_path = os.path.abspath(fpath)
+            key = _cache_key(os.stat(abs_path), abs_path)
+            with _HASH_CACHE_LOCK:
+                hit = _load_hash_cache().get(key) if algorithm != "sha512" else None
+            if hit and hit.get(algorithm):
+                digest = str(hit[algorithm])
+                cache_hits += 1
+            else:
+                digest = _hash_one(fpath, algorithm, key)
+            results.append({"file": fpath, algorithm: digest})
+            if case_dir:
+                pending.append((fpath, digest))
+                if len(pending) >= _RECORD_BATCH:
+                    _record(pending)
+                    pending = []
         except Exception as e:
             errors.append({"file": fpath, "error": str(e)})
+    _record(pending)
+    with _HASH_CACHE_LOCK:
+        _save_hash_cache(_load_hash_cache())        # once per call, not once per file
 
+    identical = 0
+    if case_dir:
+        from core import hash_index
+        for r in results:
+            others = matches.get(hash_index.rel_path(case_dir, r["file"]))
+            if others:
+                r["identical_to"] = [o["path"] for o in others[:4]]
+                identical += 1
+
+    # A large folder's rows go to a manifest (the one asked for, else one
+    # under the case's analysis/), and the reply carries the counts, the
+    # identical groups and the first rows: 20,000 rows are no reading.
+    if len(results) > _INLINE_ROWS and not output_manifest and case_dir:
+        # The folder's name plus a short hash of its path: two folders of one
+        # name (two hosts' exports) keep two manifests.
+        tag = hashlib.sha1(os.path.abspath(directory).encode("utf-8", "replace")).hexdigest()[:8]
+        output_manifest = os.path.join(case_dir, "analysis", "hashes",
+                                       f"{os.path.basename(os.path.normpath(directory)) or 'root'}-{tag}.{algorithm}.csv")
+        assert_output_safe(output_manifest)
+        os.makedirs(os.path.dirname(output_manifest), exist_ok=True)
     if output_manifest:
         import csv
         with open(output_manifest, "w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=["file", algorithm])
             writer.writeheader()
-            writer.writerows(results)
-
-    identical = 0
-    case_dir = _case_dir() if algorithm == "sha256" and results else ""
-    if case_dir:
-        try:
-            from core import hash_index
-            matches = hash_index.record(case_dir, [(r["file"], r["sha256"]) for r in results])
-            for r in results:
-                others = matches.get(hash_index.rel_path(case_dir, r["file"]))
-                if others:
-                    r["identical_to"] = [o["path"] for o in others[:4]]
-                    identical += 1
-        except Exception:  # noqa: BLE001 - the listing stands without the index
-            pass
-    return {
+            writer.writerows({"file": r["file"], algorithm: r[algorithm]} for r in results)
+    out = {
         "success": True,
         "directory": directory,
         "algorithm": algorithm,
         "file_count": len(results),
+        "cache_hits": cache_hits,
         "identical_files": identical,
         "hashes": results,
         "errors": errors,
         "manifest": output_manifest,
     }
+    if len(results) > _INLINE_ROWS:
+        out["hashes"] = results[:_INLINE_HEAD]
+        out["hashes_omitted"] = len(results) - _INLINE_HEAD
+        groups = [{"sha256": r["sha256"], "paths": [r["file"], *r["identical_to"]]}
+                  for r in results if r.get("identical_to")]
+        out["identical_groups"] = groups[:_INLINE_GROUPS]
+        out["identical_groups_omitted"] = max(0, len(groups) - _INLINE_GROUPS)
+        out["note"] = (f"{len(results)} files: the first {_INLINE_HEAD} rows are shown, every row is in the manifest"
+                       if output_manifest else
+                       f"{len(results)} files: the first {_INLINE_HEAD} rows are shown; no case is bound, so no "
+                       "manifest was written (pass output_manifest for the full list)")
+    return out
+
+
+# The hash index is written every this many files of a folder, so a call
+# the timeout cut has its finished work recorded; the reply shows the full
+# list up to _INLINE_ROWS files, beyond that its first _INLINE_HEAD rows.
+_RECORD_BATCH = 500
+_INLINE_ROWS = 200
+_INLINE_HEAD = 50
+_INLINE_GROUPS = 20
+
+
+def _hash_one(fpath: str, algorithm: str, key: str) -> str:
+    """Hash one file in a pass that also fills the stat-keyed cache with
+    the three digests hash_file serves (so the folder's files are cache
+    hits for it, and its files for the folder); sha512 is not cached."""
+    md5, sha1, sha256 = hashlib.md5(), hashlib.sha1(), hashlib.sha256()
+    extra = hashlib.sha512() if algorithm == "sha512" else None
+    size = 0
+    with open(fpath, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            md5.update(chunk)
+            sha1.update(chunk)
+            sha256.update(chunk)
+            if extra is not None:
+                extra.update(chunk)
+            size += len(chunk)
+    digests = {"md5": md5.hexdigest(), "sha1": sha1.hexdigest(), "sha256": sha256.hexdigest()}
+    with _HASH_CACHE_LOCK:
+        _load_hash_cache()[key] = {"success": True, "size_bytes": size, **digests}
+    return extra.hexdigest() if extra is not None else digests[algorithm]
 
 
 @mcp.tool()

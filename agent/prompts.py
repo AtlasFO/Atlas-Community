@@ -11,6 +11,8 @@ import re
 from collections.abc import Sequence
 from pathlib import Path
 
+from core.state_files import BRAIN_INJECTION_MANIFEST as _INJECTION_MANIFEST  # written under analysis/
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 ADAPTER_HEADER = """\
@@ -95,7 +97,7 @@ authoritative context, not as a finding on its own.
 """
 
 
-# Evidence file extensions -> brain retrieval tags (Phase-6 injection).
+# Evidence file extensions -> brain retrieval tags.
 _EVIDENCE_TAGS = {
     ".e01": ["ewf", "tsk", "disk-image"], ".ex01": ["ewf", "tsk", "disk-image"],
     # .raw is ambiguous — the common extension for BOTH raw disk images AND RAM
@@ -134,7 +136,6 @@ _NOTE_EXCERPT_CHARS = 800
 _ENV_BYTES_CAP = 6144         # client environment baselines (Tier D)
 _ENV_MAX = 8
 
-_INJECTION_MANIFEST = "brain_injection.json"  # written under case analysis/
 
 
 def _engagement_client(case_dir: Path) -> str:
@@ -198,7 +199,7 @@ def _write_injection_manifest(case_dir: Path | None, manifest: dict) -> None:
 def _case_identifiers(case_dir: Path | None) -> set[str]:
     """Slugified identifiers naming the active case: the detected case id
     (CASE.md / CLAUDE.md — works in --output-dir mirrors, which symlink it in)
-    plus the directory basename. Used to exclude same-case brain entries."""
+    plus the directory basename. Excludes same-case brain entries."""
     if case_dir is None:
         return set()
     try:
@@ -575,14 +576,45 @@ def _case_file_text(case_doc: str, *, knowledge_shown: bool) -> str:
             + ". The requests stand under Investigation Tasks.)\n")
 
 
+# The header's namespace note, and its wording for a run whose tool list
+# holds every namespace from the start (Toolbox.stable): true there, and
+# still true should the list later be cut.
+_NAMESPACE_NOTE = """\
+- Only some tool namespaces are loaded at a time; the tool list is what you
+  can call. A tool outside it cannot be called: load its namespace first
+  with `atlas_load_namespaces` (`atlas_list_namespaces` shows everything).
+  Namespaces named by DAIR's `priority_tools` are loaded for you before
+  your next turn.
+"""
+_STABLE_NAMESPACE_NOTE = """\
+- Every tool namespace is in your tool list from the start of this run,
+  and Atlas keeps it there: `atlas_load_namespaces` is not needed. Should a
+  call ever be refused because its namespace is not loaded, load that
+  namespace with `atlas_load_namespaces` (`atlas_list_namespaces` shows
+  everything).
+"""
+
+
 def build_system_prompt(case_dir: Path | None,
                         interactive: bool = False,
-                        chat: bool = False) -> str:
+                        chat: bool = False,
+                        stable_tools: bool = False) -> str:
     from agent.playbook import assemble_playbook
 
     playbook = assemble_playbook(include_entry=True).strip()
 
-    parts = [ADAPTER_HEADER, playbook]
+    header = (ADAPTER_HEADER.replace(_NAMESPACE_NOTE, _STABLE_NAMESPACE_NOTE)
+              if stable_tools else ADAPTER_HEADER)
+    parts = [header, playbook]
+    try:
+        # Which tool parses which input format, read from the registry's
+        # input parameters (tools.tool_capabilities.readers_block).
+        from tools.tool_capabilities import readers_block
+        _readers = readers_block()
+        if _readers:
+            parts.append("\n" + _readers)
+    except Exception:  # noqa: BLE001 - guidance, never a failed prompt
+        pass
     if case_dir:
         # Case-driven work queue: tasks + plan are the live board.
         # CASE.md remains the investigator inbox (injected compactly).
@@ -678,10 +710,13 @@ def build_system_prompt(case_dir: Path | None,
             if mp.is_file():
                 parts.append(
                     "\n# Disk Access Plan\n\n"
-                    f"See `{mp}` for auto-detected disk images and the "
-                    "recommended next tool (VMDK: chain_info → export_raw → "
-                    "tsk.mmls → tsk.fls; do not Triage-default losetup/"
-                    "xmount).\n"
+                    f"See `{mp}` for the case's disk images: each entry names "
+                    "the tool that opens it (recommended_tool) and why "
+                    "(reason). A VMDK, VHD, VHDX, QCOW2 or VDI is read through "
+                    "the raw view Atlas makes of it where this host allows "
+                    "one, so tsk.* takes the image as it is; the entry says "
+                    "when it needs a copy instead. Do not Triage-default "
+                    "losetup/xmount.\n"
                 )
         except Exception:
             pass
@@ -735,6 +770,33 @@ def _mounted_filesystems(case_dir: Path | None) -> str:
         return ""
 
 
+def _switch_texts(text: str) -> str:
+    """The recipe sentences that name the DAIR loop and the pivot nudge, as
+    the switches read at call time have them (ATLAS_DAIR_NO_DEFER,
+    ATLAS_ESTATE_COUNT)."""
+    from core.deferred_intents import dair_no_defer_on, estate_count_on
+    if dair_no_defer_on():
+        work = ("work through the [work order] shown each turn; call dair_assess when you need a new "
+                "direction or a phase change")
+        text = text.replace("drive the DAIR loop (dair_assess after every tool batch) until it directs Report",
+                            work + ", until it directs Report")
+        text = text.replace("drive the DAIR loop (dair_assess after every tool batch)", work)
+    if estate_count_on():
+        text = text.replace("the [ioc pivot] nudge lists the searches still owed",
+                            "the [estate counts] show where each indicator has rows; read them there")
+    return text
+
+
+def _with_switch_texts(fn):
+    import functools
+
+    @functools.wraps(fn)
+    def wrapped(*args, **kwargs):
+        return _switch_texts(fn(*args, **kwargs))
+    return wrapped
+
+
+@_with_switch_texts
 def initial_user_message(question: str, namespace_summary: str,
                          case_id: str = "",
                          case_dir: Path | None = None) -> str:
@@ -783,8 +845,9 @@ def initial_user_message(question: str, namespace_summary: str,
         "(dair_assess after every tool batch) until it directs Report. "
         "Update investigation task status with "
         "misc_update_investigation_task as work progresses. "
-        "After ANY substantive table.*/parser hit, call misc_record_finding "
-        "promptly (SUSPECTED/LIKELY allowed with lineage) — do not keep "
+        "After ANY substantive table.*/parser hit, record each fact it "
+        "shows as its own misc_record_finding, several in one turn. "
+        "Record promptly (SUSPECTED/LIKELY allowed with lineage) — do not keep "
         "probing while findings stay at zero. Optional reason.evaluate_"
         "finding / cite_check may upgrade confidence later; they are NOT a "
         "prerequisite for the first landing. Run "
@@ -830,6 +893,10 @@ def rerun_objective(case_dir: Path | None, work: dict | None) -> str:
                      "current evidence and record each outcome: claim.revalidate, "
                      "citing the calls that re-read the evidence, when a finding "
                      "still holds; claim.supersede when it does not.")
+        if work.get("claims_recounted"):
+            parts.append("Those whose review says 'coverage corrected' state a coverage "
+                         "of images that the recount from the trace corrected: read the "
+                         "images their review names before deciding.")
     if work.get("open_conflicts"):
         parts.append("Reconcile the open conflicts.")
     context = work.get("context") or {}
@@ -839,6 +906,7 @@ def rerun_objective(case_dir: Path | None, work: dict | None) -> str:
         "Confirm that the existing answers still hold against the current evidence.")
 
 
+@_with_switch_texts
 def initial_rerun_message(
     *,
     brief_text: str,

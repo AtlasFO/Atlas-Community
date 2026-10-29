@@ -135,8 +135,8 @@ ask_yn() {
 }
 
 echo ""
-echo "  Atlas — Autonomous DFIR agent for malware analysis and rogue-actor attribution"
-echo "  ==================================================================="
+echo "  Atlas — Autonomous DFIR agent that shows its work"
+echo "  ================================================="
 echo "  Installing into: $ATLAS_DIR"
 echo ""
 
@@ -593,6 +593,8 @@ APT_PACKAGES=(
     fonts-dejavu-extra # true italics. Optional: without it emphasis renders
                        # upright rather than failing (see core/report_pdf.py).
     sqlite3            # ad-hoc queries on browser, sync-client and app databases
+    gawk               # table.table_pivot's stack over several tables counts each in one
+                       # native pass (field splitting of quoted CSV); mawk cannot
     binutils           # strings — the strings.* tools; absent on minimal cloud images
     file               # file type by content (strings.file_type, crypto)
     xxd                # hex dumps (strings.xxd)
@@ -1658,6 +1660,49 @@ if install_indxparse; then
     remove_unrunnable_indxparse
 fi
 
+# ── 3a2. ccl_chromium_reader (the library pyhindsight imports at start) ─────
+
+# install_ccl_chromium_reader — the Chromium readers behind pyhindsight at the
+# pinned commits (CCL_CHROMIUM_READER_REF, CCL_SIMPLESNAPPY_REF,
+# install-versions.env). pyhindsight imports ccl_chromium_reader when
+# `hindsight` starts but cannot declare it: it is not on PyPI. pip installs
+# both commits without their dependencies (the reader's own metadata names an
+# unpinned simplesnappy URL, which pip takes for a conflicting source), then
+# the two PyPI packages the reader imports at load time. pip records each
+# commit in the distribution's direct_url.json, which the pin check reads.
+# Returns 0 when pyhindsight's Chrome module imports. Optional: every failure
+# is a warning.
+install_ccl_chromium_reader() {
+    local base="git+https://github.com/cclgroupltd"
+    local reader="ccl_chromium_reader @ ${base}/ccl_chromium_reader@${CCL_CHROMIUM_READER_REF}"
+    local snappy="ccl_simplesnappy @ ${base}/ccl_simplesnappy@${CCL_SIMPLESNAPPY_REF}"
+    local at log
+    at=$("$VENV_DIR/bin/python" -c 'import json, importlib.metadata as m; f = lambda n: json.loads(m.distribution(n).read_text("direct_url.json") or "{}").get("vcs_info", {}).get("commit_id", ""); print(f("ccl_chromium_reader"), f("ccl_simplesnappy"))' 2>/dev/null) || at=""
+    if [ "$at" = "$CCL_CHROMIUM_READER_REF $CCL_SIMPLESNAPPY_REF" ] \
+            && "$VENV_DIR/bin/python" -c 'import pyhindsight.browsers.chrome' &>/dev/null; then
+        ok "ccl_chromium_reader already installed @ ${CCL_CHROMIUM_READER_REF:0:12}"
+        return 0
+    fi
+    log="$(mktemp)"
+    if "$VENV_DIR/bin/pip" install --force-reinstall --no-deps "$snappy" "$reader" &>"$log" \
+            && "$VENV_DIR/bin/pip" install "Brotli>=1.0.9,<=1.2.0" "zstd==1.5.7.2" &>>"$log"; then
+        ok "Installed ccl_chromium_reader @ ${CCL_CHROMIUM_READER_REF:0:12} (with ccl_simplesnappy, Brotli, zstd)"
+    else
+        warn "Could not install ccl_chromium_reader @ ${CCL_CHROMIUM_READER_REF:0:12} (offline, git or a C compiler missing, or a pinned commit is gone — see install-versions.env) — misc.hindsight_chrome reports the missing module. pip said:"
+        tail -5 "$log" | sed 's/^/    /'
+        rm -f "$log"
+        return 1
+    fi
+    rm -f "$log"
+    if ! "$VENV_DIR/bin/python" -c 'import pyhindsight.browsers.chrome' &>/dev/null; then
+        warn "pyhindsight's Chrome module does not import — check: $VENV_DIR/bin/python -c 'import pyhindsight.browsers.chrome'"
+        return 1
+    fi
+}
+
+step "Installing ccl_chromium_reader (Chrome profile parsing behind hindsight, optional)"
+install_ccl_chromium_reader || true
+
 # ── 3b. Hayabusa (Sigma triage of Windows event logs) ────────────────────────
 
 step "Installing DensityScout (file entropy triage)"
@@ -1839,7 +1884,9 @@ else
 fi
 
 # pyhindsight provides the `hindsight` console script in the venv, which
-# misc.hindsight_chrome resolves through PATH; it ships in requirements.txt.
+# misc.hindsight_chrome resolves through PATH; it ships in requirements.txt,
+# and the ccl_chromium_reader library it imports comes from
+# install_ccl_chromium_reader above.
 
 step "Installing Hayabusa (Sigma triage of Windows event logs)"
 

@@ -1,9 +1,9 @@
 """Every program a tool can execute must be declared.
 
-Twice now a tool has been advertised in the manifest while the program it
-runs was never installed — RegRipper's hardcoded ``/usr/local/bin/rip.pl``,
-then six more in ``misc``. The model finds out by spending a call on
-"No such file or directory". An undeclared program is that bug in waiting,
+A tool can be advertised in the manifest while the program it
+runs was never installed (a hardcoded ``/usr/local/bin/rip.pl``, say). The
+model finds out by spending a call on
+"No such file or directory". An undeclared program is that failure in waiting,
 so this test enumerates what the tool layer actually executes and requires
 each one to be either a base-system utility or declared in the registry.
 """
@@ -23,6 +23,7 @@ BASE_SYSTEM = {
     "sort", "head", "tail", "wc", "date", "hostname", "uname", "which",
     "dotnet", "pip", "openssl", "hexdump", "xxd", "secret-tool", "query",
     "disable", "enable", "set-password", "status", "log",
+    "ionice",   # util-linux, beside mount and losetup
 }
 
 # A program shipped by the same package as one already declared: if the

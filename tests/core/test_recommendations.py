@@ -13,6 +13,8 @@ from core.recommendations import build_catalog, do_now, grouped, render_markdown
 def case(tmp_path):
     d = tmp_path / "case"
     (d / ".atlas").mkdir(parents=True)
+    # The incident frame these rows are pinned in is the brief's statement.
+    (d / "CASE.md").write_text("**Case ID:** case\n**System owner:** victim\n", encoding="utf-8")
     return d
 
 
@@ -293,7 +295,7 @@ class TestExamination:
     def test_a_mitigation_is_a_lesson_for_a_victim_and_nothing_for_a_suspect(self, tmp_path):
         from core.recommendations import derive_from_claim
         d = self._case(tmp_path, owner="victim")
-        c = _claim(d, "RDP brute force (T1110.001) against DC01 from 194.61.24.102 succeeded",
+        c = _claim(d, "RDP brute force (T1110.001) against DC01 from 203.0.113.44 succeeded",
                    host="DC01", confidence="CONFIRMED")
         # a mitigation with nothing to act on is a reference, not a row
         assert derive_from_claim(d, c, mitigations_path=self.MITIGATIONS)["recorded"] == []
@@ -304,7 +306,7 @@ class TestExamination:
         assert rows and all(x["phase"] == "harden" and x["urgency"] == "later" for x in rows)
         assert do_now(build_catalog(d)) == []
         e = self._case(tmp_path / "suspect")
-        c2 = _claim(e, "RDP brute force (T1110.001) against DC01 from 194.61.24.102 succeeded",
+        c2 = _claim(e, "RDP brute force (T1110.001) against DC01 from 203.0.113.44 succeeded",
                     host="DC01", confidence="CONFIRMED")
         r2 = derive_from_claim(e, c2, mitigations_path=self.MITIGATIONS)
         assert r2["recorded"] == [] and "suspect" in r2["skipped"] and r2["techniques"]
@@ -338,21 +340,19 @@ class TestExamination:
         lines = render_markdown(cat, "en")
         assert not any("examination" in x or "assume" in x for x in lines)
 
-    def test_a_brief_without_either_row_states_the_assumption_once(self, tmp_path):
+    def test_a_brief_naming_no_owner_states_the_neutral_frame_once(self, tmp_path):
+        """No owner row: the neutral frame. No side is assumed, so the
+        section says no remediation is addressed to an owner, once, and
+        neither the examination note nor an owner assumption."""
         d = tmp_path / "case"
         (d / ".atlas").mkdir(parents=True)
         cat = build_catalog(d)
-        assert cat["engagement"] == "incident-response" and cat["system_owner"] == "unknown"
+        assert cat["system_owner"] == "unknown" and cat["frame"] == "neutral"
         en = render_markdown(cat, "en")
         de = render_markdown(cat, "de")
-        assert sum("assume the owner is the victim" in x for x in en) == 1
-        assert sum("Eigentümer das Opfer ist" in x for x in de) == 1
-        assert not any("examination" in x for x in en)
-        # Everything but that one line is what the section rendered before
-        # the field existed.
-        stated = self._case(tmp_path / "stated", engagement="incident-response", owner="victim")
-        without = [x for x in en if "assume the owner is the victim" not in x]
-        assert [x for x in without if x] == [x for x in render_markdown(build_catalog(stated), "en") if x]
+        assert sum("no remediation is addressed to an owner" in x for x in en) == 1
+        assert sum("keine Bereinigung an einen Eigentümer" in x for x in de) == 1
+        assert not any("examination after the fact" in x or "assume the owner" in x for x in en)
 
     def test_the_readiness_advisory_asks_for_no_plan_on_a_suspects_device(self, tmp_path):
         from core.recommendations import report_readiness_advisories
@@ -674,20 +674,20 @@ class TestFoldingRules:
         d = tmp_path / "CASE"
         (d / ".atlas").mkdir(parents=True)
         (d / "CASE.md").write_text("# Case: X\n\n**Case ID:** X\n**System owner:** victim\n\n## Hosts\n\n"
-                                   "| Host | IP |\n|---|---|\n| RM#1 | - |\n| RM#3 type1 | - |\n\n"
+                                   "| Host | IP |\n|---|---|\n| MEDIA#1 | - |\n| MEDIA#3 part1 | - |\n\n"
                                    "## Prior knowledge\n\nWe suspect ransomware; files were encrypted.\n", encoding="utf-8")
         links = empty_links("X")
         links["entries"] += [{"label": "PC", "kind": "disk", "path": "pc.E01", "host": "PC"},
-                             {"label": "RM#1", "kind": "disk", "path": "rm1.dd", "host": "RM#1"},
+                             {"label": "MEDIA#1", "kind": "disk", "path": "media1.dd", "host": "MEDIA#1"},
                              {"label": "capture", "kind": "pcap", "path": "c.pcap", "host": ""}]
         save_evidence_links(d, links)
         # no baseline, no memory or live evidence: the claim hosts that match a disk entry stand in
         _claim(d, "A logon on PC.", host="PC")
-        _claim(d, "Files on RM#1.", host="RM#1")
+        _claim(d, "Files on MEDIA#1.", host="MEDIA#1")
         _claim(d, "A note about SRV9.", host="SRV9")
         seed_from_intake(d)
         row = next(x for x in build_catalog(d)["recommendations"] if x["action"].startswith("Preserve volatile state"))
-        assert sorted(row["objects"]) == ["PC", "RM#1"]
+        assert sorted(row["objects"]) == ["MEDIA#1", "PC"]
         # with a baseline installation the systems are the installations alone
         folder = d / "analysis" / "baseline"
         folder.mkdir(parents=True)
@@ -796,3 +796,46 @@ class TestBasisOutlived:
 
 def load_graph_rec(case, rid):
     return cg.load_graph(case)["nodes"][rid]
+
+
+class TestDefiningTechniqueAtDerivation:
+    """The precautions read the validated techniques of the finding the claim
+    was recorded from; without that finding the prose reading stands."""
+
+    STMT = "export.zip is an encrypted (password-protected) archive recovered from the transfer"
+
+    def _claim_from_finding(self, case, tmp_path, techniques):
+        from core.execution_log import ExecutionLog
+        log = ExecutionLog()
+        log.configure("CASE-A", str(tmp_path / "trace.json"))
+        fid = log.record_finding(self.STMT, "LIKELY", "net.export_objects",
+                                 gate_metadata={"validated_techniques": techniques})
+        cid = _claim(case, self.STMT)
+        g = cg.load_graph(case)
+        g["nodes"][cid]["source_finding_call_id"] = fid
+        cg.save_graph(case, g)
+        return log, cid
+
+    def test_other_techniques_veto_the_weak_form(self, case, tmp_path):
+        from unittest.mock import patch
+        from core.recommendations import derive_from_finding_text
+        log, cid = self._claim_from_finding(case, tmp_path, [
+            {"technique_id": "T1041"}, {"technique_id": "T1005"}])
+        with patch("core.execution_log.log", log):
+            out = derive_from_finding_text(case, cid, self.STMT)
+        assert "ransomware" not in out["classes"] and out["recorded"] == []
+
+    def test_unsupported_techniques_do_not_count(self, case, tmp_path):
+        from unittest.mock import patch
+        from core.recommendations import derive_from_finding_text
+        log, cid = self._claim_from_finding(case, tmp_path, [
+            {"technique_id": "T1486", "relevance": "unsupported"}, {"technique_id": "T1005"}])
+        with patch("core.execution_log.log", log):
+            out = derive_from_finding_text(case, cid, self.STMT)
+        assert "ransomware" not in out["classes"]
+
+    def test_no_source_finding_keeps_the_prose_reading(self, case):
+        from core.recommendations import derive_from_finding_text
+        cid = _claim(case, self.STMT)
+        out = derive_from_finding_text(case, cid, self.STMT)
+        assert "ransomware" in out["classes"]

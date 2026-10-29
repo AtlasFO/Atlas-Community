@@ -37,3 +37,18 @@ def test_contradictory_empty_gaps_prose():
     )
     assert is_contradictory_empty_gaps_prose(prose, finding_count=7)
     assert not is_contradictory_empty_gaps_prose(prose, finding_count=0)
+
+
+def test_atlas_result_envelope_rows_are_read_and_the_envelope_is_no_event():
+    """A Python tool's JSON result is Atlas's own writing: its rows inside are
+    the records, the envelope itself never one."""
+    from core.evidence_noise import envelope_rows
+    env = ('{"success": true, "path": "exports/carve/audit.txt", "encoding": "utf-8", "lines": '
+           '["Carver version 1.0", "", "Carver started at Wed Jun 04 09:00:00 2031", "0: 00001.jpg 31 KB"]}')
+    assert envelope_rows(env) == ["Carver version 1.0", "Carver started at Wed Jun 04 09:00:00 2031",
+                                  "0: 00001.jpg 31 KB"]
+    assert envelope_rows('{"success": true, "matches": [{"line": 3, "text": "USER jane.doe"}]}') == ["3\tUSER jane.doe"]
+    assert envelope_rows('{"success": false, "error": "no such file"}') == []
+    assert envelope_rows('{"success": true, "path": "x", "lines": ["a", "b') == []     # cut short: still the envelope
+    assert envelope_rows("2031-06-04 09:00:00 jane.doe logged on") is None
+    assert envelope_rows('{"count": 3}') is None

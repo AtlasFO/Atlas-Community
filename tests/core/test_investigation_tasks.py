@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.core.test_contents_index import case  # noqa: F401
+
 from core.investigation_tasks import (
     parse_case_request_items,
     DERIVED_PREFIX,
@@ -264,7 +266,7 @@ def test_withdraw_removed_open_keep_answered(tmp_path: Path):
 
 
 def test_edit_wording_creates_new_task_drops_old_no_fuzzy_merge(tmp_path: Path):
-    """Q5: reword → new task + old dropped; never silent merge."""
+    """Reword → new task + old dropped; never silent merge."""
     case = tmp_path / "case"
     case.mkdir()
     (case / "CASE.md").write_text(
@@ -553,9 +555,9 @@ def test_a_supersession_carries_the_task_link_to_the_successor(tmp_path: Path):
         "## Investigation Requests\n\n- Malware: whether the machine carries a trojan\n",
         encoding="utf-8")
     tid = reconcile_case_md(case, persist=True)["added"][0]
-    old = cg.add_claim(case, statement="ClamAV flagged a trojan in Abel.dll on the machine",
+    old = cg.add_claim(case, statement="ClamAV flagged a trojan in helper.dll on the machine",
                        confidence="LIKELY")["node_id"]
-    new = cg.add_claim(case, statement="ClamAV flagged the trojan Win.Trojan.Cain-9 in Abel.dll on the machine",
+    new = cg.add_claim(case, statement="ClamAV flagged the trojan Win.Trojan.Example-9 in helper.dll on the machine",
                        confidence="LIKELY")["node_id"]
     assert update_task(case, tid, status="answered", related_claim_ids=[old])["success"]
     assert cg.supersede(case, old, new, reason="re-recorded with the signature name")["success"]
@@ -621,7 +623,7 @@ class TestRequestItems:
     def test_the_demo_briefs_parse_whole(self):
         import glob
         root = Path(__file__).resolve().parents[2]
-        # Briefs without wrapped items read exactly as before: their first
+        # Briefs without wrapped items read as written: their first
         # line is their text.
         for f in sorted(glob.glob(str(root / "demo-cases" / "*" / "CASE.md"))) + [str(root / "case-template" / "CASE.md")]:
             for item in parse_case_request_items(Path(f).read_text(encoding="utf-8")):
@@ -831,3 +833,314 @@ class TestThematicBreaksAreNoRequests:
         reconcile_case_md(case)
         texts = [t["text"] for t in load_tasks(case)["tasks"]]
         assert "* *" not in texts and "- -" not in texts and len(texts) == 4
+
+
+def test_link_claim_never_touches_the_parts(tmp_path: Path):
+    """Record-time linking links the belief and leaves the parts exactly as
+    they were: only the analyst's own update closes a part."""
+    import copy
+    from core.claim_graph import add_claim
+    from core.investigation_tasks import link_claim_to_tasks
+
+    case = tmp_path / "case"
+    case.mkdir()
+    (case / "CASE.md").write_text(
+        "## Investigation Requests\n\n- Which host was compromised first and when?\n",
+        encoding="utf-8",
+    )
+    tid = reconcile_case_md(case, persist=True)["added"][0]
+    before = copy.deepcopy(load_tasks(case)["tasks"][0]["parts"])
+    assert before and all(p["status"] == "open" for p in before)
+    cid = add_claim(case, "Host CORP-WS07 was compromised first, on 2031-02-04 10:00 UTC, by a phishing attachment.",
+                    confidence="LIKELY", host="CORP-WS07")["node_id"]
+    out = link_claim_to_tasks(case, cid, statement="Host CORP-WS07 was compromised first, on 2031-02-04 10:00 UTC, "
+                                                   "by a phishing attachment.", host="CORP-WS07")
+    assert tid in out["linked"]
+    t = load_tasks(case)["tasks"][0]
+    assert t["status"] == "in_progress" and t["related_claim_ids"] == [cid]
+    assert t["parts"] == before
+
+
+def test_a_parts_only_close_of_a_host_gate_limits_the_hosts_other_parts_in_the_same_call(tmp_path: Path):
+    """A per-host gate answered "not affected" by an absence finding is an
+    analyst binding; the host's other standard parts are limited in the same
+    update, however the call is shaped."""
+    from core import request_parts as rp
+    from core.claim_graph import add_claim
+    from core.investigation_tasks import save_tasks, update_task
+
+    case = tmp_path / "case"
+    case.mkdir()
+    (case / "CASE.md").write_text(
+        "## Investigation Requests\n\n- What happened on the hosts?\n", encoding="utf-8")
+    reconcile_case_md(case, persist=True)
+    store = load_tasks(case)
+    t = store["tasks"][0]
+    std = rp.standard_parts(t["text"], ["CORP-WS01", "CORP-WS02"])
+    t["parts"] = [p for p in t.get("parts") or [] if p.get("kind") == "umbrella"] + std
+    save_tasks(case, store)
+    gate = next(p for p in std if p.get("gate") and p.get("host") == "CORP-WS02")
+    cid = add_claim(case, "No evidence of attacker activity was found on CORP-WS02: its event logs, prefetch "
+                          "and registry show no intrusion.", confidence="LIKELY", host="CORP-WS02")["node_id"]
+    r = update_task(case, t["id"], parts={gate["id"]: {"claim_ids": [cid]}})
+    assert r.get("success"), r
+    after = load_tasks(case)["tasks"][0]["parts"]
+    ws02 = [p for p in after if p.get("host") == "CORP-WS02"]
+    assert next(p for p in ws02 if p.get("gate"))["status"] == "answered"
+    assert all(p["status"] == "limited" for p in ws02 if not p.get("gate"))
+    assert all(p["status"] == "open" for p in after if p.get("host") == "CORP-WS01")
+
+
+def test_a_progress_note_closes_nothing_and_only_the_links_a_close_names_mark_a_part(tmp_path: Path, monkeypatch):
+    """A status-only progress note leaves the parts as they are, record-time
+    links or not. A close may answer a part from the task's stored links;
+    that part carries no ``closed_by``. The close that names the belief
+    marks the part the analyst's. (The old path: ATLAS_PART_GATE_STRUCTURAL
+    off.)"""
+    from core.claim_graph import add_claim
+    from core.investigation_tasks import link_claim_to_tasks, update_task
+    monkeypatch.setenv("ATLAS_PART_GATE_STRUCTURAL", "0")
+
+    case = tmp_path / "case"
+    case.mkdir()
+    (case / "CASE.md").write_text(
+        "## Investigation Requests\n\n- Which host was compromised first?\n",
+        encoding="utf-8",
+    )
+    tid = reconcile_case_md(case, persist=True)["added"][0]
+    cid = add_claim(case, "Host CORP-WS07 was compromised first, by a phishing attachment.",
+                    confidence="LIKELY", host="CORP-WS07")["node_id"]
+    link_claim_to_tasks(case, cid, statement="Host CORP-WS07 was compromised first, by a phishing attachment.",
+                        host="CORP-WS07")
+    assert all(p["status"] == "open" for p in load_tasks(case)["tasks"][0]["parts"])
+
+    update_task(case, tid, status="in_progress")
+    t = load_tasks(case)["tasks"][0]
+    assert t["status"] == "in_progress" and all(p["status"] == "open" for p in t["parts"])
+
+    update_task(case, tid, status="answered")
+    parts = load_tasks(case)["tasks"][0]["parts"]
+    assert [p["status"] for p in parts] == ["answered"] and parts[0]["claim_ids"] == [cid]
+    assert "closed_by" not in parts[0]
+
+    update_task(case, tid, status="answered", related_claim_ids=[cid])
+    t = load_tasks(case)["tasks"][0]
+    assert t["related_claim_ids"] == [cid] and t["parts"][0]["closed_by"] == "analyst"
+
+
+class TestTheBriefsMainQuestionIsTracked:
+    """A brief's CASE_QUESTION marker is Atlas's objective line. It is a
+    tracked task beside the requests, and the only one when the brief lists
+    no requests; a request that repeats it is not doubled."""
+
+    QUESTION = ("Establish who copied the payroll export from CORP-WS01 and where it went, "
+                "and whether jane.doe's account was used.")
+
+    def _case(self, tmp_path: Path, md: str) -> Path:
+        case = tmp_path / "CASE-A"
+        case.mkdir(parents=True)
+        (case / "CASE.md").write_text(md, encoding="utf-8")
+        return case
+
+    def test_a_bare_brief_with_only_the_marker_gets_one_task(self, tmp_path: Path):
+        case = self._case(tmp_path, f"# Case: CASE-A\n\n## CASE_QUESTION: {self.QUESTION}\n")
+        r = reconcile_case_md(case, persist=True)
+        assert [t["text"] for t in r["tasks"]] == [self.QUESTION]
+
+    def test_the_marker_leads_the_requests_in_every_written_form(self, tmp_path: Path):
+        for i, line in enumerate((f"CASE_QUESTION: {self.QUESTION}",
+                                  f"**CASE_QUESTION:** {self.QUESTION}",
+                                  f"**CASE_QUESTION: {self.QUESTION}**")):
+            case = self._case(tmp_path / str(i), (
+                "# Case: CASE-A\n\n### Case Question\n\n" + line + "\n\n"
+                "## Investigation Requests\n\n"
+                "1. When was the export first opened?\n"
+                "2. Which account ran the copy?\n"))
+            r = reconcile_case_md(case, persist=True)
+            assert [t["text"] for t in r["tasks"]] == [
+                self.QUESTION, "When was the export first opened?", "Which account ran the copy?"], line
+
+    def test_beside_requests_the_question_is_one_obligation_a_bare_one_is_split(self, tmp_path: Path):
+        reqs = "## Investigation Requests\n\n1. When was the export first opened?\n"
+        beside = reconcile_case_md(self._case(tmp_path / "a", f"CASE_QUESTION: {self.QUESTION}\n\n{reqs}"),
+                                   persist=True)["tasks"][0]
+        assert [(p["text"], p["type"]) for p in beside["parts"]] == [(self.QUESTION, "narrative")]
+        bare = reconcile_case_md(self._case(tmp_path / "b", f"CASE_QUESTION: {self.QUESTION}\n"),
+                                 persist=True)["tasks"][0]
+        assert len(bare["parts"]) > 1
+        # The brief gains requests later: the question becomes one part.
+        (tmp_path / "b" / "CASE-A" / "CASE.md").write_text(f"CASE_QUESTION: {self.QUESTION}\n\n{reqs}",
+                                                          encoding="utf-8")
+        again = reconcile_case_md(tmp_path / "b" / "CASE-A", persist=True)["tasks"]
+        assert len(again[0]["parts"]) == 1 and len(again) == 2
+
+    def test_the_whole_question_is_answered_by_a_belief_that_speaks_to_it(self):
+        from core import request_parts as rp
+        t = {"text": self.QUESTION, "status": "open", "related_claim_ids": []}
+        rp.ensure_parts(t, whole=True)
+        node = {"id": "C1", "kind": "claim", "status": "active", "host": "CORP-WS01",
+                "statement": ("jane.doe copied the payroll export from CORP-WS01 to a USB drive on "
+                              "2031-03-04; her account was used for the copy.")}
+        assert rp.assign(t, {"C1": node}, ["C1"], lenient=True) == ["p1"]
+
+    def test_a_question_the_requests_repeat_is_one_task(self, tmp_path: Path):
+        case = self._case(tmp_path, (
+            f"## CASE_QUESTION: {self.QUESTION}\n\n## Investigation Requests\n\n- {self.QUESTION}\n"))
+        assert len(reconcile_case_md(case, persist=True)["tasks"]) == 1
+
+    def test_a_brief_without_a_store_still_names_its_question_as_the_objective(self, tmp_path: Path):
+        from types import SimpleNamespace
+        from agent.cli import _resolve_case_question
+        case = self._case(tmp_path, f"## CASE_QUESTION: {self.QUESTION}\n")
+        assert _resolve_case_question(SimpleNamespace(question=None), case) == self.QUESTION
+
+
+def test_a_refused_part_refuses_the_whole_call_and_prints_the_saved_state(tmp_path: Path):
+    """Parts are one call, one state: a part refused refuses the whole
+    update, nothing is recorded, the refusal says per part what would have
+    held, and the parts it prints are the saved ones (never the parts
+    applied in memory before the refusal)."""
+    from core import request_parts as rp
+    from core.investigation_tasks import save_tasks, update_task
+
+    case = tmp_path / "case"
+    case.mkdir()
+    (case / "CASE.md").write_text(
+        "## Investigation Requests\n\n- What happened on the hosts?\n\nThe mail server is out of scope.\n",
+        encoding="utf-8")
+    reconcile_case_md(case, persist=True)
+    store = load_tasks(case)
+    t = store["tasks"][0]
+    std = rp.standard_parts(t["text"], ["CORP-WS01"])
+    t["parts"] = [p for p in t.get("parts") or [] if p.get("kind") == "umbrella"] + std
+    save_tasks(case, store)
+    ids = [p["id"] for p in std if not p.get("gate")][:3]
+    assert len(ids) == 3
+    held = {"limitation": {"basis": "out_of_scope",
+                           "reason": "the brief excludes the mail server, the only source for this part"}}
+    r = update_task(case, t["id"], parts={ids[0]: held, ids[1]: held,
+                                         ids[2]: {"limitation": {"basis": "guessed", "reason": "x" * 30}}})
+    assert not r.get("success") and r.get("gate") == "task_part_limitation", r
+    assert r["verdicts"] == [f"{ids[0]} would hold", f"{ids[1]} would hold", f"{ids[2]} refused"]
+    assert "Nothing was recorded" in r["error"]
+    assert not any("not determined" in line for line in r["parts"])
+    after = {p["id"]: p for p in load_tasks(case)["tasks"][0]["parts"]}
+    assert all(after[i]["status"] == "open" and not after[i].get("limitation") for i in ids)
+    ok = update_task(case, t["id"], parts={ids[0]: held, ids[1]: held})
+    assert ok.get("success"), ok
+    after = {p["id"]: p for p in load_tasks(case)["tasks"][0]["parts"]}
+    assert after[ids[0]]["status"] == "limited" and after[ids[1]]["status"] == "limited"
+
+
+def test_capitals_in_a_limitation_reason_are_sources_only_when_the_case_knows_them(tmp_path: Path):
+    """An acronym and a binary's name written in capitals are words of the
+    reason, not sources the cited calls must name: a successful read of
+    the log the reason describes holds the examined limitation."""
+    from core import request_parts as rp
+    from core.execution_log import log
+    from core.investigation_tasks import save_tasks, update_task
+
+    case = tmp_path / "case"
+    case.mkdir()
+    (case / "CASE.md").write_text("## Investigation Requests\n\n- What happened on the hosts?\n", encoding="utf-8")
+    reconcile_case_md(case, persist=True)
+    store = load_tasks(case)
+    t = store["tasks"][0]
+    std = rp.standard_parts(t["text"], ["CORP-WS01"])
+    t["parts"] = [p for p in t.get("parts") or [] if p.get("kind") == "umbrella"] + std
+    save_tasks(case, store)
+    pid = next(p["id"] for p in std if not p.get("gate"))
+    cids = []
+    for host in ("CORP-WS01", "CORP-DC01"):
+        cid = log.record_tool_call(
+            f"<py>:evtx_filter evidence/{host}/Windows/System32/winevt/Logs/System.evtx event_ids=[7045]",
+            True, False, 0, 0, stdout_excerpt='{"success": true, "matches_found": 2, "events": ["<Event/>"]}')
+        log.annotate_tool_call(cid, mcp_tool="misc_evtx_filter")
+        cids.append(cid)
+    reason = ("Service installs (EID 7045) were read on both hosts. Only the SVCKIT installs on the "
+              "workstation were found, transient execution rather than persistence.")
+    r = update_task(case, t["id"], parts={pid: {"limitation": {"basis": "examined", "reason": reason,
+                                                               "call_ids": cids}}})
+    assert r.get("success"), r
+    part = next(p for p in load_tasks(case)["tasks"][0]["parts"] if p["id"] == pid)
+    assert part["status"] == "limited" and part["limitation"]["basis"] == "examined"
+
+
+def test_a_refused_close_prints_the_saved_parts_and_records_nothing(tmp_path: Path):
+    """A close refused after the loop (open parts remain) is the same
+    refusal as one inside it: the parts printed are the saved ones, and
+    the open list is the one the call would have produced."""
+    from core import request_parts as rp
+    from core.investigation_tasks import save_tasks, update_task
+
+    case = tmp_path / "case"
+    case.mkdir()
+    (case / "CASE.md").write_text(
+        "## Investigation Requests\n\n- What happened on the hosts?\n\nThe mail server is out of scope.\n",
+        encoding="utf-8")
+    reconcile_case_md(case, persist=True)
+    store = load_tasks(case)
+    t = store["tasks"][0]
+    std = rp.standard_parts(t["text"], ["CORP-WS01"])
+    t["parts"] = [p for p in t.get("parts") or [] if p.get("kind") == "umbrella"] + std
+    save_tasks(case, store)
+    pid = next(p["id"] for p in std if not p.get("gate"))
+    r = update_task(case, t["id"], status="blocked_missing_evidence", parts={pid: {"limitation": {
+        "basis": "out_of_scope", "reason": "the brief excludes the mail server, the only source for this part"}}})
+    assert not r.get("success") and r.get("gate") == "task_parts_open" and "Nothing was recorded" in r["error"]
+    assert not any("not determined" in line for line in r["parts"])
+    assert f"{pid} would hold; the status 'blocked_missing_evidence' is refused" in r["error"]
+    assert "the refused one corrected" not in r["error"] and r["error"].count("Nothing was recorded") == 1
+    assert next(p for p in load_tasks(case)["tasks"][0]["parts"] if p["id"] == pid)["status"] == "open"
+
+
+def test_capitals_name_a_source_for_an_absence_and_a_present_file_is_not_absent(case, monkeypatch):
+    """For source_absent every capitals word is searched for in the case's
+    index (the name stem): a binary the listing holds cannot be called
+    absent, whatever its spelling. The filter that keeps only known
+    artefact names applies where the cited calls must name the source
+    (examined, unreadable), never here."""
+    from core import request_parts as rp
+    from core.investigation_tasks import save_tasks, update_task
+    from tests.core.test_contents_index import _body, _build, _image, _links, _plan
+
+    _links(case, [("CORP-WS01", "evidence/disk/corp-ws01.raw")])
+    _plan(case, [_image(case, "corp-ws01.raw")])
+    _build(case, monkeypatch, {"corp-ws01.raw": [
+        _body("Windows/System32/winevt/Logs/Security.evtx", "200-128-1", 70000),
+        _body("Windows/SVCKIT.exe", "300-128-1", 4096)]})
+    (case / "CASE.md").write_text("## Investigation Requests\n\n- What happened on the hosts?\n", encoding="utf-8")
+    reconcile_case_md(case, persist=True)
+    store = load_tasks(case)
+    t = store["tasks"][0]
+    std = rp.standard_parts(t["text"], ["CORP-WS01"])
+    t["parts"] = [p for p in t.get("parts") or [] if p.get("kind") == "umbrella"] + std
+    save_tasks(case, store)
+    pid = next(p["id"] for p in std if not p.get("gate"))
+    r = update_task(case, t["id"], parts={pid: {"limitation": {
+        "basis": "source_absent", "reason": "SVCKIT is not present on this workstation, no service binary was found"}}})
+    assert not r.get("success") and "is present in this case" in r["error"], r
+
+
+def test_an_artefact_written_in_capitals_is_still_the_source_the_cited_read_must_name(case, monkeypatch):
+    """A file name in capitals is an artefact token first: an examined
+    limitation naming SYSTEM.EVTX while citing a read of another log is
+    refused, as it was before the capitals rule."""
+    from core import request_parts as rp
+    from core.execution_log import log
+    from core.investigation_tasks import save_tasks, update_task
+    (case / "CASE.md").write_text("## Investigation Requests\n\n- What happened on the hosts?\n", encoding="utf-8")
+    reconcile_case_md(case, persist=True)
+    store = load_tasks(case)
+    t = store["tasks"][0]
+    std = rp.standard_parts(t["text"], ["CORP-WS01"])
+    t["parts"] = [p for p in t.get("parts") or [] if p.get("kind") == "umbrella"] + std
+    save_tasks(case, store)
+    pid = next(p["id"] for p in std if not p.get("gate"))
+    cid = log.record_tool_call("<py>:evtx_filter evidence/CORP-WS01/Windows/System32/winevt/Logs/Security.evtx event_ids=[4624]",
+                               True, False, 0, 0, stdout_excerpt='{"success": true, "matches_found": 2, "events": ["<Event/>"]}')
+    log.annotate_tool_call(cid, mcp_tool="misc_evtx_filter")
+    r = update_task(case, t["id"], parts={pid: {"limitation": {
+        "basis": "examined", "reason": "SYSTEM.EVTX was read with the 7045 filter and shows no service installs in the window.",
+        "call_ids": [cid]}}})
+    assert not r.get("success") and "does not name the source" in r["error"]

@@ -1,10 +1,8 @@
 """Tests for tools/accuracy.py — ground-truth comparison."""
 import json
-import os
 import pytest
 from unittest.mock import patch
 from core.execution_log import ExecutionLog
-from tests._edition import DEVTOOLS_SHIPPED, NO_DEV_DATA
 
 
 def _gt_file(tmp_path, items, case_id="TEST", negatives=None):
@@ -220,18 +218,28 @@ class TestAsymmetricMatching:
     finding's extra tokens inflate the union, so a graded run scores f1 0.0
     even when every reference line is contained verbatim."""
 
-    CFREDS_GT = os.path.join(
-        os.path.dirname(__file__), "..", "..", "benchmarks", "cfreds-leak",
-        "ground_truth.json")
+    # An invented answer key in the shape of a published one: several
+    # short lines, two of them about the same removable stick.
+    KEY = (
+        {"id": "K1", "description": "Operating system is Windows 11 Pro, NTFS"},
+        {"id": "K2", "description": "USB device MEDIA#1 approved stick serial "
+                                     "7B320011223344550000 attached"},
+        {"id": "K3", "description": "USB device MEDIA#2 unapproved stick serial "
+                                     "7B320011223344556677 attached"},
+        {"id": "K4", "description": "MEDIA#2 anti-forensics: project files renamed to "
+                                     "harmless names and deleted from FAT, recoverable"},
+        {"id": "K5", "description": "Web-mail account of the subject is jane.doe@mail.example.com"},
+        {"id": "K6", "description": "Eraser executed on the PC on 2031-03-25; Recycle Bin emptied"},
+    )
 
     # A long finding that contains a ground-truth line verbatim yet scores
-    # below 0.1 under symmetric Jaccard against GT13.
-    RM2_FINDING = (
-        "RM#2 (unauthorized USB, FAT32, serial 4C530012550531106501, volume "
-        "label 'IAMAN') shows anti-forensics: deletion + decoy renaming — "
-        "confidential files renamed to innocuous decoy names such as "
-        "winter_storm.amr, winter_whether_advisory.zip, my_favorite_cars.db "
-        "and new_years_day.jpg, then deleted from the FAT directory; entries "
+    # below 0.1 under symmetric Jaccard against K4.
+    STICK2_FINDING = (
+        "MEDIA#2 (unapproved USB, FAT32, serial 7B320011223344556677, volume "
+        "label 'WORKDATA') shows anti-forensics: deletion + decoy renaming — "
+        "project files renamed to harmless decoy names such as "
+        "spring_rain.amr, garden_notes.zip, old_bikes.db "
+        "and party_photo.jpg, then deleted from the FAT directory; entries "
         "remain recoverable from unallocated clusters."
     )
 
@@ -239,63 +247,59 @@ class TestAsymmetricMatching:
         """A finding that contains the GT line verbatim, buried in a long
         paragraph, must score ~1.0 — full containment of the reference."""
         from tools.accuracy import _match_score
-        gt_line = ("RM#2 anti-forensics: confidential files renamed to "
-                   "innocuous names and deleted from FAT, recoverable")
+        gt_line = ("MEDIA#2 anti-forensics: project files renamed to "
+                   "harmless names and deleted from FAT, recoverable")
         finding = (
             "During analysis of the second removable device the following was "
             "established beyond doubt. " + gt_line + " Evidence: FAT32 "
-            "directory entries for design, PRICIN~1, progress, proposal and "
-            "TECHNI~1 all carry the 0xE5 deletion marker, serial "
-            "4C530012550531106501 ties the device to USBSTOR, and carving "
+            "directory entries for layout, BUDGET~1, status, offer and "
+            "REPORT~1 all carry the 0xE5 deletion marker, serial "
+            "7B320011223344556677 ties the device to USBSTOR, and carving "
             "restored every file intact."
         )
         assert _match_score(gt_line, finding) >= 0.95
 
-    @pytest.mark.skipif(not DEVTOOLS_SHIPPED, reason=NO_DEV_DATA)
-    def test_long_rm2_finding_matches_gt13_above_threshold(self):
-        """A rich RM#2 finding matches GT13 above the threshold."""
+    def test_long_stick_finding_matches_its_key_line_above_threshold(self):
+        """A rich finding about the second stick matches K4 above the threshold."""
         from tools.accuracy import _match_score
-        with open(self.CFREDS_GT) as f:
-            gt13 = [i for i in json.load(f)["expected_findings"]
-                    if i["id"] == "GT13"][0]
-        assert _match_score(gt13["description"], self.RM2_FINDING) > 0.30
+        k4 = next(i for i in self.KEY if i["id"] == "K4")
+        assert _match_score(k4["description"], self.STICK2_FINDING) > 0.30
 
-    @pytest.mark.skipif(not DEVTOOLS_SHIPPED, reason=NO_DEV_DATA)
-    def test_cfreds_gt13_true_positive_end_to_end(self, tmp_path):
-        """accuracy_compare with the shipped cfreds-leak ground truth must
-        credit the RM#2 finding as a true positive, not a false positive."""
+    def test_long_stick_finding_is_a_true_positive_end_to_end(self, tmp_path):
+        """accuracy_compare with a multi-line answer key must credit the
+        long stick finding as a true positive, not a false positive."""
         from tools.accuracy import accuracy_compare
-        l = _configure_log(tmp_path, [(self.RM2_FINDING, "LIKELY")])
+        l = _configure_log(tmp_path, [(self.STICK2_FINDING, "LIKELY")])
         with patch("core.execution_log.log", l):
-            r = accuracy_compare(self.CFREDS_GT)
+            r = accuracy_compare(_gt_file(tmp_path, list(self.KEY)))
         assert r["success"] is True
         assert r["summary"]["true_positive_count"] == 1
         assert r["summary"]["false_positive_count"] == 0
         matched_ids = {tp["ground_truth_id"] for tp in r["true_positives"]}
-        assert matched_ids & {"GT12", "GT13", "GT25"}
+        assert matched_ids & {"K3", "K4"}
 
     def test_high_signal_serial_boosts_score(self):
         """A shared device serial is near-unique — it must lift an otherwise
         thin overlap above the default threshold."""
         from tools.accuracy import _match_score
-        gt = ("USB device RM#2 unauthorized SanDisk Cruzer Fit serial "
-              "4C530012550531106501 attached")
+        gt = ("USB device MEDIA#2 unapproved stick serial "
+              "7B320011223344556677 attached")
         finding = ("USBSTOR registry entries confirm device serial "
-                   "4C530012550531106501 was connected to the PC")
+                   "7B320011223344556677 was connected to the PC")
         assert _match_score(gt, finding) > 0.30
 
     def test_high_signal_email_boosts_score(self):
         from tools.accuracy import _match_score
-        gt = "Spy Conspirator email address is spy.conspirator@nist.gov"
-        finding = ("Outlook OST contains an 11-message thread between "
-                   "iaman.informant@nist.gov and spy.conspirator@nist.gov "
+        gt = "Partner email address is john.roe@partner.example.org"
+        finding = ("The mail store contains a 9-message thread between "
+                   "jane.doe@corp.example.com and john.roe@partner.example.org "
                    "discussing payment for leaked technology documents")
         assert _match_score(gt, finding) > 0.30
 
     def test_unrelated_long_finding_stays_below_threshold(self):
         """Containment must not turn every long finding into a match."""
         from tools.accuracy import _match_score
-        gt = ("Sticky Notes content recovered from informant profile")
+        gt = ("Sticky Notes content recovered from employee profile")
         finding = (
             "Timestomp evidence detected: 200 MFT records show "
             "$STANDARD_INFORMATION timestamps earlier than $FILE_NAME, "
@@ -384,7 +388,7 @@ class TestNegativeAssertionScoring:
             negatives=["No BadUSB keystroke-injection device present"],
         )
         l = _configure_log(tmp_path, [
-            ("RM#3 CD-R was mounted at drive D: on the PC, evidenced by LNK "
+            ("MEDIA#3 DVD-R was mounted at drive D: on the PC, evidenced by LNK "
              "shortcuts. Carving recovered OOXML ZIP structures, indicating "
              "Office-document containers are present on the disc; this does "
              "not by itself prove the device payloads are unencrypted.",
@@ -445,8 +449,8 @@ class TestEntityMatching:
     def test_prose_only_match_flagged_token_quality(self):
         from tools.accuracy import _match_detail
         score, quality = _match_detail(
-            "Sticky Notes content recovered from informant profile",
-            "Recovered Sticky Notes content from the informant user profile",
+            "Sticky Notes content recovered from employee profile",
+            "Recovered Sticky Notes content from the employee user profile",
         )
         assert score > 0.30
         assert quality == "token"
@@ -553,22 +557,22 @@ class TestBundledFacts:
     def test_prose_only_sentence_must_state_most_of_the_item(self):
         from tools.accuracy import compare_findings
         gt = [{"id": "K1", "description": "Registered owner is Jordan Vale"},
-              {"id": "K2", "description": "Ten different rhino images are recoverable "
+              {"id": "K2", "description": "Ten different bird images are recoverable "
                                            "from the drive"}]
         # two of six content words shared: above the paragraph threshold,
         # under the majority a sentence has to state
         findings = [{"description": (
             "Registered owner is Jordan Vale. "
-            "The carved photos are larger rhino images."),
+            "The carved photos are larger bird images."),
             "confidence": "LIKELY"}]
         r = compare_findings({"expected_findings": gt}, findings)
         from tools.accuracy import _match_score
-        assert _match_score(gt[1]["description"], "The carved photos are larger rhino images.") > 0.30
+        assert _match_score(gt[1]["description"], "The carved photos are larger bird images.") > 0.30
         assert r["bundled"] == []
         # a shared canonical entity needs no majority
         findings[0]["description"] = (
-            "Registered owner is Jordan Vale. Serial 4C530012550531106501 seen in USBSTOR.")
-        gt[1] = {"id": "K2", "description": "Unauthorized stick serial 4C530012550531106501 attached"}
+            "Registered owner is Jordan Vale. Serial 7B320011223344556677 seen in USBSTOR.")
+        gt[1] = {"id": "K2", "description": "Unauthorized stick serial 7B320011223344556677 attached"}
         r = compare_findings({"expected_findings": gt}, findings)
         assert [b["ground_truth_id"] for b in r["bundled"]] == ["K2"]
         assert r["bundled"][0]["match_quality"] == "entity"

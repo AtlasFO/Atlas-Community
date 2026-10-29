@@ -444,3 +444,36 @@ def test_clear_case_run_invalidates_export(tmp_path: Path):
     clear_case_run(str(case), clear_memory=False)
     assert not raw.exists()
     assert not any(e.get("origin") == "export_raw" for e in media_entries(case))
+
+
+def test_a_read_inside_the_image_opens_it_on_success_only(tmp_path: Path):
+    """tsk_resolve_path and tsk_icat open an image when they succeed; a
+    "path not found" inside the image is not a failed open, and a failed
+    call never undoes an open."""
+    case = _case_with_disk(tmp_path)
+    analysis = case / "analysis"
+    analysis.mkdir()
+    raw = analysis / "host.raw"
+    raw.write_bytes(b"raw")
+    register_exported_image(case, raw)
+    args = json.dumps({"image_path": str(raw), "path": "/Windows/System32/config/SAM"})
+    assert record_open_from_tool(case, tool_name="tsk_tsk_resolve_path", cmd_or_args=args,
+                                 success=False, error="path not found") is None
+    assert stage_for_path(case, str(raw)) not in ("opened", "access_failed")
+    record_open_from_tool(case, tool_name="tsk.icat", cmd_or_args=args, success=True)
+    assert stage_for_path(case, str(raw)) == "opened"
+    record_open_from_tool(case, tool_name="tsk_fls", cmd_or_args=args, success=False,
+                          error="Cannot determine file system type")
+    assert stage_for_path(case, str(raw)) == "opened"
+
+
+def test_read_openers_switch_off(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("ATLAS_ABSENCE_GATE_V2", "0")
+    case = _case_with_disk(tmp_path)
+    (case / "analysis").mkdir()
+    raw = case / "analysis" / "host.raw"
+    raw.write_bytes(b"raw")
+    register_exported_image(case, raw)
+    assert record_open_from_tool(case, tool_name="tsk_resolve_path",
+                                 cmd_or_args=json.dumps({"image_path": str(raw)}), success=True) is None
+    assert stage_for_path(case, str(raw)) != "opened"

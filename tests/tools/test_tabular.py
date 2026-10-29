@@ -1,4 +1,5 @@
 """Tests for tools/tabular.py — typed xlsx/csv/jsonl evidence access."""
+import io
 import json
 
 import pytest
@@ -24,6 +25,144 @@ def test_a_row_with_a_very_large_field_is_readable(tmp_path):
     r = _fn(table_query)(str(p), where=["ExecutableName=EVIL.EXE"])
     assert r["success"] is True, r
     assert r["matched_rows"] == 1
+
+
+def test_a_result_that_does_not_show_every_matching_row_says_so(tmp_path):
+    """hit_cap_reached means the result does not show every row that matched:
+    the scan stopped at max_hits (decided before rows are dropped to fit the
+    output), or the scan ran to the end and rows were dropped to fit it."""
+    p = tmp_path / "timeline.csv"
+    wide = "x" * 500
+    p.write_text("host,a,b,c,d\n" + "".join(f"CORP-WS01,{wide},{wide},{wide},{wide}\n"
+                                           for _ in range(80)), encoding="utf-8")
+    stopped = _fn(table_grep)(str(p), "CORP-WS01", max_hits=50)
+    assert stopped["success"] and stopped["hit_count"] < 50
+    assert stopped["hit_cap_reached"] is True and stopped["payload_capped"] is True
+    small = _fn(table_grep)(str(p), "CORP-WS01", max_hits=5)
+    assert small["hit_cap_reached"] is True and small["payload_capped"] is False
+    p.write_text("host,a,b,c,d\n" + "".join(f"CORP-WS01,{wide},{wide},{wide},{wide}\n"
+                                           for _ in range(30)), encoding="utf-8")
+    dropped = _fn(table_grep)(str(p), "CORP-WS01", max_hits=50)
+    assert dropped["hit_count"] < 30 and dropped["payload_capped"] is True
+    assert dropped["hit_cap_reached"] is True
+    p.write_text("host,a\nCORP-WS01,1\nCORP-WS02,2\n", encoding="utf-8")
+    whole = _fn(table_grep)(str(p), "CORP-WS01", max_hits=50)
+    assert whole["hit_cap_reached"] is False and whole["payload_capped"] is False
+
+
+@pytest.mark.parametrize("with_grep", [True, False])
+def test_a_capped_search_says_which_of_its_alternatives_occur_in_the_file(tmp_path, monkeypatch,
+                                                                         with_grep):
+    """A frequent alternative fills the hit cap in the first rows; the scan
+    goes on for the others and the result says, for each, whether any row of
+    the whole file matches it: through grep where it can stand in for the row
+    loop, through the row loop where it cannot, with the same answer."""
+    monkeypatch.setenv("ATLAS_TABLE_SURVEY", "0")  # the search before the count pass
+    import tools.tabular as tabular
+    if not with_grep:
+        monkeypatch.setattr(tabular.shutil, "which", lambda _name: None)
+    p = tmp_path / "timeline.csv"
+    rows = [f"CORP-WS01,C:\\Windows\\System32\\svchost.exe,{n}\n" for n in range(300)]
+    rows.insert(250, "CORP-WS01,C:\\ProgramData\\updater.exe,250\n")
+    p.write_text("host,path,n\n" + "".join(rows), encoding="utf-8")
+    r = _fn(table_grep)(str(p), r"svchost\.exe|updater\.exe|helper\.dll", max_hits=5)
+    assert r["hit_cap_reached"] is True and r["hit_count"] == 5
+    assert r["alternatives"]["matched"] == [r"svchost\.exe", r"updater\.exe"]
+    assert r["alternatives"]["unmatched"] == [r"helper\.dll"]
+    assert r["rows_scanned"] == (6 if with_grep else 301)
+    # Ahead of the rows, so a result cut at its tail still carries it.
+    assert list(r).index("alternatives") < list(r).index("hits")
+    # Every alternative seen: the scan stops there, nothing is unmatched.
+    seen = _fn(table_grep)(str(p), r"svchost\.exe|updater\.exe", max_hits=5)
+    assert seen["alternatives"]["unmatched"] == []
+    assert seen["rows_scanned"] == (6 if with_grep else 251)
+    # One alternative, or a search that showed every match: unchanged.
+    one = _fn(table_grep)(str(p), r"svchost\.exe", max_hits=5)
+    assert "alternatives" not in one and one["rows_scanned"] == 5
+    whole = _fn(table_grep)(str(p), r"updater\.exe|helper\.dll", max_hits=5)
+    assert whole["hit_cap_reached"] is False and "alternatives" not in whole
+
+
+def test_grep_stands_in_only_where_it_reads_the_same_text(tmp_path, monkeypatch):
+    """UTF-16 bytes, a quoted alternative, or a grep match that no
+    alternative claims: the row loop settles them instead."""
+    monkeypatch.setenv("ATLAS_TABLE_SURVEY", "0")  # the search before the count pass
+    import tools.tabular as tabular
+    calls = []
+    real_popen = tabular.subprocess.Popen
+
+    def counting_popen(*a, **kw):
+        calls.append(a[0])
+        return real_popen(*a, **kw)
+    monkeypatch.setattr(tabular.subprocess, "Popen", counting_popen)
+    rows = "".join(f"CORP-WS01,svchost.exe {n}\n" for n in range(40)) + "CORP-WS01,updater.exe\n"
+    wide = tmp_path / "wide.csv"
+    wide.write_bytes(("host,proc\n" + rows).encode("utf-16"))
+    r = _fn(table_grep)(str(wide), r"svchost\.exe|updater\.exe|helper\.dll", max_hits=5)
+    assert calls == [] and r["alternatives"]["unmatched"] == [r"helper\.dll"]
+    plain = tmp_path / "plain.csv"
+    plain.write_text("host,proc\n" + rows, encoding="utf-8")
+    quoted = _fn(table_grep)(str(plain), r'svchost\.exe|"updater|helper\.dll', max_hits=5)
+    assert calls == [] and quoted["alternatives"]["matched"] == [r"svchost\.exe"]
+
+    class Stray:
+        stdout = io.BytesIO(b"unclaimed\n")
+
+        def poll(self):
+            return 0
+
+        def kill(self):
+            pass
+
+        def wait(self):
+            return 0
+    monkeypatch.setattr(tabular.subprocess, "Popen", lambda *a, **kw: Stray())
+    stray = _fn(table_grep)(str(plain), r"svchost\.exe|updater\.exe|helper\.dll", max_hits=5)
+    assert stray["alternatives"]["matched"] == [r"svchost\.exe", r"updater\.exe"]
+    assert stray["alternatives"]["unmatched"] == [r"helper\.dll"] and stray["rows_scanned"] == 41
+
+
+def test_an_alternative_a_line_reads_differently_takes_the_row_loop(tmp_path, monkeypatch):
+    """An anchor (a cell ends inside the line) or a whitespace class (a quoted
+    cell can hold a line break) is settled by the row loop, never by grep:
+    each is present only past the cap and must read as matched."""
+    monkeypatch.setenv("ATLAS_TABLE_SURVEY", "0")  # the search before the count pass
+    import tools.tabular as tabular
+    calls = []
+    monkeypatch.setattr(tabular.subprocess, "Popen", lambda *a, **kw: calls.append(a) or 1 / 0)
+    rows = "".join(f"CORP-WS01,svchost.exe {n},x\n" for n in range(40))
+    rows += '4624,"run.exe\n-enc AAAA",x\n'
+    p = tmp_path / "t.csv"
+    p.write_text("eid,cmd,z\n" + rows, encoding="utf-8")
+    r = _fn(table_grep)(str(p), r"svchost\.exe|^4624$|run\.exe\s+-enc", max_hits=5)
+    assert calls == []
+    assert r["alternatives"]["matched"] == [r"svchost\.exe", r"^4624$", r"run\.exe\s+-enc"]
+    assert r["alternatives"]["unmatched"] == [] and r["rows_scanned"] == 41
+
+
+def test_an_alternative_past_the_row_bound_is_not_called_unmatched(tmp_path, monkeypatch):
+    monkeypatch.setenv("ATLAS_TABLE_SURVEY", "0")  # the search before the count pass
+    import tools.tabular as tabular
+    monkeypatch.setattr(tabular, "MAX_SCAN_ROWS", 50)
+    p = tmp_path / "timeline.csv"
+    p.write_text("host,proc\n" + "".join(f"CORP-WS01,svchost.exe {n}\n" for n in range(100)),
+                 encoding="utf-8")
+    r = _fn(table_grep)(str(p), r"svchost\.exe|helper\.dll", max_hits=5)
+    assert r["scan_capped"] is True
+    assert r["alternatives"]["matched"] == [r"svchost\.exe"]
+    assert r["alternatives"]["unresolved"] == 1 and "unmatched" not in r["alternatives"]
+
+
+def test_alternatives_split_only_at_the_top_level():
+    from tools.tabular import _alternatives
+    split = _alternatives(r"a|b(c|d)|[|x]|e\|f|[]|]z", 0)
+    assert [s for s, _ in split] == ["a", "b(c|d)", "[|x]", r"e\|f", "[]|]z"]
+    flagged = _alternatives("(?i)ALPHA|beta", 0)
+    assert [s for s, _ in flagged] == ["ALPHA", "beta"] and flagged[1][1].search("BETA")
+    assert _alternatives("single(alt|ernation)", 0) is None
+    assert _alternatives("(?x)a | b  # c|d", 0) is None
+    assert _alternatives(r"(a)|\1", 0) is None
+    assert _alternatives(r"(a)|(b)\2", 0) is None
 
 
 def test_zero_match_with_a_doubled_backslash_names_the_cause(tmp_path):
@@ -151,7 +290,8 @@ class TestQuery:
                              where=["severity=HIGH"],
                              columns=["src_ip", "rule"])
         assert r["matched_rows"] == 2
-        assert r["rows"][0] == {"src_ip": "10.0.0.5", "rule": "beacon detected"}
+        assert {k: v for k, v in r["rows"][0].items() if not k.startswith("_")} == {
+            "src_ip": "10.0.0.5", "rule": "beacon detected"}
 
     def test_regex_and_negation(self, siem_xlsx):
         r = _fn(table_query)(siem_xlsx, sheet="Alerts",
@@ -289,7 +429,7 @@ class TestQuery:
         assert "two table.table_query" in r["rewrite_hint"]
 
     def test_auto_peek_exhausts_invented_columns(self, tmp_path):
-        """B1 residual: peek establishes schema SoT — invent → exhaust in-band."""
+        """A peek establishes the schema source of truth — invented columns exhaust in-band."""
         case = tmp_path / "case"
         (case / "evidence").mkdir(parents=True)
         (case / "analysis").mkdir()
@@ -324,7 +464,7 @@ class TestQuery:
         assert invent.get("closest_columns") is not None
 
     def test_edr_destination_synonyms_bind_to_remote(self, tmp_path):
-        """I4: Destination* product names → Remote* when unique in file."""
+        """Destination* product names → Remote* when unique in file."""
         p = tmp_path / "edr_logons.csv"
         p.write_text(
             "TimeGenerated,RemoteDeviceName,RemoteIP,RemotePort,AccountName\n"
@@ -480,3 +620,44 @@ class TestScanBound:
         assert [row["n"] for row in r["rows"]] == ["9", "8", "7"]
         r = _fn(table_query)(timeline, limit=2, offset=1)
         assert r["matched_rows"] == 12 and [row["n"] for row in r["rows"]] == ["1", "2"]
+
+
+def test_a_matched_cell_longer_than_the_cap_keeps_its_head_and_the_match(tmp_path, monkeypatch):
+    """The trace then holds the matched text, and the view can show why the
+    row matched; with the switch off the cell keeps its head."""
+    p = tmp_path / "t.csv"
+    long = "[4688 / 0x1250] A new process has been created " + "y" * 900 + " updater-task.exe /scheduled" + "z" * 100
+    p.write_text("host,desc\nCORP-WS01," + long + "\nCORP-WS01,quiet\n", encoding="utf-8")
+    r = _fn(table_grep)(str(p), r"updater-task\.exe", max_hits=5)
+    cell = r["hits"][0]["desc"]
+    assert cell.startswith("[4688 / 0x1250] A new process has been created") and "updater-task.exe /scheduled" in cell
+    assert " … " in cell and len(cell) < 600
+    monkeypatch.setenv("ATLAS_TABLE_CLIP_AT_MATCH", "0")
+    r = _fn(table_grep)(str(p), r"updater-task\.exe", max_hits=5)
+    assert r["hits"][0]["desc"] == long[:512] + "…"
+
+
+def test_ragged_rows_are_counted_and_said_a_clean_file_says_nothing(tmp_path):
+    """An export whose records carry their own field sets binds by
+    position: the schema, a query and a pivot say how many rows differ
+    from the header and that their columns may be misnamed. A file whose
+    every row fits the header says nothing about it."""
+    ragged = tmp_path / "ragged.csv"
+    ragged.write_text(
+        "num,date,time,action,src,dst\n"
+        "1,2031-03-10,10:00:00,accept,10.0.0.5,203.0.113.9\n"
+        "2,2031-03-10,10:00:01,accept\n"                       # two fields short
+        "3,2031-03-10,10:00:02,drop,rule7,inzone,10.0.0.6,203.0.113.9\n"  # two fields long
+        "4,2031-03-10,10:00:03,accept,10.0.0.7,203.0.113.9\n", encoding="utf-8")
+    schema = table_schema(str(ragged))
+    assert schema["success"] and schema["ragged_rows"] == 2 and schema["ragged_share"] == 0.5
+    assert "bound to columns by position" in schema["ragged_note"] and "col<N>" in schema["ragged_note"]
+    assert "read a few raw rows" in schema["ragged_note"]
+    q = table_query(str(ragged), where=["action=accept"])
+    assert q["success"] and q["ragged_rows"] == 2
+    piv = table_pivot(str(ragged), group_by=["action"])
+    assert piv["success"] and piv["ragged_rows"] == 2
+    clean = tmp_path / "clean.csv"
+    clean.write_text("num,date,action\n1,2031-03-10,accept\n2,2031-03-10,drop\n", encoding="utf-8")
+    assert "ragged_rows" not in table_schema(str(clean))
+    assert "ragged_rows" not in table_query(str(clean), where=["action=drop"])

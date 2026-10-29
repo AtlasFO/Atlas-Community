@@ -185,7 +185,7 @@ def absence_grounding(description: str, supporting_evidence: str = "",
             "alt_satisfies": spec.get("alt_satisfies")}
 
 
-def searches_of(grounding: dict, calls: list) -> list:
+def searches_of(grounding: dict, calls: list, claim_text: str = "", case_dir=None) -> list:
     """The calls among ``calls`` that searched one of the sources
     ``grounding`` requires (or one its alternative regex accepts): the calls
     that would have found what the claim says is absent. Judged on what the
@@ -203,6 +203,25 @@ def searches_of(grounding: dict, calls: list) -> list:
         text = entry_text(e)
         if not text.strip():
             continue
-        if any(rx.search(text) for _sid, rx, _hint in rows) or (alt and alt.search(text)):
-            out.append(e)
+        matched = [(sid, rx) for sid, rx, _hint in rows if rx.search(text)]
+        if not matched and not (alt and alt.search(text)):
+            continue
+        if matched and case_dir and _profiled_out(e, matched, claim_text, case_dir):
+            continue
+        out.append(e)
     return out
+
+
+def _profiled_out(entry: dict, matched: list, claim_text: str, case_dir) -> bool:
+    """A table read of an export that matched only event-log sources and
+    whose profile lacks their channel or the claim's event ids is no search
+    of them (ATLAS_ABSENCE_GATE_V2)."""
+    from core.envfile import env_flag
+    if not env_flag("ATLAS_ABSENCE_GATE_V2"):
+        return False
+    logs = [(sid, rx) for sid, rx in matched if str(sid).startswith(("security", "sessions"))]
+    if len(logs) != len(matched):
+        return False
+    from core.export_profile import claim_event_ids, export_covers
+    ids = claim_event_ids(claim_text)
+    return all(export_covers(case_dir, entry, rx, ids)[0] is False for _sid, rx in logs)

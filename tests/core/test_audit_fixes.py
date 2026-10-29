@@ -856,7 +856,10 @@ def _trace_with(case, entries):
             fh.write(json.dumps({"entry": e}) + "\n")
 
 
-def test_fls_cap_counts_only_successful_whole_tree_listings(tmp_path):
+def test_fls_cap_counts_only_successful_whole_tree_listings(tmp_path, monkeypatch):
+    # Bare-command entries are the intake's own listings once the contents
+    # index exists (tests/core/test_contents_index.py); with it off they count.
+    monkeypatch.setenv("ATLAS_CONTENTS_INDEX", "0")
     from core.access_workflow import _count_fls_in_trace
     case = tmp_path / "case"; (case / ".atlas").mkdir(parents=True)
     _trace_with(case, [
@@ -971,7 +974,8 @@ def test_sigterm_is_routed_to_the_interrupt_path():
     from agent import cli
     src = inspect.getsource(cli)
     assert "_signal.signal(_signal.SIGTERM, _on_sigterm)" in src
-    assert "raise KeyboardInterrupt" in src.split("def _on_sigterm")[1][:120]
+    handler = src.split("def _on_sigterm")[1].split("_signal.signal(")[0]
+    assert "raise KeyboardInterrupt" in handler
 
 
 # ── cost: prompt caching instead of a ceiling ────────────────────────────
@@ -1079,7 +1083,7 @@ def test_a_run_that_recorded_nothing_is_not_treated_as_finished():
 
 def test_an_action_announced_without_a_pronoun_is_still_an_intent():
     """A reply can name its next move without saying "I". Two of those in a
-    row used to read as a model with nothing left to do, which spends the
+    row would read as a model with nothing left to do, which spends the
     run's one wrap-up round and leaves a later quiet pair to end the run
     with no report."""
     from agent.loop import _INTENT_RE
@@ -1433,6 +1437,7 @@ def test_dair_window_used_counts_actions_after_the_last_assess():
     assert dair_window_used(Log(["tool_call"] * 30))[0] == 0         # aged out: the gate speaks
     assert dair_window_used(Log(["tool_call", "dair_call"]))[0] == 0
 
+@pytest.mark.usefixtures("todays_dair")
 
 def test_dair_window_nudge_fires_one_batch_before_expiry(monkeypatch):
     from agent import loop as loop_mod
@@ -1489,6 +1494,7 @@ def test_firewall_drops_are_not_an_attacker_action(tmp_path):
     from core.claim_graph import upsert_claim_from_finding
     from core.ioc_catalog import build_catalog
     case = tmp_path / "C"; (case / ".atlas").mkdir(parents=True)
+    (case / "CASE.md").write_text("**Case ID:** C\n**System owner:** victim\n", encoding="utf-8")   # the incident frame
     for stmt in ("Firewall log 2031-02-04 shows 600 dropped connections out of 80,000 events; "
                  "the only address present is 10.0.0.254, the firewall itself.",
                  "Traffic from 10.0.0.254 was dropped by rule 12 (action=drop)."):
@@ -1499,6 +1505,7 @@ def test_firewall_drops_are_not_an_attacker_action(tmp_path):
     assert "203.0.113.9" in values and "mimikatz.exe" in values
 
 
+@pytest.mark.usefixtures("todays_pivots")
 def test_pivot_closes_on_the_search_as_the_analyst_writes_it(tmp_path):
     from tests.core.test_ioc_pivots import _case
     import core.ioc_pivots as ip
@@ -1718,6 +1725,7 @@ def test_fallback_summary_reads_as_prose_without_finding_ids(tmp_path):
     prose = deterministic_section_generator(ctx, {"id": "exec_summary"})
     assert "F-001" not in prose and "EID" not in prose and "Ransomware encryption" in prose
 
+@pytest.mark.usefixtures("todays_dair")
 
 def test_dair_gate_lets_a_batch_that_started_inside_the_window_finish(monkeypatch):
     from core import middleware as mw
@@ -1743,7 +1751,7 @@ def test_dair_gate_lets_a_batch_that_started_inside_the_window_finish(monkeypatc
     monkeypatch.setattr(mw, "DAIR_BATCH_GRACE", 0)
     log2 = Log(["dair_call"] + ["tool_call"] * 15)
     monkeypatch.setattr("core.execution_log.log", log2)
-    assert mw.begin_batch() is False                 # switch off: per-call checks as before
+    assert mw.begin_batch() is False                 # switch off: per-call checks
     mw.end_batch()
 
 
@@ -1897,12 +1905,14 @@ class TestSessionBeaconForeignCase:
         monkeypatch.chdir(old)
         assert os.path.realpath(elog.ExecutionLog().case_dir()) == os.path.realpath(str(old))
 
-    def test_beacon_resumes_from_an_arbitrary_directory(self, tmp_path, monkeypatch):
+    def test_beacon_is_never_followed_from_an_arbitrary_directory(self, tmp_path, monkeypatch):
+        # The beacon names the run started last; a process outside every
+        # case (a probe, a harness, a restarted MCP server) binds none.
         old = self._case(tmp_path, "CASE-A", True)
         elog = self._beacon(tmp_path, monkeypatch, old, "CASE-A")
         (tmp_path / "elsewhere").mkdir()
         monkeypatch.chdir(tmp_path / "elsewhere")
-        assert os.path.realpath(elog.ExecutionLog().case_dir()) == os.path.realpath(str(old))
+        assert elog.ExecutionLog().case_dir() is None
 
 
 class TestActionWindowCountsModelCalls:
@@ -2385,6 +2395,7 @@ class TestAbsenceIsAboutTheArtifactItself:
 
 class TestRepeatedChallengeGuidance:
     def test_third_challenge_of_the_same_finding_carries_guidance(self, monkeypatch):
+        monkeypatch.setenv("ATLAS_EXTERNAL_LOOKUP_FIRST", "0")  # the guidance before the switch
         import tools.reasoning as rs
         import core.execution_log as elog
         finding = "toolx.exe at C:\\users\\public is the ransomware encryptor that wrote the .locked files"
@@ -2529,6 +2540,38 @@ class TestReportPhaseStall:
         state["blockers"] = 5
         assert a._report_stall_exhausted(7)             # rising is not progress
 
+    def test_more_high_value_artifacts_settled_is_progress(self, tmp_path, monkeypatch):
+        """The gate names every unread high-value artifact in one issue, so
+        reading or explaining them one by one lowers no blocker count; a
+        verdict that finds one more settled moves the ladder."""
+        import agent.loop as lp
+        a = self._agent(tmp_path)
+        monkeypatch.setattr(lp, "REPORT_STALL_WRAPUP_FIRES", 3)
+        state = {"settled": 2}
+        monkeypatch.setattr(lp.Agent, "_claim_count", lambda self: 40)
+        monkeypatch.setattr(lp.Agent, "_report_blockers", lambda self: 1)
+        monkeypatch.setattr(lp.Agent, "_report_settled", lambda self: state["settled"])
+        assert not a._report_stall_exhausted(1)         # the first verdict
+        assert not a._report_stall_exhausted(2)
+        state["settled"] = 3
+        assert not a._report_stall_exhausted(3)         # one more settled restarts the count
+        assert not a._report_stall_exhausted(4)
+        assert a._report_stall_exhausted(5)
+
+    def test_the_settled_count_is_read_from_this_runs_newest_verdict(self, tmp_path):
+        from core.execution_log import log
+        verdict = "READY_TO_REPORT: false\nBLOCKING_ISSUES (1): x\nWARNINGS (0): none"
+        cid = log.record_reason_call(tool="reason_pre_report_check", success=True,
+                                     directives={}, conclusion=verdict)
+        log.update_reason_call(cid, hv_settled=4)
+        a = self._agent(tmp_path)
+        a._run_since = a._last_call_id()
+        assert a._report_settled() is None              # the run before's verdict
+        cid = log.record_reason_call(tool="reason_pre_report_check", success=True,
+                                     directives={}, conclusion=verdict)
+        log.update_reason_call(cid, hv_settled=5)
+        assert a._report_settled() == 5
+
     def _ledger(self, case, n_units: int):
         from core.coverage_ledger import save_ledger
         save_ledger(case, {"units": {
@@ -2548,7 +2591,7 @@ class TestReportPhaseStall:
         The coverage floor stays one blocking issue until the last unseen
         unit is read, so while the run reads units for the first time the
         Report phase is neither pushed nor wrapped up; once the reads stop,
-        the ladder runs as before."""
+        the ladder runs."""
         import agent.loop as lp
         from core.execution_log import log
         verdict = "READY_TO_REPORT: {r}\nBLOCKING_ISSUES ({n}): {b}\nWARNINGS (0): none"
