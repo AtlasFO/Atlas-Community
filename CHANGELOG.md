@@ -19,6 +19,13 @@ moves the Unreleased lines under a heading for the new version.
 
 ## Unreleased
 
+## 1.0.3 — 2026-10-29
+
+- A fresh install keeps the full tool descriptions the model reads: fastmcp 4.1
+  keeps only the part of a tool's description before its first section, which
+  cut the rules in several tools' texts, so Atlas stays on fastmcp 4.0 until it
+  passes its descriptions in a form 4.1 keeps whole.
+
 ## 1.0.2 — 2026-10-29
 
 Providers and profiles:

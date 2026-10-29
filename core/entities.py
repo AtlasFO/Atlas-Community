@@ -23,6 +23,7 @@ different event.
 from __future__ import annotations
 
 import ipaddress
+from collections.abc import Iterable
 import json
 import re
 from datetime import datetime, timezone

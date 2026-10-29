@@ -1,4 +1,4 @@
-fastmcp>=4.0.10
+fastmcp>=4.0.10,<4.1   # 4.1 keeps only a docstring's text before its first section: tool texts get cut
 httpx>=0.28.1
 python-magic>=0.4.27   # tools.media_types: a file's content type by libmagic (install.sh's `file` package brings libmagic1); the name route stands in without it
 Pillow>=10.3.0         # tools.images_decode: decoding and downsizing carved pictures in a child process; 10.0.1 took the libwebp fix (CVE-2023-4863), 10.3.0 the later ones
