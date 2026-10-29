@@ -5,9 +5,12 @@ refused when it is recorded, with both objections; the report gate is no
 longer where it is caught. Invented values."""
 from __future__ import annotations
 
+import pytest
+from tests._edition import DEVTOOLS_SHIPPED, NO_DEVTOOLS
 from unittest.mock import patch
 
 
+@pytest.mark.skipif(not DEVTOOLS_SHIPPED, reason=NO_DEVTOOLS)
 def test_a_finding_naming_values_no_call_printed_is_refused_at_record_time(monkeypatch, tmp_path):
     import tempfile
     from devtools.validation import live_refusal_probe as P

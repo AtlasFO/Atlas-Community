@@ -4,6 +4,7 @@ families, the exact-name vendor and popular lookups, the hunt rule, and the
 builder's refusal of a short download. Invented ranges and names only."""
 from __future__ import annotations
 
+from tests._edition import DEVTOOLS_SHIPPED, NO_DEVTOOLS
 import json
 
 import pytest
@@ -70,6 +71,7 @@ def test_a_missing_file_warns_once_and_marks_nothing(tmp_path, monkeypatch, caps
     S._load.cache_clear()
 
 
+@pytest.mark.skipif(not DEVTOOLS_SHIPPED, reason=NO_DEVTOOLS)
 def test_the_builder_refuses_a_short_download(monkeypatch, tmp_path):
     import importlib.util
     from pathlib import Path
@@ -91,6 +93,7 @@ def test_the_vendored_file_is_present_and_readable():
     assert not data["popular"]      # the popular set stays empty until its terms are settled
 
 
+@pytest.mark.skipif(not DEVTOOLS_SHIPPED, reason=NO_DEVTOOLS)
 def test_no_case_identifiers_are_baked_into_the_loader_or_the_builder():
     """The loader and the builder carry public sources and their labels
     only: no host, account, address or date of any case."""

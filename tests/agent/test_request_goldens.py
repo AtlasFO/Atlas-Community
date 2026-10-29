@@ -18,7 +18,11 @@ from pathlib import Path
 
 import pytest
 
-from devtools.provider_profiles import capture_requests as cap
+from tests._edition import require_devtools
+
+require_devtools()
+
+from devtools.provider_profiles import capture_requests as cap  # noqa: E402
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "llm_requests"
 PRESETS = sorted(p.stem for p in FIXTURES.glob("[a-z]*.json"))

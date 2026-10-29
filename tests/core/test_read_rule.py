@@ -4,6 +4,7 @@ background job's start stands for the outcome its runner recorded; a
 sub-command running the program of a tool that reads no content is named by
 that tool; "was it read" is the trace's answer, never a status the ledger
 stored. Invented case data only."""
+from tests._edition import DEVTOOLS_SHIPPED, NO_DEVTOOLS
 import json
 import os
 import re
@@ -417,6 +418,7 @@ def test_the_memory_structure_credit_reads_a_job_start_by_its_outcome(case, monk
     assert len(_successful_calls(case)) == 1
 
 
+@pytest.mark.skipif(not DEVTOOLS_SHIPPED, reason=NO_DEVTOOLS)
 def test_the_run_audit_reads_a_job_start_by_its_outcome(case):
     from devtools.validation import run_audit as ra
     (case / "CASE.md").write_text("# Case\n\n**Case ID:** CASE-A\n", encoding="utf-8")

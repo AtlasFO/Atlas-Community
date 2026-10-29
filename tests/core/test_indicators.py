@@ -1,6 +1,7 @@
 """Typed indicators: rows the analyst states are checked against the cited
 outputs, sided, given a use, and turned into the deliverable; prose rows
 stay under review; the owner's own assets never become block items."""
+from tests._edition import DEVTOOLS_SHIPPED, NO_DEVTOOLS
 import csv
 import io
 import json
@@ -863,6 +864,7 @@ def test_echo_free_off_restores_the_earlier_reader(monkeypatch):
     assert I.printed_rows(e) == ['{"dst": "203.0.113.7"}']
 
 
+@pytest.mark.skipif(not DEVTOOLS_SHIPPED, reason=NO_DEVTOOLS)
 def test_one_reader_is_shared():
     import devtools.validation.run_audit as ra
     assert ra.printed_rows is I.printed_rows and ra.request_strings is I.request_strings

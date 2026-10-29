@@ -4,6 +4,8 @@ Invented fixtures only (CORP-WS01, CORP-WS02, CORP-SRV01, jane.doe,
 svc_kit.exe, 203.0.113.x, dates in 2031)."""
 from __future__ import annotations
 
+import pytest
+from tests._edition import DEVTOOLS_SHIPPED, NO_DEVTOOLS
 import json
 import subprocess
 import sys
@@ -194,6 +196,7 @@ def test_a_ledger_unit_entering_pending_raises_one_change(tmp_path):
     assert "state" not in attrs
 
 
+@pytest.mark.skipif(not DEVTOOLS_SHIPPED, reason=NO_DEVTOOLS)
 def test_the_feed_is_stable_and_a_rebuild_gives_the_same_map(tmp_path):
     case = _case(tmp_path)
     _claim(case, "svc_kit.exe on CORP-WS01 at 2031-03-10 14:02:00.", _KIT)
