@@ -19,16 +19,11 @@ dist/
 build/
 *.egg-info/
 
-# local scratch / backups (never product)
+# archives and the assembled playbook
 *.tgz
 *.tar.gz
 /atlas-*.tgz
 hub/playbook.assembled.md
-claude/CLAUDE.assembled.md
-CLAUDE.assembled.md
-
-# maintainer notes, not part of the product
-/project-wiki/
 
 # Local runtime — venv stays in-repo; cache/history live under $HOME (XDG)
 .venv
@@ -152,12 +147,6 @@ sansforensics.zip
 # Generated validation reports (devtools/validation/run.py).
 devtools/validation/reports/*.json
 
-# Local list of terms the pre-commit hook refuses to commit. The list itself
-# must never ship.
-.git-private-terms
-
-# Local assistant session state (worktrees, settings); never part of the product.
-/.claude/
 
 # Live-test run reports are written by every run; only the folder is kept.
 tests/live/reports/*

@@ -488,7 +488,7 @@ def takes_target(schema: dict | None) -> bool:
     _reaches finds the target among a call's string arguments, whatever
     their names (_call_view), so a tool with no string-valued parameter can
     never close an item. Unknown (None) is no refusal.
-    ponytail: any string parameter counts, also one that cannot name a file
+    Any string parameter counts, also one that cannot name a file
     (a job id, a pattern); such a tool's item passes and still never closes.
     A schema-declared input role per parameter is the upgrade."""
     if schema is None:
@@ -1010,7 +1010,7 @@ def mark_presented(log, shown: list[int], moved: set[int]) -> None:
         log._flush()
 
 
-# ponytail: views keyed by the entry and its revision; a copy the index ties
+# Views keyed by the entry and its revision; a copy the index ties
 # to its entry after the call was viewed is not seen until the entry changes.
 _VIEWS: dict[tuple, dict] = {}
 
@@ -1296,7 +1296,7 @@ def refused_findings(log, case_dir: str | None) -> tuple[list[dict], list[dict]]
         # An abbreviation ("i.e.", "e.g.") has the inner-separator shape of a
         # name and names nothing.
         names = {n for n in names if not _ABBREVIATION_RE.fullmatch(n)}
-        # ponytail: the cover pools every later accepted finding, so names
+        # The cover pools every later accepted finding, so names
         # scattered over unrelated findings cover a refusal; the upgrade is to
         # count a finding toward the cover only when it shares two or more of
         # the refused names (pinned in tests/core/test_open_work_refused.py).

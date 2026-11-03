@@ -560,7 +560,7 @@ These reasons are stops. Their `finish_status` is the reason itself, or
 | `gate_deadlock` | `2` | Every recent tool call was refused |
 | `model_refusal` | `2` | The provider's safety classifiers declined three requests in a row |
 | `llm_deadline`, `llm_transport` | `2` | A model call ran past its deadline or stayed lost after the retries, where no wrap-up could follow |
-| `turn_cap`, `wall_clock` | `2` | An internal lab limit on turns or elapsed time ended the run; neither is set by default |
+| `turn_cap`, `wall_clock` | `2` | A turn or elapsed-time limit ended the run; none is set by default |
 | `loop_mode_refused` | `2` | A resume asked for the other `ATLAS_LOOP` mode than the trace was started in |
 
 A run process that ended without recording any of these is shown in the

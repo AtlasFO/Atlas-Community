@@ -550,7 +550,7 @@ def narrow_statement(text: str) -> str:
 # and a modal followed by a state or epistemic verb is not normative.
 # English and German grammar, not knowledge about any case. Used by the
 # conclusion door too; record_finding exempts nothing.
-# ponytail: suffix test for verbs; a reduced relative ("every account listed in")
+# Suffix test for verbs; a reduced relative ("every account listed in")
 # reads as finite, so that prescription gets the count remedy instead of the
 # routing one (still refused, never exempted); a tagger would lift the ceiling.
 

@@ -316,7 +316,7 @@ class RecordPace:
                 self.seen[cid] = self.turn
                 self.lines[cid] = _read_line(cid, e)
         from core.envfile import env_int
-        # ponytail: the loop's turn horizon; with message counts pinned
+        # The loop's turn horizon; with message counts pinned
         # (ATLAS_AGENT_KEEP_TOOL_RESULTS) it is approximate.
         horizon = max(1, env_int("ATLAS_AGENT_KEEP_TOOL_TURNS", 4))
         open_ = [c for c in sorted(self.seen) if c not in self.cited and self.turn - self.seen[c] < horizon]

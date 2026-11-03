@@ -370,7 +370,7 @@ def output_snapshot(case_dir: str | os.PathLike | None) -> dict[str, tuple[int, 
     """``{relative path: (size, mtime_ns)}`` of every file under the output
     tree, without the spills and the run's state files. One walk; the class
     of cost the coverage ledger's directory description already pays.
-    ponytail: a full stat walk per call; prune by directory mtime if a VM
+    A full stat walk per call; prune by directory mtime if a VM
     run shows the walk in the per-call latency."""
     root = _case_root(case_dir)
     out: dict[str, tuple[int, int]] = {}
@@ -595,7 +595,7 @@ def _rederived(record: dict[str, Any], real: str, root: str, by_call: dict[int, 
     leave stale (a resumed run, a replay). Re-derived only when the file is
     as its producer left it: no second writer marked (``rewritten_by``) and
     not changed after the producer's entry was written (a legacy ledger has
-    no mark). ponytail: a second writer within ~1 s of the first one's end
+    no mark). A second writer within ~1 s of the first one's end
     on a legacy ledger is missed; fresh records carry the mark."""
     producer = by_call.get(record.get("call")) if isinstance(record.get("call"), int) else None
     if not producer or depth >= 8 or record.get("rewritten_by") is not None:

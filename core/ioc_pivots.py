@@ -487,7 +487,7 @@ def _without_lines(text: str, drop: frozenset | None) -> str:
 
 
 # The first and last lines of a retained output, by file version: what
-# own_text_lines compares across a tool's outputs. ponytail: a small dict
+# own_text_lines compares across a tool's outputs. A small dict
 # cleared when full, like _SEEN_MEMO.
 _LINES_CACHE: dict[tuple, tuple[list[str], list[str]]] = {}
 _EDGE_LINES = 64
@@ -529,7 +529,7 @@ def own_text_lines(entries, *, min_outputs: int = 3) -> dict:
     tool's name and links. A record line never sits there in every output
     of different inputs; a block that covers a whole output tells banner
     from data by nothing and is not taken. The request echo is not this
-    rule's business (core.indicators.rows_text takes it out). ponytail: a
+    rule's business (core.indicators.rows_text takes it out). A
     value only one tool ever prints, at a fixed place in each of its
     outputs, is taken as that tool's text; _seen_by_calls restores a value
     another tool's rows corroborate."""
@@ -595,7 +595,7 @@ def _lists_names(cmd: str) -> bool:
 # The scan's per-call extraction, by case and by a digest of its tool calls
 # (id, outcome, spill, excerpt length and head): the blocker, the knowledge
 # index and the report's Limitations read the same trace version several
-# times. ponytail: a small dict cleared when full.
+# times. A small dict cleared when full.
 _SEEN_MEMO: dict[tuple, dict[str, set]] = {}
 
 
@@ -1476,7 +1476,7 @@ def count_lines(case_dir: str | os.PathLike, counts: dict[str, dict], *, sources
     from core.forensic_citation import host_mentioned, known_case_hosts
     hosts = known_case_hosts(case_dir)
 
-    # ponytail: the host comes from the table's own path, so a merged
+    # The host comes from the table's own path, so a merged
     # timeline holding several hosts is credited to the one its path names
     # (or to the path itself); a per-row host column would split it.
     def host_of(src: str) -> str:

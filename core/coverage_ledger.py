@@ -881,7 +881,7 @@ def extracted_outputs(case_dir: str | os.PathLike | None,
     copy by its entry) and the files its parser reported processing; a
     folder it was pointed at is listed, no file of it read. Computed from
     the trace at each call; no stored status decides.
-    ponytail: the class is the file extension, so one read file clears a
+    The class is the file extension, so one read file clears a
     class of a hundred as a key (the counts still say 1 of 100); a class by
     name stem when that hides real gaps."""
     if not case_dir:
@@ -1035,7 +1035,7 @@ def images_read(case_dir: str | os.PathLike | None, entries: list[dict] | None =
 _UNTYPED = frozenset({"", "application/octet-stream", "inode/x-empty"})
 
 # libmagic once per (path, size, mtime) while the process lives: the same
-# files are typed on every recompute. ponytail: a flat dict cleared when it
+# files are typed on every recompute. A flat dict cleared when it
 # grows past the cap; an LRU if memory ever matters.
 _TYPE_CACHE: dict[tuple[str, int, int], str] = {}
 _TYPE_CACHE_CAP = 50_000
@@ -1155,7 +1155,7 @@ def _class_left(unit_dir: str, members: list[str], failed_by: dict[tuple[str, st
 # the evidence: it only names candidates, and each one is parsed and checked
 # to be what it claims (a small UTF-8 file, no DTD or entity declaration, the
 # format's own root element and namespace).
-# ponytail: OPC only; an OpenDocument package's manifest (META-INF/manifest.xml)
+# OPC only; an OpenDocument package's manifest (META-INF/manifest.xml)
 # is the same kind of declaration, add it when a run unpacks one.
 _OPC_TYPES_STREAM = "[Content_Types].xml"
 _OPC_TYPES_NS = "http://schemas.openxmlformats.org/package/2006/content-types"
@@ -1431,7 +1431,7 @@ def extracted_lines(outputs: list[dict[str, Any]], *, only_open: bool = False, n
 
 # ── task answered requires a relevant HV disposition ─────────────────────
 
-# ponytail: an English phrase list decides how broad a question is; the
+# An English phrase list decides how broad a question is; the
 # upgrade is a scope the model declares on the task.
 _CATCH_ALL_TASK_RE = re.compile(
     r"(?i)\b(?:"

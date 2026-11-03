@@ -148,8 +148,7 @@ newsgroup, and is refreshed from that source.
 
 ── Published shared infrastructure (edge ranges and vendor service names) ──
 
-share/.common/shared_infrastructure.json is built by
-devtools/build_shared_infrastructure.py from published sources, recorded
+share/.common/shared_infrastructure.json is built from published sources, recorded
 per source in the file with its URL, fetch time, licence note and entry
 count: the address ranges Cloudflare, Fastly, Amazon CloudFront, GitHub,
 Google and Microsoft 365 publish for their edges and front ends (factual

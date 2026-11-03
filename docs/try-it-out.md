@@ -39,7 +39,7 @@ cd ~/Atlas
 - Download the EZ Tools into `/opt/zimmermantools` (skipped if already present) and normalize their permissions so every analyst on a shared box can read them
 - Create a venv under `Atlas/.venv` (symlinked as `~/.venv`) and install Python dependencies
 - Install the dashboard launcher (`atlas-dashboard` → `/usr/local/bin`)
-- Install MITRE tables into `~/cases/.common/`; leave bundled studies in `demo-cases/` / `benchmarks/`
+- Install MITRE tables into `~/cases/.common/`; leave bundled studies in `demo-cases/`
 - Smoke-check `hub/playbook` assembly for `bin/atlas`
 - Run a quick post-install check (seconds); the full test suite runs only with `--with-full-tests`
 

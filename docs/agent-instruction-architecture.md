@@ -11,7 +11,7 @@ hub/
   ENTRY.md                  # thin entry (role, priorities, index)
   playbook/
     MANIFEST                # ordered module list
-    01_….md … 17_….md       # modular instructions
+    01_….md … 15_….md       # modular instructions
   playbook.assembled.md     # optional debug artifact (gitignored)
 ```
 

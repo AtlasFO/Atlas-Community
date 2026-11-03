@@ -190,7 +190,7 @@ def write_exit_report(case_dir: str | os.PathLike, reason: str, *,
 
 # What a projected report shows beside the findings: the claims and the
 # questions' answers and limitations, which a task update records.
-# ponytail: by command prefix, so a claim tool that only reads (a listing)
+# By command prefix, so a claim tool that only reads (a listing)
 # counts too; that refresh re-renders and regenerates only stale sections.
 _REPORTED_CALLS = ("<py>:claim_", "<py>:misc_update_investigation_task",
                    "<py>:misc_supersede_investigation_task")

@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Any, Iterable, NamedTuple, Optional
 
 # A folder expansion stops here and says how far it got.
-# ponytail: a fixed bound per expansion; a streaming credit per call lifts it.
+# A fixed bound per expansion; a streaming credit per call lifts it.
 FOLDER_BOUND = 5000
 
 Identity = tuple[str, Any]

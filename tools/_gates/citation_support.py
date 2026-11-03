@@ -387,7 +387,7 @@ def call_view(entry: dict) -> tuple[list[str], dict[int, tuple[str, frozenset[in
     """The printed rows of a call and, for the rows of a table whose column
     header names an event-id field, where that field is (_event_id_columns),
     cached per call for the process (a whole-trace
-    locate reads every call once). ponytail: the cache is bounded by total
+    locate reads every call once). The cache is bounded by total
     characters (ATLAS_CITATION_ROW_CACHE_CHARS); an inverted entity index
     replaces it when traces reach thousands of calls."""
     from core.envfile import env_int
@@ -511,7 +511,7 @@ def _read_paths(entry: dict, case_dir=None) -> tuple[frozenset[str], frozenset[s
     (host affinity, lower-cased), both from core.provenance.call_provenance.
     Memoized per case and call id: what a recorded call read does not change,
     and a whole-trace locate asks for every call once per finding.
-    ponytail: unbounded per process, one small entry per call; bound it if a
+    Unbounded per process, one small entry per call; bound it if a
     process serves many large cases."""
     cid = entry.get("call_id")
     where = str(case_dir or _active_trace_dir())
@@ -596,7 +596,7 @@ def locate(statement: str, entries: list[dict], hosts=(), *, exclude=(), claim_h
 # (the MD5, SHA-1 and SHA-256 lengths) and one or more file names (a
 # basename with a public file extension, core.entities.FILE_EXTENSIONS) says
 # those files have that hash. Lexical shapes only, no knowledge of a case.
-# ponytail: a name set off from its hash by that punctuation outside these
+# A name set off from its hash by that punctuation outside these
 # two parenthetical forms, an abbreviated hash, or a clause with two hashes
 # forms no pair, and the check is silent there.
 _PAIR_SPLIT_RE = re.compile(r";|\s\(|\)(?=\s|$|[.,;:](?:\s|$))|,\s|\.\s|\s[-\u2013\u2014]\s|[\u2013\u2014]")
@@ -1058,7 +1058,7 @@ def _display_row(row: Any) -> str:
 
 # How much of a long row the windows around the finding's words may add up
 # to: the head and the value windows always show, word windows only while
-# the row stays under this. ponytail: one bound for every row; a budget
+# the row stays under this. One bound for every row; a budget
 # from the room if the rows crowd it out.
 _ROW_BOUND = 600
 

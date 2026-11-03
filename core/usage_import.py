@@ -238,7 +238,7 @@ def import_history(cases_root: str,
     """Add every finished run under ``cases_root`` the ledger does not know.
     Returns how many runs and calls were added; a ledger that cannot be read
     or written stops the pass and is reported, never raised."""
-    # ponytail: every pass walks the whole cases root (a glob per case and a
+    # Every pass walks the whole cases root (a glob per case and a
     # set lookup per transcript; only unknown runs are parsed). Skip cases
     # by folder mtime once a root holds more than a few hundred cases.
     from core.paths import detect_case_id

@@ -40,7 +40,7 @@ _VMDK_EXTENT_RE = re.compile(r"^(.+)-(?:flat|s\d{3}|f\d{3})\.vmdk$", re.I)
 # into a read (was_read reads an item without either as read).
 _STATE_KEYS = ("status", "touched", "calls", "examined_by", "examined_at", "blocked_reason",
                "read_by", "listed_by")
-# ponytail: a run naming more distinct paths under one item than this
+# A run naming more distinct paths under one item than this
 # undercounts it; a set per item would lift it at the cost of ledger size.
 MAX_TOUCHED = 2000
 MAX_CALLS = 200

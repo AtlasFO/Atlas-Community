@@ -49,8 +49,6 @@ module that owns the concern — do not grow this entry file into another monoli
 | [`13_execution_trace.md`](playbook/13_execution_trace.md) | Trace, lineage, findings capture |
 | [`14_directive_binding.md`](playbook/14_directive_binding.md) | DAIR/reason directive binding |
 | [`15_second_brain.md`](playbook/15_second_brain.md) | Pointer to `brain/AGENTS.md` |
-| [`16_architecture.md`](playbook/16_architecture.md) | Prompt vs code |
-| [`17_coding_guidelines.md`](playbook/17_coding_guidelines.md) | When editing Atlas source |
 
 Instruction architecture: [`docs/agent-instruction-architecture.md`](../docs/agent-instruction-architecture.md).
 

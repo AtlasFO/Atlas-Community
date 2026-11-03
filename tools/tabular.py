@@ -2554,7 +2554,7 @@ def _count_native(path: str, plan: list[tuple[str, str, list[str]]]) -> list[dic
     (no grep, an encoding or a layout it cannot read): the caller counts
     with the row loop.
 
-    ponytail: counted by line, as the streamed count path is; a matching
+    Counted by line, as the streamed count path is; a matching
     line that continues a cell holding a line break counts as a row without
     a time."""
     import tempfile

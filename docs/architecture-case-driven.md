@@ -316,15 +316,10 @@ trimming alone (see `core/investigation_orchestrator.py`):
 
 ## Dashboard
 
-Per-case **Investigation Board** (URL
-`/_dashboard/investigation_board.html` — `_dashboard` is a route prefix, not
-a folder under the case):
-
-- Task statuses and counts
-- Current investigation plan steps
-- Live poll while an agent transcript is recently active
-
-State is always scoped to the selected case directory.
+The **Questions** page shows the case's questions with their status, the
+answers, and the claims and evidence behind them; the older
+`investigation_board.html` address opens it. State is always scoped to the
+selected case directory.
 
 ---
 

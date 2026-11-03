@@ -792,7 +792,7 @@ def _attribute_hosts(calls: list[dict[str, Any]], hosts: list[str],
     extraction from one host's image into exports/, then a parse of the
     copy). None: a call that says nothing of its host reads every host's.
 
-    ponytail: a host's short form that is a word (CORP-DATA as "data")
+    A host's short form that is a word (CORP-DATA as "data")
     attributes a call that uses the word to that host; the blocker's full
     labels are what a run copies."""
     # Absolute spellings only: a relative one (".") would cut every dot.
@@ -1212,7 +1212,7 @@ def _unregistered_copy(item: dict[str, Any], text: str) -> bool:
     """A file on a mounted volume (no index entry) extracted by a call that
     registers no copy (icat <image> <inode> analysis/SYSTEM) and read there:
     nothing ties that copy to its source but its name.
-    ponytail: the copy's name credits the file of that name on the hosts the
+    The copy's name credits the file of that name on the hosts the
     call names; registered copies (the index's) never need this."""
     return item.get("index_id") is None and bool(item.get("path")) and item.get("kind") != "directory" \
         and _extracted(str(item.get("name") or "").lower()).search(text) is not None
@@ -1477,7 +1477,7 @@ def _examined_in_trace(item: dict[str, Any], blob: str) -> bool:
                else r"[/\\]?(?=$|[\s\"',;)\]])")
         if comps and re.search(r"(?:^|[\s\"'=/\\])" + r"[/\\]+".join(comps) + end, blob):
             return True
-        # ponytail: an unmounted image is read by extracting the file (icat
+        # An unmounted image is read by extracting the file (icat
         # <image> <inode> exports/NTUSER.DAT) and parsing the copy, and no
         # call names the in-image path; the copy's name credits every row of
         # that name on the hosts the call names, or on every host when it

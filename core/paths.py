@@ -1080,7 +1080,7 @@ def missing_module_result(tool: str, program: str, result: dict, install_hint: s
     """
     if result.get("success"):
         return None
-    # ponytail: the executor keeps the first 4096 chars of stderr, so a
+    # The executor keeps the first 4096 chars of stderr, so a
     # traceback longer than that loses its last line and passes through raw.
     lines = [ln.strip() for ln in str(result.get("stderr") or "").splitlines() if ln.strip()]
     found = _DIED_ON_IMPORT_RE.fullmatch(lines[-1]) if lines else None

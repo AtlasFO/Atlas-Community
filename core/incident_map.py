@@ -1399,7 +1399,7 @@ class IncidentMap:
                 out.append(f"{int(call_id)}#L{n}")
         return list(dict.fromkeys(out))
 
-    # ponytail: the newest 100 calls, 128 KB each, for a refusal's wording only;
+    # The newest 100 calls, 128 KB each, for a refusal's wording only;
     # an index of saved outputs if a run needs the whole trace searched.
     _HOLDING_CALLS = 100
     _HOLDING_CHARS = 128_000

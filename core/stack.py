@@ -223,7 +223,7 @@ def _native_table(path: str, headers: list[str], keycols: list[str], timecols: l
     an encoding or a layout it does not read): the caller decides how else
     to count. Raises TooManyValues past MAX_STACK_KEYS.
 
-    ponytail: counted by line; a quoted cell holding a line break splits
+    Counted by line; a quoted cell holding a line break splits
     its row, which then counts under a broken key."""
     from core.input_kind import open_text, text_encoding
     from tools.tabular import _GREP_ENCODINGS, _csv_dialect, _kind

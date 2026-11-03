@@ -124,7 +124,7 @@ def test_a_process_refusal_is_no_open_work(log, gate):
 
 
 def test_known_ceiling_names_scattered_over_unrelated_findings_cover_a_refusal(log):
-    """Pinned ceiling (the ponytail note in refused_findings): the cover pools
+    """Pinned ceiling (the note in refused_findings): the cover pools
     every later finding, so two findings that each state some of the names
     cover the refusal together."""
     _refuse(log, desc="README_RESTORE.txt on CORP-WS01 names 203.0.113.7. " + OBJECTED, objected=(OBJECTED,))

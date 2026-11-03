@@ -637,7 +637,7 @@ def _says_more(rest: dict, request: frozenset[str]) -> bool:
 # A sentence by lexical shape: four or more plain words (letters only, a
 # closing punctuation mark allowed). A hash, a path, an id, a number, a
 # command line or a short label has fewer; a lexical shape, not analysis.
-# ponytail: a sentence carrying digits or a path in most of its words
+# A sentence carrying digits or a path in most of its words
 # ("scanned 12 files in C:/x") reads as no prose and stays a field.
 _PLAIN_WORD_RE = re.compile(r"(?:^|(?<=\s))[^\W\d_]+[.,;:!?)]?(?=\s|$)")
 
@@ -967,7 +967,7 @@ def rows_text(entry: dict, *, text: str | None = None, windowed: bool = False,
     row a line, the request and a result set's header left out. ``text``
     with ``windowed`` reads that piece of the output as it stands (an
     excerpt); without ``text`` the output is read (the spill up to
-    ``limit``), remembered per spill version. ponytail: the memo is bounded
+    ``limit``), remembered per spill version. The memo is bounded
     by total characters and cleared whole when full."""
     import json
     key = None
@@ -1592,7 +1592,7 @@ def _near_digest(value: str, texts: list[str]) -> tuple[str, int] | None:
     two addresses or names often are. None for no candidate or several.
     A candidate is a regex-checked run of hex digits, so naming it in a
     reason the model reads carries no text from the evidence beyond it.
-    ponytail: only the outputs as read for presence (the spill read up to
+    Only the outputs as read for presence (the spill read up to
     SPILL_READ_CHARS); a digest further into a spill is not suggested."""
     v = value.lower()
     if not re.fullmatch(r"[0-9a-f]{30,66}", v):

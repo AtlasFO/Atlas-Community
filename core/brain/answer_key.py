@@ -83,7 +83,7 @@ _UNSEARCHED_DIRS = frozenset({"evidence", "mnt", "exports"})
 # the case, level by level: an operator's or a grader's copy sits near the
 # top, parser and extraction output (thousands of files) lies deeper, and a
 # large folder never delays a shallow sibling.
-# ponytail: a copy deeper than _KEY_SEARCH_DEPTH levels, or in a folder the
+# A copy deeper than _KEY_SEARCH_DEPTH levels, or in a folder the
 # remaining entry budget cannot list (that folder is skipped, its siblings are
 # still searched; the deepest levels run out first), stays unstashed and
 # unregistered (still refused by its name); a name index of the output trees

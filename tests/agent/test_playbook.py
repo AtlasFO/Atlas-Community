@@ -10,7 +10,7 @@ def test_manifest_complete():
     assert names[0].startswith("01_")
     assert "08_reporting.md" in names
     assert "11_gates_reference.md" in names
-    assert names[-1].startswith("17_")
+    assert names[-1].startswith("15_")
     assert len(load_modules()) == len(names)
 
 
@@ -25,8 +25,6 @@ def test_assemble_contains_core_contracts():
     assert "DAIR Phase Director" in text
     assert "mcp_routing" in text
     assert "input_call_ids" in text
-    # New architecture note present
-    assert "Prompt vs code" in text or "prompt vs code" in text.lower()
 
 
 def test_build_system_prompt_uses_assembly():
