@@ -399,8 +399,7 @@ values seen on a host before the attacker's stated arrival there, proposes the
 hosts an attacker value reaches (by name, hash, account or endpoint; a host
 with no attacker event gets a due read) and keeps the incident window from
 stated arrivals and inbound edges. It feeds the model and the report; it has no
-tab of its own. `devtools/rebuild_incident_map.py` rebuilds the map of a
-finished run.
+tab of its own.
 
 `ATLAS_LOOP` chooses how a run works the order. The default, `conversation`, is
 one long conversation. `ATLAS_LOOP=frontier` runs the order as a queue of short

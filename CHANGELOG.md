@@ -1,21 +1,8 @@
 # Changelog
 
-All notable, user-visible changes to Atlas. Newest first.
-
-## How to add an entry
-
-Add one line under **Unreleased** for every change a user of Atlas will
-notice: a different report, a run that behaves differently, a new or removed
-tool, a new setting. Describe the effect, not the implementation. Internal
-refactors, test-only changes and documentation need no entry. The pre-commit
-hook reminds you when a commit changes code without touching this file.
-
-## Versions
-
-Every push raises the version (`ATLAS_VERSION` in `core/plugins.py`): the
-third number for fixes and small improvements (1.0.1), the second for bigger
-changes (1.1.0), the first for a major release. The update's commit
-moves the Unreleased lines under a heading for the new version.
+What changed in Atlas, release by release, newest first. Each entry says
+what you will notice: a different report, a run that behaves differently,
+a new or removed tool, a new setting.
 
 ## Unreleased
 

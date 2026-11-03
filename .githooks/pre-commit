@@ -39,7 +39,6 @@ if [ "${ATLAS_SKIP_CHANGELOG_CHECK:-0}" != "1" ]; then
                 echo "  Changed outside the exempt paths, e.g.:"
                 printf '%s\n' "$_cl_code" | head -5 | sed 's/^/    /'
                 echo "  Add one line under Unreleased saying what a USER will notice."
-                echo "  See the 'How to add an entry' section at the top of CHANGELOG.md."
                 echo "  Not applicable? ATLAS_SKIP_CHANGELOG_CHECK=1 git commit ..."
             } >&2
         fi

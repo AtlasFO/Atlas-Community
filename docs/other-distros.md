@@ -10,11 +10,6 @@ Getting Atlas running here is a manual, DIY effort. This page is a starting
 point to save you the initial research, not a guarantee that any of it is
 current or complete — verify everything against your actual system.
 
-If you get a working RHEL/Fedora path together, a PR extending `install.sh`
-with a real `dnf`/`yum` branch (mirroring the existing apt logic) would be
-genuinely useful — this page exists partly so that work has somewhere to
-start from.
-
 ## What doesn't need a distro-specific path at all
 
 These are already the same regardless of OS, since they never go through
